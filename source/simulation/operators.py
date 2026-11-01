@@ -366,7 +366,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
 
 class XXMI_OT_reset_physics_params(bpy.types.Operator):
     bl_idname = "object.xxmi_reset_physics_params"
-    bl_label = "파라미터 기본값으로 초기화"
+    bl_label = "기본값으로 초기화"
     bl_description = "가슴 물리 및 관성 파라미터(강도, 속도, 감쇠, 관성, 호흡 모션)를 권장 기본값으로 되돌립니다"
     bl_options = {'REGISTER', 'UNDO'}
 

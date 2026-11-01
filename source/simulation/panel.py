@@ -22,10 +22,10 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
             layout,
             (
                 "[2단계: 가슴 물리 파라미터 조절 & 뷰포트 프리뷰]\n\n"
-                "• 흔들림 강도(진폭), 탄력 속도(주파수), 탄성 감쇠, 이동/모션 관성, 호흡 미동 강도를 설정합니다.\n"
+                "• 흔들림 강도, 탄력 속도, 탄성 감쇠, 모션 관성, 호흡 미동 강도를 설정합니다.\n"
                 "• 인게임 캐릭터 자체 모션에 반응하는 실시간 ODE 스프링 탄성 모핑을 제어합니다.\n"
-                "• [뷰포트 실시간 바운스 프리뷰]를 누르면 Space바 재생 없이도\n"
-                "  뷰포트 상에서 즉시 가슴이 통통 튀며 모핑되는 물리 움직임을 실시간으로 확인할 수 있습니다.\n"
+                "• [뷰포트 실시간 바운스 프리뷰]를 누르면 뷰포트 상에서 즉시 가슴이 통통 튀며\n"
+                "  모핑되는 물리 움직임을 실시간으로 확인할 수 있습니다.\n"
                 "• 슬라이더를 실시간으로 조절하면서 원하는 탄력감을 맞춰보세요."
             ),
         )
@@ -42,7 +42,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
         p_col.prop(props, "inertia")
         p_col.prop(props, "idle_motion")
         p_col.separator()
-        p_col.operator("object.xxmi_reset_physics_params", text="파라미터 기본값으로 초기화", icon='LOOP_BACK')
+        p_col.operator("object.xxmi_reset_physics_params", text="기본값으로 초기화", icon='LOOP_BACK')
 
         layout.separator()
 

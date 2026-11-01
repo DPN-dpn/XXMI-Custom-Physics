@@ -44,8 +44,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
-        name="흔들림 강도 (진폭)",
-        description="가슴 물리 바운스의 전체 진폭(크기) 배율입니다 (0.0이면 정지, 1.0이 기본)",
+        name="흔들림 강도",
+        description="가슴 물리 바운스의 전체 진폭 배율입니다 (0.0이면 정지, 1.0이 기본)",
         default=1.0,
         min=0.0,
         max=3.0,
@@ -54,8 +54,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     speed: bpy.props.FloatProperty(
-        name="탄력 속도 (주파수)",
-        description="가슴이 통통 튀는 복원 탄력 속도(고유 진동 주파수)입니다",
+        name="탄력 속도",
+        description="가슴이 통통 튀는 복원 탄력 속도입니다",
         default=1.1,
         min=0.2,
         max=3.0,
@@ -74,8 +74,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     inertia: bpy.props.FloatProperty(
-        name="이동/모션 관성 반응",
-        description="캐릭터 이동, 점프, 대시, 공격 및 정지 시 몸통 가속도에 가슴이 반응하는 관성 강도입니다",
+        name="모션 관성 반응",
+        description="캐릭터 애니메이션 가속도에 가슴이 반응하는 관성 강도입니다",
         default=1.2,
         min=0.0,
         max=3.0,

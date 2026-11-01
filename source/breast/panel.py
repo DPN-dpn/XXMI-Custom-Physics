@@ -46,7 +46,7 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         b_col.separator()
         b_col.operator(
             "object.xxmi_select_breast_vertices",
-            text="적용된 가슴 정점 재선택 (오브젝트 동시 선택)",
+            text="적용된 가슴 정점 재선택",
             icon='RESTRICT_SELECT_OFF'
         )
         b_col.separator()
