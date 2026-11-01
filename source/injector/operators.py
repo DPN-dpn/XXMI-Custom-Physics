@@ -181,9 +181,10 @@ def _read_buf_positions(buf_path):
     return positions
 
 
-def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj):
+def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj, kd_buf=None, sample_obj=None):
     """
     모드 익스포트 좌표계와 블렌더 메쉬 좌표계 간 최적 변환 행렬을 추정합니다.
+    단일 통합 메쉬뿐만 아니라 하나의 .buf로 병합 익스포트된 서브 메쉬(예: 분리된 파츠/악세서리)도 정확히 매칭합니다.
     """
     mw = obj.matrix_world
     rot_x_neg90 = Matrix.Rotation(math.radians(-90), 4, 'X')
@@ -224,6 +225,18 @@ def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj):
         dists.sort()
         p80_idx = max(0, int(len(dists) * 0.8) - 1)
         score = dists[p80_idx]
+
+        # 서브 메쉬(오브젝트가 버퍼의 일부 파츠인 경우) 역방향 일치도 검사
+        if score > 1e-3 and kd_buf is not None and sample_obj:
+            rev_dists = []
+            for op in sample_obj:
+                buf_p = mat @ op
+                _, _, r_dist = kd_buf.find(buf_p)
+                rev_dists.append(r_dist)
+            rev_dists.sort()
+            rev_p80_idx = max(0, int(len(rev_dists) * 0.8) - 1)
+            score = min(score, rev_dists[rev_p80_idx])
+
         if score < best_score:
             best_score = score
             best_mat = mat
@@ -668,9 +681,16 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 kd.insert(v.co, i)
             kd.balance()
 
+            obj_sample_size = min(300, n_verts)
+            sample_obj = [
+                mesh.vertices[int(k * (n_verts - 1) / max(1, obj_sample_size - 1))].co.copy()
+                for k in range(obj_sample_size)
+            ] if n_verts > 0 else []
+
             mesh_caches.append({
                 "obj": obj,
                 "kd": kd,
+                "sample_obj": sample_obj,
                 "w_l": w_l,
                 "w_r": w_r,
                 "is_rigid": is_rigid,
@@ -718,28 +738,31 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 sample_size = min(300, len(buf_positions))
                 sample_buf = [buf_positions[int(k * (len(buf_positions) - 1) / (sample_size - 1))] for k in range(sample_size)]
 
-                best_match = None
+                kd_buf = KDTree(len(buf_positions))
+                for bp_i, bp_co in enumerate(buf_positions):
+                    kd_buf.insert(bp_co, bp_i)
+                kd_buf.balance()
+
+                valid_matches = []
                 best_overall_score = 999.0
 
                 for mcache in mesh_caches:
                     cand_obj = mcache["obj"]
-                    b_mat, b_score = _find_best_transform_for_buffer(sample_buf, mcache["kd"], cand_obj)
-                    if b_score < best_overall_score:
-                        best_overall_score = b_score
-                        best_match = (mcache, b_mat, b_score)
+                    b_mat, b_score = _find_best_transform_for_buffer(
+                        sample_buf, mcache["kd"], cand_obj, kd_buf=kd_buf, sample_obj=mcache["sample_obj"]
+                    )
+                    if b_mat is not None and b_score <= 0.05:
+                        valid_matches.append((mcache, b_mat.inverted(), b_score))
+                        if b_score < best_overall_score:
+                            best_overall_score = b_score
 
-                if not best_match or best_overall_score > 0.05:
+                if not valid_matches or best_overall_score > 0.05:
                     continue
 
-                mcache, best_mat, best_score = best_match
-                matched_obj = mcache["obj"]
-                kd = mcache["kd"]
-                w_l = mcache["w_l"]
-                w_r = mcache["w_r"]
-                is_rigid = mcache["is_rigid"]
-                matched_obj_names.add(matched_obj.name)
-
-                inv_mat = best_mat.inverted()
+                # 가장 일치도가 높은 메쉬를 우선하되, 동일 버퍼로 병합된 서브 메쉬들도 함께 매핑
+                valid_matches.sort(key=lambda x: x[2])
+                for mcache, _, _ in valid_matches:
+                    matched_obj_names.add(mcache["obj"].name)
 
                 # 버퍼 정점별 가중치 매핑: stride 16 (float4: wl, wr, is_rigid, 0.0)
                 map_bytes = bytearray()
@@ -749,17 +772,25 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 peak_r_idx = 0
 
                 for bp_idx, bp in enumerate(buf_positions):
-                    local_p = inv_mat @ bp
-                    _, v_idx, dist = kd.find(local_p)
+                    best_dist = 999.0
+                    vl = 0.0
+                    vr = 0.0
+                    vrigid = 0.0
 
-                    if dist > 0.05:
-                        vl = 0.0
-                        vr = 0.0
-                        vrigid = 0.0
-                    else:
-                        vl = w_l[v_idx]
-                        vr = w_r[v_idx]
-                        vrigid = is_rigid[v_idx]
+                    for m_i, (mcache, inv_mat, _) in enumerate(valid_matches):
+                        local_p = inv_mat @ bp
+                        _, v_idx, dist = mcache["kd"].find(local_p)
+                        max_tol = 0.02 if m_i == 0 else 0.002
+                        if dist <= max_tol:
+                            cand_wl = mcache["w_l"][v_idx]
+                            cand_wr = mcache["w_r"][v_idx]
+                            cand_rig = mcache["is_rigid"][v_idx]
+                            # 더 가까운 정점 선택 (동일 좌표 공유 시 가중치가 있는 쪽 우선)
+                            if dist < best_dist - 1e-4 or (abs(dist - best_dist) <= 1e-4 and (cand_wl + cand_wr) > (vl + vr)):
+                                best_dist = dist
+                                vl = cand_wl
+                                vr = cand_wr
+                                vrigid = cand_rig
 
                     if vl > max_wl:
                         max_wl = vl
@@ -802,9 +833,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     # 2. 순수 몸통 애니메이션 가속도 추적 ODE 물리 쉐이더 (.hlsl)
                     _export_physics_motion_hlsl(custom_physics_dir, idx, best_root_idx, props)
                     # 3. 계산된 변위를 정점에 적용하는 스키닝 쉐이더 (.hlsl)
-                    buf_peak = max(max_wl, max_wr)
-                    eff_peak = buf_peak if (buf_peak > 0.05 and buf_peak < 0.45 and global_peak_weight > 0.8) else global_peak_weight
-                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, eff_peak)
+                    # 다중 오브젝트(Body 케이스 + Hair 악세서리 등)가 동일한 가중치에서 100% 동일한 변위를 갖도록 global_peak_weight로 통일
+                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, global_peak_weight)
                     total_injected_buffers += 1
 
                 matched_in_ini.append((idx, res_name, raw_fname, len(buf_positions), has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
