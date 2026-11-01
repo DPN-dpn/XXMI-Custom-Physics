@@ -248,21 +248,18 @@ def _export_physics_state_buf(export_dir, idx):
 
 
 def _export_physics_motion_hlsl(export_dir, idx, root_vert_idx, props):
-    strength = float(getattr(props, "strength", 1.0))
-    speed = float(getattr(props, "speed", 1.1))
-    damping = float(getattr(props, "damping", 0.85))
-    inertia = float(getattr(props, "inertia", 1.2))
-    idle_motion = float(getattr(props, "idle_motion", 0.8))
-    use_debug = bool(getattr(props, "debug_mode", False))
-    debug_boost = float(getattr(props, "debug_boost", 1.0)) if use_debug else 1.0
+    speed = max(0.2, float(getattr(props, "speed", 1.1)))
+    damping = max(0.1, float(getattr(props, "damping", 0.85)))
+    inertia = max(0.0, float(getattr(props, "inertia", 1.2)))
+    idle_motion = max(0.0, float(getattr(props, "idle_motion", 0.4)))
 
     omega_0 = 12.0 * speed
     stiff_k = omega_0 * omega_0
-    damp_c = 2.0 * omega_0 * damping
-    amp_scale = strength * debug_boost
+    # 감쇠비(zeta)를 damping * 0.35로 스케일링하여 기본값(0.85 -> zeta~0.30)에서 자연스러운 2~3회 탄성 여운 보장
+    damp_c = 2.0 * omega_0 * (damping * 0.35)
 
     hlsl_code = f"""// ============================================================================
-// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics)
+// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free Substep ODE)
 // ============================================================================
 struct Vertex {{
     float3 position;
@@ -280,7 +277,6 @@ static const uint ROOT_VERTEX_IDX = {root_vert_idx};
 static const float STIFF_K = {stiff_k:.4f};
 static const float DAMP_C = {damp_c:.4f};
 static const float INERTIA_SCALE = {inertia:.4f};
-static const float STRENGTH_SCALE = {amp_scale:.4f};
 static const float IDLE_SCALE = {idle_motion:.4f};
 
 [numthreads(1, 1, 1)]
@@ -305,7 +301,7 @@ void main() {{
 
     if (length(curr_root) < 1e-4) {{
         float breath_t = time * 2.5;
-        float3 fb_disp = float3(0, sin(breath_t) * 0.025, cos(breath_t) * 0.015) * (IDLE_SCALE * STRENGTH_SCALE);
+        float3 fb_disp = float3(0, sin(breath_t) * 0.015, cos(breath_t) * 0.010) * IDLE_SCALE;
         PhysState[0] = float4(fb_disp, 0.5);
         PhysState[1] = float4(fb_disp, 0.5);
         return;
@@ -321,48 +317,54 @@ void main() {{
         init_flag = 1.0;
     }} else {{
         float raw_dt = time - prev_time;
-        if (abs(raw_dt) > 0.0005) {{
-            float dt = clamp(raw_dt, 0.002, 0.04);
+        // 동일 프레임 내 중복 드로우콜 실행 시 상태를 건드리지 않고 즉시 종료
+        if (abs(raw_dt) <= 0.0005) {{
+            return;
+        }}
 
-            float3 delta = curr_root - prev_root;
+        float dt = clamp(raw_dt, 0.002, 0.04);
+        float3 delta = curr_root - prev_root;
 
-            if (length(delta) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
-                delta = float3(0, 0, 0);
-                spring_vel_l = float3(0, 0, 0);
-                spring_vel_r = float3(0, 0, 0);
-            }}
+        if (length(delta) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
+            delta = float3(0, 0, 0);
+            spring_vel_l *= 0.2;
+            spring_vel_r *= 0.2;
+        }}
 
-            float3 anim_vel = delta / dt;
-            float3 ext_force = -anim_vel * (16.0 * INERTIA_SCALE);
+        float3 anim_vel = delta / dt;
+        float3 ext_force = -anim_vel * (16.0 * INERTIA_SCALE);
 
-            if (IDLE_SCALE > 0.001) {{
-                float breath_t = time * 2.5;
-                float3 idle_f = float3(0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE;
-                ext_force += idle_f;
-            }}
+        if (IDLE_SCALE > 0.001) {{
+            float breath_t = time * 2.5;
+            float3 idle_f = float3(0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE;
+            ext_force += idle_f;
+        }}
 
-            float3 ext_force_l = ext_force;
-            float3 ext_force_r = float3(-ext_force.x * 0.9, ext_force.y, ext_force.z);
+        // 좌우 가슴이 이동 관성은 함께 받되 전후/상하 충격 시 미세한 대칭 모아짐/벌어짐 부여
+        float3 ext_force_l = float3(ext_force.x + ext_force.y * 0.12, ext_force.y, ext_force.z);
+        float3 ext_force_r = float3(ext_force.x - ext_force.y * 0.12, ext_force.y, ext_force.z);
 
+        // 4-Substep Symplectic Euler 적분 (고주파/저프레임 환경에서도 무조건 수렴 보장)
+        float sub_dt = dt * 0.25;
+        [unroll]
+        for (int step = 0; step < 4; step++) {{
             float3 accel_l = ext_force_l - STIFF_K * prev_disp_l - DAMP_C * spring_vel_l;
             float3 accel_r = ext_force_r - STIFF_K * prev_disp_r - DAMP_C * spring_vel_r;
 
-            spring_vel_l = clamp(spring_vel_l + accel_l * dt, -4.0, 4.0);
-            spring_vel_r = clamp(spring_vel_r + accel_r * dt, -4.0, 4.0);
+            spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -4.0, 4.0);
+            spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -4.0, 4.0);
 
-            prev_disp_l = clamp(prev_disp_l + spring_vel_l * dt, -0.045, 0.045);
-            prev_disp_r = clamp(prev_disp_r + spring_vel_r * dt, -0.045, 0.045);
-
-            prev_root = curr_root;
-            prev_time = time;
+            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.045, 0.045);
+            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.045, 0.045);
         }}
+
+        prev_root = curr_root;
+        prev_time = time;
     }}
 
-    float3 disp_l = prev_disp_l * STRENGTH_SCALE;
-    float3 disp_r = prev_disp_r * STRENGTH_SCALE;
-
-    PhysState[0] = float4(disp_l, length(spring_vel_l));
-    PhysState[1] = float4(disp_r, length(spring_vel_r));
+    // 상태 버퍼에는 STRENGTH_SCALE이 곱해지지 않은 순수 물리 변위만 저장 (누적 발산/소멸 원천 차단)
+    PhysState[0] = float4(prev_disp_l, length(spring_vel_l));
+    PhysState[1] = float4(prev_disp_r, length(spring_vel_r));
     PhysState[2] = float4(spring_vel_l, prev_time);
     PhysState[3] = float4(spring_vel_r, init_flag);
     PhysState[4] = float4(prev_root, 0);
@@ -374,6 +376,7 @@ void main() {{
 
 
 def _export_vertex_physics_hlsl(export_dir, idx, vertex_count, props, peak_weight=1.0):
+    strength = max(0.0, float(getattr(props, "strength", 1.0)))
     norm_factor = (1.0 / peak_weight) if peak_weight > 0.05 else 1.0
 
     hlsl_code = f"""// ============================================================================
@@ -392,6 +395,7 @@ RWStructuredBuffer<Vertex> Output : register(u5);
 
 static const uint VERTEX_COUNT = {vertex_count};
 static const float NORM_FACTOR = {norm_factor:.4f};
+static const float STRENGTH_SCALE = {strength:.4f};
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -404,13 +408,13 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     float wr = bw.y;
     float total_w = wl + wr;
 
-    if (total_w > 0.0001) {{
+    if (total_w > 0.0001 && STRENGTH_SCALE > 0.0001) {{
         float3 disp_l = PhysState[0].xyz;
         float3 disp_r = PhysState[1].xyz;
 
-        float3 total_disp = (disp_l * wl + disp_r * wr) * NORM_FACTOR;
+        float3 total_disp = (disp_l * wl + disp_r * wr) * (NORM_FACTOR * STRENGTH_SCALE);
 
-        float max_disp = 0.050;
+        float max_disp = 0.050 * max(0.1, STRENGTH_SCALE);
         float d_len = length(total_disp);
         if (d_len > max_disp && d_len > 1e-5) {{
             total_disp = (total_disp / d_len) * max_disp;
@@ -418,8 +422,10 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
 
         v.position += total_disp;
 
-        // 노멀 및 탄젠트 보정
-        v.normal = normalize(v.normal + total_disp * 2.5);
+        // 노멀 보정 (강체 장신구는 원형 법선 유지)
+        if (bw.z < 0.5) {{
+            v.normal = normalize(v.normal + total_disp * 2.5);
+        }}
     }}
 
     Output[i] = v;
@@ -890,13 +896,12 @@ def _export_physics_config_json(export_dir, props, context):
         "speed": float(getattr(props, "speed", 1.1)),
         "damping": float(getattr(props, "damping", 0.85)),
         "inertia": float(getattr(props, "inertia", 1.2)),
-        "idle_motion": float(getattr(props, "idle_motion", 0.8)),
+        "idle_motion": float(getattr(props, "idle_motion", 0.4)),
         "falloff_power": float(getattr(props, "falloff_power", 1.6)),
         "auto_detect_rigid": bool(getattr(props, "auto_detect_rigid", True)),
         "rigid_max_verts": int(getattr(props, "rigid_max_verts", 120)),
         "debug_mode": bool(getattr(props, "debug_mode", False)),
         "debug_toggle_key": str(getattr(props, "debug_toggle_key", "h")),
-        "debug_boost": float(getattr(props, "debug_boost", 1.0)),
         "bones": bones_data,
     }
 
@@ -941,7 +946,6 @@ def _load_physics_from_mod(mod_folder, context, props):
             props.rigid_max_verts = int(cfg.get("rigid_max_verts", props.rigid_max_verts))
             props.debug_mode = bool(cfg.get("debug_mode", props.debug_mode))
             props.debug_toggle_key = str(cfg.get("debug_toggle_key", props.debug_toggle_key))
-            props.debug_boost = float(cfg.get("debug_boost", props.debug_boost))
             bones_data = cfg.get("bones", {})
             loaded_source = "XXMI_Physics_Config.json"
         except Exception as e:
@@ -969,7 +973,7 @@ def _load_physics_from_mod(mod_folder, context, props):
                             props.speed = round(omega_0 / 12.0, 2)
                             if m_c:
                                 c = float(m_c.group(1))
-                                props.damping = round(c / (2.0 * omega_0), 2)
+                                props.damping = round(c / (2.0 * omega_0 * 0.35), 2)
                         if m_i:
                             props.inertia = round(float(m_i.group(1)), 2)
                         if m_idle:

@@ -35,16 +35,16 @@ def _evaluate_breast_transform(t, side_sign, props, up_vec, right_vec, fwd_vec):
         s_y = math.sin(step_phase) * 0.6 * inertia
         s_x = math.cos(step_phase) * 0.4 * inertia * side_sign
     else:
-        # 정지 시 여운 감쇠 진동 (잔여 탄성)
+        # 정지 시 여운 감쇠 진동 (잔여 탄성 - 인게임 0.35 감쇠비 스케일과 동기화)
         dt_stop = cycle - 1.6
-        decay = math.exp(-dt_stop * 4.0 * damp)
+        decay = math.exp(-dt_stop * 2.5 * damp)
         s_z = math.sin(dt_stop * 14.0 * spd) * 0.9 * decay * inertia
         s_y = math.cos(dt_stop * 12.0 * spd) * 0.7 * decay * inertia
         s_x = math.sin(dt_stop * 10.0 * spd) * 0.4 * decay * inertia * side_sign
 
     # 미세 유휴 호흡 모션
-    s_y += math.sin(t * 2.5) * 0.15 * idle
-    s_z += math.sin(t * 2.5 + 0.5) * 0.10 * idle
+    s_y += math.sin(t * 2.5) * 0.20 * idle
+    s_z += math.sin(t * 2.5 + 0.5) * 0.14 * idle
 
     # 3차원 위치 변위 (인게임 스케일 2~3cm 선형 변위)
     trans = (
@@ -277,7 +277,7 @@ class XXMI_OT_reset_physics_params(bpy.types.Operator):
         props.speed = 1.1
         props.damping = 0.85
         props.inertia = 1.2
-        props.idle_motion = 0.8
+        props.idle_motion = 0.4
         props.falloff_power = 1.6
         self.report({'INFO'}, "가슴 물리 파라미터가 권장 기본값으로 초기화되었습니다.")
         return {'FINISHED'}

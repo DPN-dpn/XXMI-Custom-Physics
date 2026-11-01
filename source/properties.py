@@ -45,7 +45,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
         name="흔들림 강도 (진폭)",
-        description="가슴 물리 관절 회전 및 상/하/좌/우 바운스 전체 진폭 배율입니다",
+        description="가슴 물리 바운스의 전체 진폭(크기) 배율입니다 (0.0이면 정지, 1.0이 기본)",
         default=1.0,
         min=0.0,
         max=3.0,
@@ -55,7 +55,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     speed: bpy.props.FloatProperty(
         name="탄력 속도 (주파수)",
-        description="가슴이 통통 튀는 진동 속도(주파수)입니다",
+        description="가슴이 통통 튀는 복원 탄력 속도(고유 진동 주파수)입니다",
         default=1.1,
         min=0.2,
         max=3.0,
@@ -65,7 +65,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     damping: bpy.props.FloatProperty(
         name="탄성 감쇠",
-        description="흔들린 후 원래 자리로 돌아오는 감쇠율입니다 (낮을수록 오래 출렁거림)",
+        description="흔들린 후 원래 자리로 가라앉는 감쇠율입니다 (낮을수록 여운이 길고 출렁거림, 높을수록 단단히 빨리 멈춤)",
         default=0.85,
         min=0.1,
         max=2.5,
@@ -74,8 +74,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     inertia: bpy.props.FloatProperty(
-        name="이동/대시 관성 반응",
-        description="캐릭터 이동, 점프, 대시, 정지 시 가슴이 쏠렸다 복원되는 관성 강도입니다",
+        name="이동/모션 관성 반응",
+        description="캐릭터 이동, 점프, 대시, 공격 및 정지 시 몸통 가속도에 가슴이 반응하는 관성 강도입니다",
         default=1.2,
         min=0.0,
         max=3.0,
@@ -84,9 +84,9 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     idle_motion: bpy.props.FloatProperty(
-        name="정지 시 잔여 탄성",
-        description="이동 후 멈췄을 때 여운으로 출렁이다 복원되는 잔여 탄성 강도입니다 (자체 호흡 미동은 제외되고 순수 물리 관성만 적용됩니다)",
-        default=0.8,
+        name="호흡 미동 강도",
+        description="가만히 서 있을 때에도 미세하게 숨 쉬듯 움직이는 기본 호흡 미동 강도입니다 (0.0으로 설정 시 순수 이동 관성만 작동)",
+        default=0.4,
         min=0.0,
         max=2.0,
         step=5,
@@ -122,16 +122,6 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         name="토글 단축키",
         description="인게임에서 바스트모핑을 켜고(ON) 끌(OFF) 단축키입니다 (예: h)",
         default="h"
-    )
-
-    debug_boost: bpy.props.FloatProperty(
-        name="디버그 진폭 증폭",
-        description="인게임에서 작동 여부를 한눈에 식별할 수 있도록 모핑 진폭을 일시 과장하는 배율입니다",
-        default=1.0,
-        min=1.0,
-        max=5.0,
-        step=10,
-        precision=1
     )
 
 

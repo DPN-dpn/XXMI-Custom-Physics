@@ -47,7 +47,6 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
             box = layout.box()
             bcol = box.column(align=True)
             bcol.prop(props, "debug_toggle_key")
-            bcol.prop(props, "debug_boost")
 
         layout.separator()
         layout.operator("object.xxmi_apply_custom_physics", text="모드에 바스트모핑 주입", icon='SHADERFX')
