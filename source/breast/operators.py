@@ -208,6 +208,11 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
             vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
 
+            all_v_indices = [v.index for v in mesh.vertices]
+            vg_l.remove(all_v_indices)
+            vg_r.remove(all_v_indices)
+            vg_rigid.remove(all_v_indices)
+
             for side, vlist, vg in (("L", sdata["left"], vg_l), ("R", sdata["right"], vg_r)):
                 if not vlist or side not in anchor_info:
                     continue
@@ -226,7 +231,7 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
                                 rigid_verts.update(isl)
                                 total_rigid_islands += 1
 
-                # B) 피부 및 옷감 정점 감쇠 베이크
+                # B) 피부 및 옷감 정점 감쇠 베이크 (동일 3D 좌표의 다중 메쉬가 100% 동일한 가중치를 공유하도록 순수 거리 감쇠 유지)
                 for vi in vlist:
                     if vi in rigid_verts:
                         continue
@@ -243,7 +248,8 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
                             continue
                         isl_c = sum((mw @ mesh.vertices[vi].co for vi in isl), Vector((0.0, 0.0, 0.0))) / len(isl)
                         dist_norm = (isl_c - cent).length / max(0.02, radius * 1.5)
-                        isl_w = max(0.15, min(1.0, math.pow(max(0.0, 1.0 - dist_norm), falloff_p)))
+                        isl_w = math.pow(max(0.0, 1.0 - dist_norm), falloff_p)
+                        isl_w = max(0.15, min(1.0, isl_w))
                         for vi in isl:
                             vg.add([vi], isl_w, 'REPLACE')
                             vg_rigid.add([vi], 1.0, 'REPLACE')
@@ -359,9 +365,9 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
             for g in v.groups:
                 if g.group == vg_rigid_idx and g.weight > 0.5:
                     rigid_verts.add(v.index)
-                if g.group == vg_l_idx:
+                if g.group == vg_l_idx and g.weight > 0.0001:
                     l_verts.append(v.index)
-                elif g.group == vg_r_idx:
+                elif g.group == vg_r_idx and g.weight > 0.0001:
                     r_verts.append(v.index)
 
         # 만약 해당 메쉬에 등록된 가슴 정점이 아직 없다면, 본 앵커 반경(radius * 1.5) 내의 전방 정점들을 자동 수집
@@ -370,7 +376,7 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
             rad_l = bone_info["L"]["radius"]
             for v in mesh.vertices:
                 p_w = mw @ v.co
-                if p_w.x >= -0.01 and (p_w - cent_l).length <= rad_l * 1.5:
+                if p_w.x >= 0.0 and (p_w - cent_l).length <= rad_l * 1.5:
                     l_verts.append(v.index)
 
         if not r_verts and "R" in bone_info:
@@ -378,11 +384,8 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
             rad_r = bone_info["R"]["radius"]
             for v in mesh.vertices:
                 p_w = mw @ v.co
-                if p_w.x <= 0.01 and (p_w - cent_r).length <= rad_r * 1.5:
+                if p_w.x < 0.0 and (p_w - cent_r).length <= rad_r * 1.5:
                     r_verts.append(v.index)
-
-        l_verts = list(dict.fromkeys(l_verts))
-        r_verts = list(dict.fromkeys(r_verts))
 
         for side, vlist, vg in (("L", l_verts, vg_l), ("R", r_verts, vg_r)):
             if not vlist or not vg or side not in bone_info:
@@ -408,7 +411,8 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
                         continue
                     isl_c = sum((mw @ mesh.vertices[vi].co for vi in isl), Vector((0.0, 0.0, 0.0))) / len(isl)
                     dist_norm = (isl_c - cent).length / max(0.02, radius * 1.5)
-                    isl_w = max(0.15, min(1.0, math.pow(max(0.0, 1.0 - dist_norm), falloff_p)))
+                    isl_w = math.pow(max(0.0, 1.0 - dist_norm), falloff_p)
+                    isl_w = max(0.15, min(1.0, isl_w))
                     for vi in isl:
                         vg.add([vi], isl_w, 'REPLACE')
                         total_recomputed_verts += 1

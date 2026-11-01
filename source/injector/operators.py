@@ -255,11 +255,10 @@ def _export_physics_motion_hlsl(export_dir, idx, root_vert_idx, props):
 
     omega_0 = 12.0 * speed
     stiff_k = omega_0 * omega_0
-    # 감쇠비(zeta)를 damping * 0.35로 스케일링하여 기본값(0.85 -> zeta~0.30)에서 자연스러운 2~3회 탄성 여운 보장
-    damp_c = 2.0 * omega_0 * (damping * 0.35)
+    damp_c = 2.0 * omega_0 * (damping * 0.55)
 
     hlsl_code = f"""// ============================================================================
-// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free Substep ODE)
+// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics)
 // ============================================================================
 struct Vertex {{
     float3 position;
@@ -289,8 +288,8 @@ void main() {{
     float4 s3 = PhysState[3];
     float4 s4 = PhysState[4];
 
-    float3 prev_disp_l = s0.xyz;
-    float3 prev_disp_r = s1.xyz;
+    float3 prev_disp_l  = s0.xyz;
+    float3 prev_disp_r  = s1.xyz;
     float3 spring_vel_l = s2.xyz;
     float  prev_time    = s2.w;
     float3 spring_vel_r = s3.xyz;
@@ -301,9 +300,10 @@ void main() {{
 
     if (length(curr_root) < 1e-4) {{
         float breath_t = time * 2.5;
-        float3 fb_disp = float3(0, sin(breath_t) * 0.015, cos(breath_t) * 0.010) * IDLE_SCALE;
-        PhysState[0] = float4(fb_disp, 0.5);
-        PhysState[1] = float4(fb_disp, 0.5);
+        float3 fb_l = float3(sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE;
+        float3 fb_r = float3(-sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE;
+        PhysState[0] = float4(fb_l, 0.5);
+        PhysState[1] = float4(fb_r, 0.5);
         return;
     }}
 
@@ -317,7 +317,6 @@ void main() {{
         init_flag = 1.0;
     }} else {{
         float raw_dt = time - prev_time;
-        // 동일 프레임 내 중복 드로우콜 실행 시 상태를 건드리지 않고 즉시 종료
         if (abs(raw_dt) <= 0.0005) {{
             return;
         }}
@@ -327,42 +326,41 @@ void main() {{
 
         if (length(delta) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
             delta = float3(0, 0, 0);
-            spring_vel_l *= 0.2;
-            spring_vel_r *= 0.2;
+            spring_vel_l = float3(0, 0, 0);
+            spring_vel_r = float3(0, 0, 0);
         }}
 
-        float3 anim_vel = delta / dt;
-        float3 ext_force = -anim_vel * (16.0 * INERTIA_SCALE);
+        float3 raw_vel = delta / dt;
+        float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
+        float3 ext_force = -anim_vel * (12.0 * INERTIA_SCALE);
 
         if (IDLE_SCALE > 0.001) {{
             float breath_t = time * 2.5;
-            float3 idle_f = float3(0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE;
+            float3 idle_f = float3(sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE;
             ext_force += idle_f;
         }}
 
-        // 좌우 가슴이 이동 관성은 함께 받되 전후/상하 충격 시 미세한 대칭 모아짐/벌어짐 부여
-        float3 ext_force_l = float3(ext_force.x + ext_force.y * 0.12, ext_force.y, ext_force.z);
-        float3 ext_force_r = float3(ext_force.x - ext_force.y * 0.12, ext_force.y, ext_force.z);
+        // Pre-overhaul L/R symmetric opposite X-axis force
+        float3 ext_force_l = ext_force;
+        float3 ext_force_r = float3(-ext_force.x * 0.9, ext_force.y, ext_force.z);
 
-        // 4-Substep Symplectic Euler 적분 (고주파/저프레임 환경에서도 무조건 수렴 보장)
         float sub_dt = dt * 0.25;
         [unroll]
         for (int step = 0; step < 4; step++) {{
             float3 accel_l = ext_force_l - STIFF_K * prev_disp_l - DAMP_C * spring_vel_l;
             float3 accel_r = ext_force_r - STIFF_K * prev_disp_r - DAMP_C * spring_vel_r;
 
-            spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -4.0, 4.0);
-            spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -4.0, 4.0);
+            spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -2.5, 2.5);
+            spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -2.5, 2.5);
 
-            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.045, 0.045);
-            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.045, 0.045);
+            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.025, 0.025);
+            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.025, 0.025);
         }}
 
         prev_root = curr_root;
         prev_time = time;
     }}
 
-    // 상태 버퍼에는 STRENGTH_SCALE이 곱해지지 않은 순수 물리 변위만 저장 (누적 발산/소멸 원천 차단)
     PhysState[0] = float4(prev_disp_l, length(spring_vel_l));
     PhysState[1] = float4(prev_disp_r, length(spring_vel_r));
     PhysState[2] = float4(spring_vel_l, prev_time);
@@ -414,7 +412,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
 
         float3 total_disp = (disp_l * wl + disp_r * wr) * (NORM_FACTOR * STRENGTH_SCALE);
 
-        float max_disp = 0.050 * max(0.1, STRENGTH_SCALE);
+        float max_disp = 0.030 * max(0.1, STRENGTH_SCALE);
         float d_len = length(total_disp);
         if (d_len > max_disp && d_len > 1e-5) {{
             total_disp = (total_disp / d_len) * max_disp;
@@ -422,7 +420,6 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
 
         v.position += total_disp;
 
-        // 노멀 보정 (강체 장신구는 원형 법선 유지)
         if (bw.z < 0.5) {{
             v.normal = normalize(v.normal + total_disp * 2.5);
         }}
@@ -451,6 +448,7 @@ def _inject_physics_into_ini(ini_path, matched_buffers, props, master_idx=None):
 
     master_entry = max(breast_entries, key=lambda e: e[3])
     master_idx = master_entry[0]
+    master_buf_filename = master_entry[2]
     master_draw_sec = master_entry[8].lower()
 
     # blend lookup: res_name.lower() -> entry
@@ -551,6 +549,7 @@ cs-t120 = null
 [ResourceLiveMesh_{master_idx}]
 type = StructuredBuffer
 stride = 40
+filename = {master_buf_filename}
 
 [ResourcePhysicsState_{master_idx}]
 type = RWStructuredBuffer
@@ -626,9 +625,11 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         # XXMI_Breast_Rig 아머처가 존재하면 사용자가 수동 조정한 본 위치를 버텍스 가중치에 자동 반영
         rig = props.anchor_obj or bpy.data.objects.get("XXMI_Breast_Rig")
+        rig_bone_info = {}
         if rig and rig.type == 'ARMATURE':
-            from ..breast.operators import _rebake_mesh_weights_from_rig
+            from ..breast.operators import _rebake_mesh_weights_from_rig, _get_rig_bone_info
             _rebake_mesh_weights_from_rig(context, rig, props)
+            rig_bone_info = _get_rig_bone_info(rig)
 
         # 1. 가슴 웨이트를 가진 모든 메쉬 오브젝트 수집 및 KDTree/가중치 캐시 구축
         breast_objs = [
@@ -675,7 +676,13 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 "is_rigid": is_rigid,
             })
 
-        # 타겟 폴더 내 유효 .ini 파일 수집
+        global_peak_weight = 0.0
+        for mcache in mesh_caches:
+            max_l = max(mcache["w_l"]) if mcache["w_l"] else 0.0
+            max_r = max(mcache["w_r"]) if mcache["w_r"] else 0.0
+            global_peak_weight = max(global_peak_weight, max_l, max_r)
+        if global_peak_weight < 0.05:
+            global_peak_weight = 1.0
         ini_files = []
         if os.path.isfile(target_mod_input) and target_mod_input.lower().endswith('.ini'):
             ini_files.append(target_mod_input)
@@ -795,7 +802,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     # 2. 순수 몸통 애니메이션 가속도 추적 ODE 물리 쉐이더 (.hlsl)
                     _export_physics_motion_hlsl(custom_physics_dir, idx, best_root_idx, props)
                     # 3. 계산된 변위를 정점에 적용하는 스키닝 쉐이더 (.hlsl)
-                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, max(max_wl, max_wr))
+                    buf_peak = max(max_wl, max_wr)
+                    eff_peak = buf_peak if (buf_peak > 0.05 and buf_peak < 0.45 and global_peak_weight > 0.8) else global_peak_weight
+                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, eff_peak)
                     total_injected_buffers += 1
 
                 matched_in_ini.append((idx, res_name, raw_fname, len(buf_positions), has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
@@ -973,7 +982,7 @@ def _load_physics_from_mod(mod_folder, context, props):
                             props.speed = round(omega_0 / 12.0, 2)
                             if m_c:
                                 c = float(m_c.group(1))
-                                props.damping = round(c / (2.0 * omega_0 * 0.35), 2)
+                                props.damping = round(c / (2.0 * omega_0 * 0.55), 2)
                         if m_i:
                             props.inertia = round(float(m_i.group(1)), 2)
                         if m_idle:

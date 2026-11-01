@@ -9,51 +9,119 @@ from ..utils import (
     axis_angle_matrix,
 )
 
-# 다중 오브젝트 프리뷰 런타임 캐시
+# 다중 오브젝트 프리뷰 런타임 캐시 (인게임 HLSL ODE 상태와 1:1 동기화)
 _PREVIEW_CACHE = {
     "objects_data": [],  # list of dicts per animated mesh object
+    "norm_factor": 1.0,
+    "ode_state": {
+        "disp_l": Vector((0.0, 0.0, 0.0)),
+        "disp_r": Vector((0.0, 0.0, 0.0)),
+        "vel_l": Vector((0.0, 0.0, 0.0)),
+        "vel_r": Vector((0.0, 0.0, 0.0)),
+        "prev_t": None,
+    },
 }
 
 
-def _evaluate_breast_transform(t, side_sign, props, up_vec, right_vec, fwd_vec):
+def _step_preview_ode(t, props):
     """
-    시간 t에서 한쪽 가슴의 탄성 변위 벡터(Vector3)를 계산합니다. (인게임 HLSL과 100% 동일한 선형 탄성)
-    side_sign: 1.0 (Left), -1.0 (Right)
+    인게임 CustomPhysicsMotion.hlsl과 100% 동일한 4-Substep Symplectic Euler ODE 적분을 수행하여
+    좌/우 가슴의 물리 변위(disp_l, disp_r)를 반환합니다.
     """
-    amp = props.strength
-    spd = max(0.2, props.speed)
-    damp = max(0.1, props.damping)
-    inertia = props.inertia
-    idle = props.idle_motion
+    state = _PREVIEW_CACHE["ode_state"]
+    prev_t = state["prev_t"]
 
-    # 이동 / 착지 / 턴 리듬 파형 (DC 오프셋 없는 순수 0-중심 조화 진동)
-    cycle = (t * spd * 1.8) % 3.0
-    if cycle < 1.6:
-        # 달리기 중 발걸음 충격 및 상하/전후 탄성
-        step_phase = cycle / 1.6 * math.pi * 2.0
-        s_z = math.sin(step_phase * 2.0) * 0.8 * inertia
-        s_y = math.sin(step_phase) * 0.6 * inertia
-        s_x = math.cos(step_phase) * 0.4 * inertia * side_sign
+    if prev_t is None or t < prev_t or (t - prev_t) > 0.25:
+        dt = 1.0 / 60.0
+        if prev_t is None:
+            state["disp_l"] = Vector((0.0, 0.0, 0.0))
+            state["disp_r"] = Vector((0.0, 0.0, 0.0))
+            state["vel_l"] = Vector((0.0, 0.0, 0.0))
+            state["vel_r"] = Vector((0.0, 0.0, 0.0))
     else:
-        # 정지 시 여운 감쇠 진동 (잔여 탄성 - 인게임 0.35 감쇠비 스케일과 동기화)
-        dt_stop = cycle - 1.6
-        decay = math.exp(-dt_stop * 2.5 * damp)
-        s_z = math.sin(dt_stop * 14.0 * spd) * 0.9 * decay * inertia
-        s_y = math.cos(dt_stop * 12.0 * spd) * 0.7 * decay * inertia
-        s_x = math.sin(dt_stop * 10.0 * spd) * 0.4 * decay * inertia * side_sign
+        raw_dt = t - prev_t
+        if abs(raw_dt) <= 0.0005:
+            return state["disp_l"], state["disp_r"]
+        dt = max(0.002, min(0.04, raw_dt))
 
-    # 미세 유휴 호흡 모션
-    s_y += math.sin(t * 2.5) * 0.20 * idle
-    s_z += math.sin(t * 2.5 + 0.5) * 0.14 * idle
+    state["prev_t"] = t
 
-    # 3차원 위치 변위 (인게임 스케일 2~3cm 선형 변위)
-    trans = (
-        up_vec * (s_z * 0.012) +
-        fwd_vec * (s_y * 0.010) +
-        right_vec * (s_x * 0.007)
-    ) * amp
+    speed = max(0.2, float(props.speed))
+    damping = max(0.1, float(props.damping))
+    inertia = max(0.0, float(props.inertia))
+    idle_motion = max(0.0, float(props.idle_motion))
 
-    return trans
+    omega_0 = 12.0 * speed
+    stiff_k = omega_0 * omega_0
+    damp_c = 2.0 * omega_0 * (damping * 0.50)
+
+    # 3.0초 주기의 인게임 표준 몸통 모션 시뮬레이션:
+    # 0.0 ~ 1.2초: 보행/대시 이동 발생 (관성 가속도 입력)
+    # 1.2 ~ 3.0초: 정지 후 잔여 탄성 감쇠(Damping) 및 호흡 미동(Idle) 확인 구간
+    cycle = t % 3.0
+    if cycle < 1.2:
+        ph = (cycle / 1.2) * math.pi * 2.0
+        raw_vel = Vector((
+            math.cos(ph) * 0.14,
+            math.sin(ph) * 0.15,
+            math.sin(ph * 2.0) * 0.20,
+        ))
+    else:
+        raw_vel = Vector((0.0, 0.0, 0.0))
+
+    anim_vel = raw_vel / (1.0 + raw_vel.length * 0.8)
+    ext_force = -anim_vel * (12.0 * inertia)
+
+    ext_force_l = ext_force.copy()
+    ext_force_r = Vector((-ext_force.x * 0.9, ext_force.y, ext_force.z))
+
+    if idle_motion > 0.001:
+        breath_phase = t * 2.5
+        ext_force_l.z += math.sin(breath_phase) * 1.5 * idle_motion
+        ext_force_l.y += math.cos(breath_phase) * 1.1 * idle_motion
+        ext_force_l.x += math.sin(breath_phase * 0.5) * 0.6 * idle_motion
+
+        ext_force_r.z += math.sin(breath_phase + 0.35) * 1.5 * idle_motion
+        ext_force_r.y += math.cos(breath_phase + 0.35) * 1.1 * idle_motion
+        ext_force_r.x += -math.sin(breath_phase * 0.5 + 0.35) * 0.6 * idle_motion
+
+    stiff_l = stiff_k * 1.04
+    stiff_r = stiff_k * 0.96
+    damp_l = damp_c * 0.98
+    damp_r = damp_c * 1.02
+
+    disp_l = state["disp_l"]
+    disp_r = state["disp_r"]
+    vel_l = state["vel_l"]
+    vel_r = state["vel_r"]
+
+    sub_dt = dt * 0.25
+    for _ in range(4):
+        accel_l = ext_force_l - disp_l * stiff_l - vel_l * damp_l
+        accel_r = ext_force_r - disp_r * stiff_r - vel_r * damp_r
+
+        vel_l.x = max(-1.5, min(1.5, vel_l.x + accel_l.x * sub_dt))
+        vel_l.y = max(-1.5, min(1.5, vel_l.y + accel_l.y * sub_dt))
+        vel_l.z = max(-1.5, min(1.5, vel_l.z + accel_l.z * sub_dt))
+
+        vel_r.x = max(-1.5, min(1.5, vel_r.x + accel_r.x * sub_dt))
+        vel_r.y = max(-1.5, min(1.5, vel_r.y + accel_r.y * sub_dt))
+        vel_r.z = max(-1.5, min(1.5, vel_r.z + accel_r.z * sub_dt))
+
+        disp_l.x = max(-0.024, min(0.024, disp_l.x + vel_l.x * sub_dt))
+        disp_l.y = max(-0.024, min(0.024, disp_l.y + vel_l.y * sub_dt))
+        disp_l.z = max(-0.024, min(0.024, disp_l.z + vel_l.z * sub_dt))
+
+        disp_r.x = max(-0.024, min(0.024, disp_r.x + vel_r.x * sub_dt))
+        disp_r.y = max(-0.024, min(0.024, disp_r.y + vel_r.y * sub_dt))
+        disp_r.z = max(-0.024, min(0.024, disp_r.z + vel_r.z * sub_dt))
+
+    state["disp_l"] = disp_l
+    state["disp_r"] = disp_r
+    state["vel_l"] = vel_l
+    state["vel_r"] = vel_r
+
+    return disp_l, disp_r
 
 
 def _preview_frame_handler(scene):
@@ -67,6 +135,12 @@ def _preview_frame_handler(scene):
 
     fps = scene.render.fps / max(scene.render.fps_base, 1e-4)
     t = scene.frame_current / max(fps, 24.0)
+
+    disp_l_local, disp_r_local = _step_preview_ode(t, props)
+    strength = max(0.0, float(props.strength))
+    norm_factor = _PREVIEW_CACHE.get("norm_factor", 1.0)
+    scale_factor = norm_factor * strength
+    max_disp = 0.024 * max(0.1, strength)
 
     for odata in objects_data:
         obj_name = odata["obj_name"]
@@ -83,6 +157,9 @@ def _preview_frame_handler(scene):
         active_indices = odata["active_indices"]
         w_l = odata["weights_l"]
         w_r = odata["weights_r"]
+        rigid_flags = odata["rigid_flags"]
+        anchor_l = odata["anchor_l"]
+        anchor_r = odata["anchor_r"]
         up_vec = odata["up_vec"]
         right_vec = odata["right_vec"]
         fwd_vec = odata["fwd_vec"]
@@ -90,15 +167,22 @@ def _preview_frame_handler(scene):
         if len(sk.data) != len(base_coords):
             continue
 
-        trans_l = _evaluate_breast_transform(t, 1.0, props, up_vec, right_vec, fwd_vec)
-        trans_r = _evaluate_breast_transform(t, -1.0, props, up_vec, right_vec, fwd_vec)
+        disp_l = right_vec * disp_l_local.x + fwd_vec * disp_l_local.y + up_vec * disp_l_local.z
+        disp_r = right_vec * disp_r_local.x + fwd_vec * disp_r_local.y + up_vec * disp_r_local.z
 
-        # 활성 가슴 정점(~3,000개)만 초고속 연산 (렉 및 속도 저하 완벽 해결)
+        # 인게임 CustomPhysics_{idx}.hlsl과 100% 동일한 가중치 선형 변위 적용
         for i in active_indices:
             base_co = base_coords[i]
+            if scale_factor <= 0.0001:
+                sk.data[i].co = base_co
+                continue
             wl = w_l[i]
             wr = w_r[i]
-            total_disp = trans_l * wl + trans_r * wr
+
+            total_disp = (disp_l * wl + disp_r * wr) * scale_factor
+            d_len = total_disp.length
+            if d_len > max_disp and d_len > 1e-5:
+                total_disp = (total_disp / d_len) * max_disp
             sk.data[i].co = base_co + total_disp
 
 
@@ -246,7 +330,22 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             self.report({'ERROR'}, "유효한 가슴 가중치를 가진 메쉬가 없습니다.")
             return {'CANCELLED'}
 
+        # 인게임 NORM_FACTOR와 100% 동일하게 전체 대상 메쉬의 최대 가중치로 정규화 배율 산출
+        global_peak_w = 0.0
+        for odata in objects_data:
+            max_l = max(odata["weights_l"]) if odata["weights_l"] else 0.0
+            max_r = max(odata["weights_r"]) if odata["weights_r"] else 0.0
+            global_peak_w = max(global_peak_w, max_l, max_r)
+
         _PREVIEW_CACHE["objects_data"] = objects_data
+        _PREVIEW_CACHE["norm_factor"] = (1.0 / global_peak_w) if global_peak_w > 0.05 else 1.0
+        _PREVIEW_CACHE["ode_state"] = {
+            "disp_l": Vector((0.0, 0.0, 0.0)),
+            "disp_r": Vector((0.0, 0.0, 0.0)),
+            "vel_l": Vector((0.0, 0.0, 0.0)),
+            "vel_r": Vector((0.0, 0.0, 0.0)),
+            "prev_t": None,
+        }
         props.is_preview_running = True
 
         if _preview_frame_handler not in bpy.app.handlers.frame_change_pre:
