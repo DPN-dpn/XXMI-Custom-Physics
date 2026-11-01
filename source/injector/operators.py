@@ -233,7 +233,7 @@ def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj):
     return best_mat, best_score
 
 
-def _export_physics_state_buf(mod_folder, idx):
+def _export_physics_state_buf(export_dir, idx):
     """
     물리 상태 버퍼(5 x float4 = 80 바이트)를 0으로 초기화하여 생성합니다.
     [0]: disp_l (xyz), speed_l (w)
@@ -242,12 +242,12 @@ def _export_physics_state_buf(mod_folder, idx):
     [3]: spring_vel_r (xyz), init_flag (w)
     [4]: prev_root (xyz), 0 (w)
     """
-    out_path = os.path.join(mod_folder, f"CustomPhysicsState_{idx}.buf")
+    out_path = os.path.join(export_dir, f"CustomPhysicsState_{idx}.buf")
     with open(out_path, 'wb') as f:
         f.write(bytearray(5 * 16))
 
 
-def _export_physics_motion_hlsl(mod_folder, idx, root_vert_idx, props):
+def _export_physics_motion_hlsl(export_dir, idx, root_vert_idx, props):
     strength = float(getattr(props, "strength", 1.0))
     speed = float(getattr(props, "speed", 1.1))
     damping = float(getattr(props, "damping", 0.85))
@@ -368,12 +368,12 @@ void main() {{
     PhysState[4] = float4(prev_root, 0);
 }}
 """
-    out_path = os.path.join(mod_folder, f"CustomPhysicsMotion_{idx}.hlsl")
+    out_path = os.path.join(export_dir, f"CustomPhysicsMotion_{idx}.hlsl")
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(hlsl_code)
 
 
-def _export_vertex_physics_hlsl(mod_folder, idx, vertex_count, props, peak_weight=1.0):
+def _export_vertex_physics_hlsl(export_dir, idx, vertex_count, props, peak_weight=1.0):
     norm_factor = (1.0 / peak_weight) if peak_weight > 0.05 else 1.0
 
     hlsl_code = f"""// ============================================================================
@@ -425,7 +425,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     Output[i] = v;
 }}
 """
-    out_path = os.path.join(mod_folder, f"CustomPhysics_{idx}.hlsl")
+    out_path = os.path.join(export_dir, f"CustomPhysics_{idx}.hlsl")
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(hlsl_code)
 
@@ -531,7 +531,7 @@ $xxmi_phys_enable = 1, 0
 
     # Master Motion Shader & Unified Physics State Buffer
     footer += f"""[CustomShaderPhysicsMotion_{master_idx}]
-cs = CustomPhysicsMotion_{master_idx}.hlsl
+cs = CustomPhysics\\CustomPhysicsMotion_{master_idx}.hlsl
 x87 = time
 w85 = $xxmi_phys_enable
 cs-t120 = IniParams
@@ -549,7 +549,7 @@ stride = 40
 [ResourcePhysicsState_{master_idx}]
 type = RWStructuredBuffer
 stride = 16
-filename = CustomPhysicsState_{master_idx}.buf
+filename = CustomPhysics\\CustomPhysicsState_{master_idx}.buf
 
 """
 
@@ -558,7 +558,7 @@ filename = CustomPhysicsState_{master_idx}.buf
         idx, res_name, buf_filename, v_count, has_breast = entry[:5]
         dispatch_groups = math.ceil(v_count / 64.0)
         footer += f"""[CustomShaderPhysics_{idx}]
-cs = CustomPhysics_{idx}.hlsl
+cs = CustomPhysics\\CustomPhysics_{idx}.hlsl
 w85 = $xxmi_phys_enable
 cs-t52 = ref ResourceCustomPhysicsExtracted_{idx}
 cs-t53 = ref ResourcePhysicsMap_{idx}
@@ -576,7 +576,7 @@ cs-t54 = null
 [ResourcePhysicsMap_{idx}]
 type = StructuredBuffer
 stride = 16
-filename = CustomPhysicsMap_{idx}.buf
+filename = CustomPhysics\\CustomPhysicsMap_{idx}.buf
 
 [ResourceCustomPhysicsExtracted_{idx}]
 type = StructuredBuffer
@@ -689,6 +689,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         for ini_path in ini_files:
             mod_folder = os.path.dirname(ini_path)
+            custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")
+            os.makedirs(custom_physics_dir, exist_ok=True)
             pos_buffers = _find_position_buffers(mod_folder, ini_path)
             if not pos_buffers:
                 continue
@@ -759,7 +761,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 has_breast = (max_wl > 0.001 or max_wr > 0.001)
 
                 if has_breast:
-                    map_buf_path = os.path.join(mod_folder, f"CustomPhysicsMap_{idx}.buf")
+                    map_buf_path = os.path.join(custom_physics_dir, f"CustomPhysicsMap_{idx}.buf")
                     with open(map_buf_path, 'wb') as f:
                         f.write(map_bytes)
 
@@ -783,18 +785,18 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                     best_root_idx = bp_idx
 
                     # 1. 런타임 물리 상태 버퍼 초기화 (.buf)
-                    _export_physics_state_buf(mod_folder, idx)
+                    _export_physics_state_buf(custom_physics_dir, idx)
                     # 2. 순수 몸통 애니메이션 가속도 추적 ODE 물리 쉐이더 (.hlsl)
-                    _export_physics_motion_hlsl(mod_folder, idx, best_root_idx, props)
+                    _export_physics_motion_hlsl(custom_physics_dir, idx, best_root_idx, props)
                     # 3. 계산된 변위를 정점에 적용하는 스키닝 쉐이더 (.hlsl)
-                    _export_vertex_physics_hlsl(mod_folder, idx, len(buf_positions), props, max(max_wl, max_wr))
+                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, max(max_wl, max_wr))
                     total_injected_buffers += 1
 
                 matched_in_ini.append((idx, res_name, raw_fname, len(buf_positions), has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
 
             if matched_in_ini:
                 _inject_physics_into_ini(ini_path, matched_in_ini, props)
-                _export_physics_config_json(mod_folder, props, context)
+                _export_physics_config_json(custom_physics_dir, props, context)
 
         if total_injected_buffers > 0:
             names_str = ", ".join(matched_obj_names)
@@ -844,7 +846,13 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
                     f.writelines(clean_lines)
                 cleaned_count += 1
 
-            # 생성되었던 물리 파일 삭제
+            # 1. CustomPhysics 서브폴더 삭제
+            custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")
+            if os.path.isdir(custom_physics_dir):
+                shutil.rmtree(custom_physics_dir, ignore_errors=True)
+                removed_files += 1
+
+            # 2. 레거시(모드 루트에 남아있던 파일들)도 함께 정리
             for fname in os.listdir(mod_folder):
                 fl = fname.lower()
                 if (fl.startswith("customphysics") and (fl.endswith(".hlsl") or fl.endswith(".buf"))) or \
@@ -861,7 +869,7 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _export_physics_config_json(mod_folder, props, context):
+def _export_physics_config_json(export_dir, props, context):
     """모드 폴더에 현재 물리 파라미터 및 본 앵커 좌표를 담은 XXMI_Physics_Config.json을 저장합니다."""
     import json
     rig = props.anchor_obj or bpy.data.objects.get("XXMI_Breast_Rig")
@@ -892,7 +900,7 @@ def _export_physics_config_json(mod_folder, props, context):
         "bones": bones_data,
     }
 
-    cfg_path = os.path.join(mod_folder, "XXMI_Physics_Config.json")
+    cfg_path = os.path.join(export_dir, "XXMI_Physics_Config.json")
     try:
         with open(cfg_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
@@ -902,12 +910,20 @@ def _export_physics_config_json(mod_folder, props, context):
 
 def _load_physics_from_mod(mod_folder, context, props):
     """
-    모드 폴더 내의 XXMI_Physics_Config.json 또는 주입된 HLSL/INI/Map.buf 파일을 읽어
-    블렌더의 물리 파라미터, 앵커 본(XXMI_Breast_Rig), 버텍스 가중치를 복원합니다.
+    모드 폴더(또는 CustomPhysics 서브폴더)의 XXMI_Physics_Config.json 또는 주입된 HLSL/INI/Map.buf를 읽어
+    물리 시뮬레이션 파라미터, 가상 뼈대(XXMI_Breast_Rig), 가슴 및 강체 장신구(XXMI_Role_Rigid) 정점 그룹을 100% 복원합니다.
     """
     import json, re, math
+    from mathutils.kdtree import KDTree
 
-    cfg_path = os.path.join(mod_folder, "XXMI_Physics_Config.json")
+    physics_dir = os.path.join(mod_folder, "CustomPhysics")
+    if not os.path.isdir(physics_dir):
+        physics_dir = mod_folder
+
+    cfg_path = os.path.join(physics_dir, "XXMI_Physics_Config.json")
+    if not os.path.exists(cfg_path):
+        cfg_path = os.path.join(mod_folder, "XXMI_Physics_Config.json")
+
     loaded_source = ""
     bones_data = {}
 
@@ -929,100 +945,108 @@ def _load_physics_from_mod(mod_folder, context, props):
             bones_data = cfg.get("bones", {})
             loaded_source = "XXMI_Physics_Config.json"
         except Exception as e:
-            loaded_source = f"JSON 읽기 실패 ({e})"
+            loaded_source = f"JSON 읽기 오류 ({e})"
 
-    if not loaded_source or "실패" in loaded_source:
+    if not loaded_source or "오류" in loaded_source:
         parsed_any = False
-        for fname in os.listdir(mod_folder):
-            fl = fname.lower()
-            if fl.startswith("customphysicsmotion") and fl.endswith(".hlsl"):
-                p = os.path.join(mod_folder, fname)
-                try:
-                    with open(p, 'r', encoding='utf-8') as f:
-                        txt = f.read()
-                    m_k = re.search(r'STIFF_K\s*=\s*([\d.]+)', txt)
-                    m_c = re.search(r'DAMP_C\s*=\s*([\d.]+)', txt)
-                    m_i = re.search(r'INERTIA_SCALE\s*=\s*([\d.]+)', txt)
-                    m_idle = re.search(r'IDLE_SCALE\s*=\s*([\d.]+)', txt)
+        search_dirs = [physics_dir] if physics_dir == mod_folder else [physics_dir, mod_folder]
+        for sdir in search_dirs:
+            for fname in os.listdir(sdir):
+                fl = fname.lower()
+                if fl.startswith("customphysicsmotion") and fl.endswith(".hlsl"):
+                    p = os.path.join(sdir, fname)
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            txt = f.read()
+                        m_k = re.search(r'STIFF_K\s*=\s*([\d.]+)', txt)
+                        m_c = re.search(r'DAMP_C\s*=\s*([\d.]+)', txt)
+                        m_i = re.search(r'INERTIA_SCALE\s*=\s*([\d.]+)', txt)
+                        m_idle = re.search(r'IDLE_SCALE\s*=\s*([\d.]+)', txt)
 
-                    if m_k:
-                        k = float(m_k.group(1))
-                        omega_0 = math.sqrt(k)
-                        props.speed = round(omega_0 / 12.0, 2)
-                        if m_c:
-                            c = float(m_c.group(1))
-                            props.damping = round(c / (2.0 * omega_0), 2)
-                    if m_i:
-                        props.inertia = round(float(m_i.group(1)), 2)
-                    if m_idle:
-                        props.idle_motion = round(float(m_idle.group(1)), 2)
-                    parsed_any = True
-                except Exception:
-                    pass
-
-            elif fl.startswith("customphysics_") and fl.endswith(".hlsl"):
-                p = os.path.join(mod_folder, fname)
-                try:
-                    with open(p, 'r', encoding='utf-8') as f:
-                        txt = f.read()
-                    m_s = re.search(r'STRENGTH_SCALE\s*=\s*([\d.]+)', txt)
-                    if m_s:
-                        props.strength = round(float(m_s.group(1)), 2)
+                        if m_k:
+                            k = float(m_k.group(1))
+                            omega_0 = math.sqrt(k)
+                            props.speed = round(omega_0 / 12.0, 2)
+                            if m_c:
+                                c = float(m_c.group(1))
+                                props.damping = round(c / (2.0 * omega_0), 2)
+                        if m_i:
+                            props.inertia = round(float(m_i.group(1)), 2)
+                        if m_idle:
+                            props.idle_motion = round(float(m_idle.group(1)), 2)
                         parsed_any = True
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-            elif fl.endswith(".ini"):
-                p = os.path.join(mod_folder, fname)
-                try:
-                    with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = f.readlines()
-                    for line in lines:
-                        if "KeyXXMIPhysToggle" in line:
-                            props.debug_mode = True
+                elif fl.startswith("customphysics_") and fl.endswith(".hlsl"):
+                    p = os.path.join(sdir, fname)
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            txt = f.read()
+                        m_s = re.search(r'STRENGTH_SCALE\s*=\s*([\d.]+)', txt)
+                        if m_s:
+                            props.strength = round(float(m_s.group(1)), 2)
                             parsed_any = True
-                        if props.debug_mode and line.strip().lower().startswith("key ="):
-                            k_val = line.split("=", 1)[1].strip()
-                            if k_val:
-                                props.debug_toggle_key = k_val
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+
+                elif fl.endswith(".ini"):
+                    p = os.path.join(sdir, fname)
+                    try:
+                        with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+                            lines = f.readlines()
+                        for line in lines:
+                            if "KeyXXMIPhysToggle" in line:
+                                props.debug_mode = True
+                                parsed_any = True
+                            if props.debug_mode and line.strip().lower().startswith("key ="):
+                                k_val = line.split("=", 1)[1].strip()
+                                if k_val:
+                                    props.debug_toggle_key = k_val
+                    except Exception:
+                        pass
 
         if parsed_any:
-            loaded_source = "주입된 HLSL 및 .ini 파일 파싱"
+            loaded_source = "주입된 HLSL 및 .ini 파싱"
 
     if not loaded_source:
-        return False, "지정한 폴더에서 바스트모핑 설정 파일이나 쉐이더를 찾을 수 없습니다."
+        return False, "모드 폴더에서 바스트모핑 설정 파일이나 쉐이더를 찾지 못했습니다."
 
-    # 아머처 본(XXMI_Breast_Rig) 복원 (JSON이 없는 경우 Map.buf와 Position.buf로부터 역계산)
-    if not bones_data:
-        map_files = [f for f in os.listdir(mod_folder) if f.lower().startswith("customphysicsmap_") and f.lower().endswith(".buf")]
-        pos_files = [f for f in os.listdir(mod_folder) if f.lower().endswith("position.buf")]
+    # 1. Map.buf 및 Position.buf 검색 (서브폴더 및 모드 루트)
+    map_files = []
+    for d in ([physics_dir] if physics_dir == mod_folder else [physics_dir, mod_folder]):
+        for f in os.listdir(d):
+            if f.lower().startswith("customphysicsmap_") and f.lower().endswith(".buf"):
+                full_p = os.path.join(d, f)
+                if full_p not in map_files:
+                    map_files.append(full_p)
 
+    pos_files = [
+        os.path.join(mod_folder, f) for f in os.listdir(mod_folder)
+        if f.lower().endswith("position.buf")
+    ]
+
+    # Map.buf와 Position.buf를 정점 개수 기준으로 1:1 매칭
+    pairs = []
+    for mp in map_files:
+        m_vc = os.path.getsize(mp) // 16
+        for pp in pos_files:
+            if os.path.getsize(pp) // 40 == m_vc:
+                pairs.append((mp, pp, m_vc))
+                break
+
+    # 2. 본 데이터가 JSON에 없는 경우 Map.buf와 Position.buf로부터 역추정
+    if not bones_data and pairs:
         all_l_pts = []
         all_r_pts = []
 
-        for mf in map_files:
-            map_p = os.path.join(mod_folder, mf)
-            with open(map_p, 'rb') as f:
+        for mp, pp, map_v_count in pairs:
+            with open(mp, 'rb') as f:
                 map_data = f.read()
-
-            map_v_count = len(map_data) // 16
-            matched_pos_p = None
-            for pf in pos_files:
-                pos_path = os.path.join(mod_folder, pf)
-                if os.path.getsize(pos_path) // 40 == map_v_count:
-                    matched_pos_p = pos_path
-                    break
-
-            if not matched_pos_p:
-                continue
-
-            with open(matched_pos_p, 'rb') as f:
+            with open(pp, 'rb') as f:
                 pos_data = f.read()
 
-            n_v = min(map_v_count, len(pos_data) // 40)
-            for i in range(n_v):
+            for i in range(map_v_count):
                 wl, wr, _, _ = struct.unpack_from('<4f', map_data, i * 16)
                 px, py, pz = struct.unpack_from('<3f', pos_data, i * 40)
                 pt = Vector((px, py, pz))
@@ -1051,7 +1075,9 @@ def _load_physics_from_mod(mod_folder, context, props):
                 "radius": radius,
             }
 
+    # 3. XXMI_Breast_Rig 복원
     restored_rig = False
+    rig = None
     if bones_data:
         from ..breast.operators import _get_or_create_breast_rig
         ref_obj = context.active_object or (bpy.data.objects[0] if bpy.data.objects else None)
@@ -1076,49 +1102,92 @@ def _load_physics_from_mod(mod_folder, context, props):
         props.anchor_obj = rig
         restored_rig = True
 
-    # 씬 내에 존재하는 메쉬 오브젝트들에 가슴 버텍스 그룹 및 가중치 복원
+    # 4. KD-Tree 3D 정합 기반으로 블렌더 메쉬에 가슴 및 강체 장신구(XXMI_Role_Rigid) 정점 그룹 복원
     restored_mesh_names = []
-    map_files = [f for f in os.listdir(mod_folder) if f.lower().startswith("customphysicsmap_") and f.lower().endswith(".buf")]
+    if pairs:
+        pair_caches = []
+        for mp, pp, n in pairs:
+            with open(mp, 'rb') as f:
+                map_data = f.read()
+            with open(pp, 'rb') as f:
+                pos_data = f.read()
 
-    for obj in bpy.data.objects:
-        if obj.type != 'MESH':
-            continue
-        mesh = obj.data
-        n_verts = len(mesh.vertices)
+            buf_positions = [Vector(struct.unpack_from('<3f', pos_data, i * 40)) for i in range(n)]
+            kd = KDTree(n)
+            for i, p in enumerate(buf_positions):
+                kd.insert(p, i)
+            kd.balance()
 
-        for mf in map_files:
-            map_p = os.path.join(mod_folder, mf)
-            if os.path.getsize(map_p) // 16 == n_verts:
-                with open(map_p, 'rb') as f:
-                    map_bytes = f.read()
+            pair_caches.append({
+                "map_data": map_data,
+                "kd": kd,
+                "n": n,
+                "pos_name": os.path.basename(pp),
+            })
 
-                vg_l = obj.vertex_groups.get("XXMI_Breast_L") or obj.vertex_groups.new(name="XXMI_Breast_L")
-                vg_r = obj.vertex_groups.get("XXMI_Breast_R") or obj.vertex_groups.new(name="XXMI_Breast_R")
-                vg_rigid = obj.vertex_groups.get("XXMI_Role_Rigid") or obj.vertex_groups.new(name="XXMI_Role_Rigid")
+        for obj in bpy.data.objects:
+            if obj.type != 'MESH':
+                continue
+            mesh = obj.data
+            mw = obj.matrix_world
+            n_m = len(mesh.vertices)
+            if n_m == 0:
+                continue
 
-                non_zero = 0
-                for vi in range(n_verts):
-                    wl, wr, vrigid, _ = struct.unpack_from('<4f', map_bytes, vi * 16)
+            # 이 메쉬와 가장 일치하는 Position 버퍼 탐색
+            best_pcache = None
+            best_match_ratio = 0.0
+            sample_size = min(30, n_m)
+            step = (n_m - 1) / max(1, sample_size - 1)
+            sample_pts = [mw @ mesh.vertices[int(k * step)].co for k in range(sample_size)]
+
+            for pcache in pair_caches:
+                kd = pcache["kd"]
+                matched_s = sum(1 for p in sample_pts if kd.find(p)[2] < 0.05)
+                ratio = matched_s / float(sample_size)
+                if ratio > best_match_ratio:
+                    best_match_ratio = ratio
+                    best_pcache = pcache
+
+            if not best_pcache or best_match_ratio < 0.5:
+                continue
+
+            map_data = best_pcache["map_data"]
+            kd = best_pcache["kd"]
+
+            vg_l = obj.vertex_groups.get("XXMI_Breast_L") or obj.vertex_groups.new(name="XXMI_Breast_L")
+            vg_r = obj.vertex_groups.get("XXMI_Breast_R") or obj.vertex_groups.new(name="XXMI_Breast_R")
+            vg_rigid = obj.vertex_groups.get("XXMI_Role_Rigid") or obj.vertex_groups.new(name="XXMI_Role_Rigid")
+
+            non_zero_breast = 0
+            rigid_count = 0
+
+            for vi, v in enumerate(mesh.vertices):
+                p_w = mw @ v.co
+                _, b_idx, dist = kd.find(p_w)
+                if dist < 0.02:
+                    wl, wr, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
                     if wl > 0.0001:
                         vg_l.add([vi], wl, 'REPLACE')
-                        non_zero += 1
+                        non_zero_breast += 1
                     if wr > 0.0001:
                         vg_r.add([vi], wr, 'REPLACE')
-                        non_zero += 1
+                        non_zero_breast += 1
                     if vrigid > 0.5:
                         vg_rigid.add([vi], 1.0, 'REPLACE')
+                        rigid_count += 1
 
-                if non_zero > 0:
-                    restored_mesh_names.append(obj.name)
-                break
+            if non_zero_breast > 0 or rigid_count > 0:
+                restored_mesh_names.append(f"{obj.name} (가슴: {non_zero_breast}개, 강체: {rigid_count}개)")
 
-    # 본이 복원되었으면 메쉬 가중치 연동 1회 보장
+    # 5. 복원 완료 후 본 위치 기반 가중치 재계산 동기화 (강체 장신구 그룹 보존)
     if restored_rig and rig:
         from ..breast.operators import _rebake_mesh_weights_from_rig
         _rebake_mesh_weights_from_rig(context, rig, props)
 
-    rig_str = " (본 rig 및 가슴 웨이트 복원됨)" if restored_rig else ""
-    summary = f"[{loaded_source}] 파라미터 복원 완료{rig_str} - 강도: {props.strength:.2f}, 속도: {props.speed:.2f}, 감쇠: {props.damping:.2f}, 관성: {props.inertia:.2f}, 호흡: {props.idle_motion:.2f}"
+    rig_str = " (가상 rig 및 가슴/강체 그룹 복원 완료)" if restored_rig else ""
+    mesh_str = f" [복원 메쉬: {', '.join(restored_mesh_names)}]" if restored_mesh_names else ""
+    summary = f"[{loaded_source}] 파라미터 로드 완료{rig_str}{mesh_str} - 강도: {props.strength:.2f}, 속도: {props.speed:.2f}, 감쇠: {props.damping:.2f}, 관성: {props.inertia:.2f}, 호흡: {props.idle_motion:.2f}"
     return True, summary
 
 
