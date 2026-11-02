@@ -27,8 +27,8 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
                 "2. 가슴 표면 정점들을 박스나 브러시로 쓱 드래그하여 선택합니다.\n"
                 "3. [선택 영역을 가슴 물리로 등록] 버튼을 클릭합니다.\n"
                 "   ➔ 중심선(X=0) 기준으로 좌/우 가슴 앵커가 자동 배치됩니다.\n"
-                "   ➔ 단추, 브로치 등 독립된 장신구는 메쉬 섬(Island) 분석을 통해 강체로 자동 보호됩니다.\n"
-                "4. 특수한 장신구는 에디트 모드에서 선택 후 [선택 부위를 강체 장신구로 지정]을 누르세요."
+                "4. 단추, 브로치 등 모핑되면 안 되는 장신구는 에디트 모드에서 선택 후 [선택 부위를 강체 장신구로 지정]을 누르세요.\n"
+                "   ➔ 자동 감지는 없으며, 직접 지정한 정점만 강체로 처리됩니다. 여러 오브젝트에 걸친 강체도 같은 값으로 묶입니다."
             ),
         )
 
@@ -60,10 +60,7 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
         box_opt = layout.box()
         o_col = box_opt.column(align=True)
-        o_col.label(text="장신구 보호 및 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
-        o_col.prop(props, "auto_detect_rigid")
-        if props.auto_detect_rigid:
-            o_col.prop(props, "rigid_max_verts")
+        o_col.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
         o_col.prop(props, "falloff_power")
 
         layout.separator()

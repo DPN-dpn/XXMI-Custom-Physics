@@ -17,21 +17,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         poll=lambda self, obj: obj.type == 'ARMATURE'
     )
 
-    # ── 2. 장신구(강체) 감지 옵션 ──
-    auto_detect_rigid: bpy.props.BoolProperty(
-        name="장신구 자동 강체화",
-        description="가슴 표면과 분리된 작은 독립 메쉬 덩어리(단추, 브로치, 펜던트 등)를 감지하여 젤리처럼 휘지 않고 단단하게 유지되도록 자동 처리합니다",
-        default=True
-    )
-
-    rigid_max_verts: bpy.props.IntProperty(
-        name="장신구 최대 버텍스 수",
-        description="독립 메쉬 섬(Island) 중 정점 수가 이 값 이하인 작은 덩어리만 장신구로 분류합니다",
-        default=120,
-        min=3,
-        max=1000
-    )
-
+    # ── 2. 가슴 가중치 감쇠 옵션 ──
     falloff_power: bpy.props.FloatProperty(
         name="가슴 감쇠 부드러움",
         description="가슴 꼭지점에서 몸통 둘레로 갈수록 가중치가 0으로 감쇠하는 부드러움 곡선 지수입니다 (높을수록 외곽이 단단히 고정됨)",

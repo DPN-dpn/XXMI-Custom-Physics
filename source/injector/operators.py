@@ -1,11 +1,13 @@
 import bpy
+import numpy as np
+import shutil
 import struct
 import os
 import re
 import math
 from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
-from ..utils import ensure_object_visible, get_local_axes
+from ..utils import ensure_object_visible, get_local_axes, read_vertex_group_arrays
 from ..simulation.operators import stop_physics_preview
 
 
@@ -170,21 +172,21 @@ def _find_position_buffers(target_dir, mod_ini_path):
     return matched_buffers
 
 
+def _read_buf_positions_np(buf_path):
+    """Position.buf (stride 40)의 위치(xyz)만 (n, 3) float64 numpy 배열로 빠르게 읽습니다."""
+    data = np.fromfile(buf_path, dtype='<f4')
+    n = len(data) // 10
+    return data[:n * 10].reshape(n, 10)[:, :3].astype(np.float64)
+
+
 def _read_buf_positions(buf_path):
-    positions = []
-    with open(buf_path, 'rb') as f:
-        data = f.read()
-    count = len(data) // 40
-    for i in range(count):
-        px, py, pz = struct.unpack_from('<3f', data, i * 40)
-        positions.append(Vector((px, py, pz)))
-    return positions
+    return [Vector(p) for p in _read_buf_positions_np(buf_path).tolist()]
 
 
-def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj, kd_buf=None, sample_obj=None):
+def _find_best_transform_for_object(kd_buf, sample_obj, obj):
     """
-    모드 익스포트 좌표계와 블렌더 메쉬 좌표계 간 최적 변환 행렬을 추정합니다.
-    단일 통합 메쉬뿐만 아니라 하나의 .buf로 병합 익스포트된 서브 메쉬(예: 분리된 파츠/악세서리)도 정확히 매칭합니다.
+    블렌더 오브젝트(로컬 좌표)의 가중치 정점 샘플이 Position.buf 정점들과 가장 잘 겹치는 변환 행렬을 추정합니다.
+    (buffer = mat @ local). 오브젝트가 하나의 .buf에 병합된 여러 파츠 중 일부여도 정확히 매칭됩니다.
     """
     mw = obj.matrix_world
     rot_x_neg90 = Matrix.Rotation(math.radians(-90), 4, 'X')
@@ -211,32 +213,14 @@ def _find_best_transform_for_buffer(sample_buf, kd_mesh, obj, kd_buf=None, sampl
     best_score = 999.0
 
     for mat in candidate_mats:
-        try:
-            inv_mat = mat.inverted()
-        except Exception:
-            continue
-
         dists = []
-        for bp in sample_buf:
-            local_p = inv_mat @ bp
-            _, _, dist = kd_mesh.find(local_p)
+        for op in sample_obj:
+            _, _, dist = kd_buf.find(mat @ op)
             dists.append(dist)
 
         dists.sort()
         p80_idx = max(0, int(len(dists) * 0.8) - 1)
         score = dists[p80_idx]
-
-        # 서브 메쉬(오브젝트가 버퍼의 일부 파츠인 경우) 역방향 일치도 검사
-        if score > 1e-3 and kd_buf is not None and sample_obj:
-            rev_dists = []
-            for op in sample_obj:
-                buf_p = mat @ op
-                _, _, r_dist = kd_buf.find(buf_p)
-                rev_dists.append(r_dist)
-            rev_dists.sort()
-            rev_p80_idx = max(0, int(len(rev_dists) * 0.8) - 1)
-            score = min(score, rev_dists[rev_p80_idx])
-
         if score < best_score:
             best_score = score
             best_mat = mat
@@ -446,6 +430,76 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
         f.write(hlsl_code)
 
 
+def _classify_ini_line(stripped):
+    low = stripped.lower()
+    if not low or low.startswith(';'):
+        return 'skip'
+    if re.match(r'^if\b', low):
+        return 'if'
+    if re.match(r'^(else\s+if|elif)\b', low) or re.match(r'^else\b', low):
+        return 'else'
+    if re.match(r'^endif\b', low):
+        return 'endif'
+    if low.startswith('drawindexed') or low.startswith('draw'):
+        return 'draw'
+    return 'stmt'
+
+
+def _find_motion_insert_index(lines, sec_name_lower):
+    """
+    토글(if/else if) 구조로 drawindexed가 여러 분기에 흩어져 있는 섹션에서도
+    '어떤 토글 상태에서든 항상 실행되는 지점'에 모션 추적 패스를 넣기 위한 줄 인덱스를 찾습니다.
+
+    - 첫 drawindexed가 if 분기 안쪽에 있으면, 그 분기를 감싸는 최상위 if 블록 '바로 앞'에 삽입합니다.
+    - 단, 최상위 if가 섹션 전체를 감싸는 래퍼(match_first_index / ib / run 등 준비 구문을 포함)인 경우에는
+      그 준비 구문 직후(첫 중첩 if 또는 draw 직전)에 삽입합니다.
+    """
+    start = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith('[') and s.endswith(']'):
+            name = s[1:-1].strip().lower()
+            if start is None:
+                if name == sec_name_lower:
+                    start = i + 1
+            else:
+                end = i
+                break
+    if start is None:
+        return None
+
+    stack = []
+    first_draw = None
+    for i in range(start, end):
+        kind = _classify_ini_line(lines[i].strip())
+        if kind == 'if':
+            stack.append(i)
+        elif kind == 'endif':
+            if stack:
+                stack.pop()
+        elif kind == 'draw':
+            first_draw = i
+            break
+
+    if first_draw is None:
+        return None
+    if not stack:
+        return first_draw
+
+    outer = stack[0]
+    has_preamble = False
+    for i in range(outer + 1, end):
+        kind = _classify_ini_line(lines[i].strip())
+        if kind == 'stmt':
+            has_preamble = True
+        elif kind in ('if', 'draw'):
+            return i if has_preamble else outer
+        elif kind in ('else', 'endif'):
+            break
+    return outer
+
+
 def _inject_physics_into_ini(ini_path, matched_buffers, props, master_idx=None):
     with open(ini_path, 'r', encoding='utf-8') as f:
         raw_lines = f.readlines()
@@ -480,7 +534,9 @@ def _inject_physics_into_ini(ini_path, matched_buffers, props, master_idx=None):
     current_sec = None
     motion_injected = False
 
-    for line in clean_lines:
+    motion_insert_idx = _find_motion_insert_index(clean_lines, master_draw_sec)
+
+    for line_no, line in enumerate(clean_lines):
         l_strip = line.strip()
         ll = l_strip.lower()
 
@@ -494,21 +550,20 @@ def _inject_physics_into_ini(ini_path, matched_buffers, props, master_idx=None):
                 constants_injected = True
             continue
 
-        # Master Draw 섹션 내부에서 drawindexed / draw 호출 직전에 단 하나의 통합 모션 추적 패스 주입
-        if current_sec and current_sec.lower() == master_draw_sec and not motion_injected:
-            if ll.startswith("drawindexed") or ll.startswith("draw"):
-                indent = line[:len(line) - len(line.lstrip())]
-                out_lines.append(f"{indent}; [XXMI-PHYSICS-MOTION-START]\n")
-                if use_debug:
-                    out_lines.append(f"{indent}if $xxmi_phys_enable == 1\n")
-                    out_lines.append(f"{indent}    ResourceLiveMesh_{master_idx} = copy vb0\n")
-                    out_lines.append(f"{indent}    run = CustomShaderPhysicsMotion_{master_idx}\n")
-                    out_lines.append(f"{indent}endif\n")
-                else:
-                    out_lines.append(f"{indent}ResourceLiveMesh_{master_idx} = copy vb0\n")
-                    out_lines.append(f"{indent}run = CustomShaderPhysicsMotion_{master_idx}\n")
-                out_lines.append(f"{indent}; [XXMI-PHYSICS-MOTION-END]\n")
-                motion_injected = True
+        # Master Draw 섹션에서 토글 분기와 무관하게 항상 실행되는 지점에 단 하나의 통합 모션 추적 패스 주입
+        if line_no == motion_insert_idx and not motion_injected:
+            indent = line[:len(line) - len(line.lstrip())]
+            out_lines.append(f"{indent}; [XXMI-PHYSICS-MOTION-START]\n")
+            if use_debug:
+                out_lines.append(f"{indent}if $xxmi_phys_enable == 1\n")
+                out_lines.append(f"{indent}    ResourceLiveMesh_{master_idx} = copy vb0\n")
+                out_lines.append(f"{indent}    run = CustomShaderPhysicsMotion_{master_idx}\n")
+                out_lines.append(f"{indent}endif\n")
+            else:
+                out_lines.append(f"{indent}ResourceLiveMesh_{master_idx} = copy vb0\n")
+                out_lines.append(f"{indent}run = CustomShaderPhysicsMotion_{master_idx}\n")
+            out_lines.append(f"{indent}; [XXMI-PHYSICS-MOTION-END]\n")
+            motion_injected = True
 
         # Blend 섹션의 vb0 교체
         if (ll.startswith("vb0 ") or ll.startswith("vb0=")) and "resourcephysicsanimated_" not in ll:
@@ -657,50 +712,50 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         mesh_caches = []
         for obj in breast_objs:
             ensure_object_visible(context, obj)
-            mesh = obj.data
-            n_verts = len(mesh.vertices)
-            vg_l_idx = obj.vertex_groups.find("XXMI_Breast_L")
-            vg_r_idx = obj.vertex_groups.find("XXMI_Breast_R")
-            vg_rigid_idx = obj.vertex_groups.find("XXMI_Role_Rigid")
+            n_verts = len(obj.data.vertices)
+            if n_verts == 0:
+                continue
 
-            w_l = [0.0] * n_verts
-            w_r = [0.0] * n_verts
-            is_rigid = [0.0] * n_verts
+            group_map = {}
+            for gname, key in (("XXMI_Breast_L", "l"), ("XXMI_Breast_R", "r"), ("XXMI_Role_Rigid", "rigid")):
+                vg = obj.vertex_groups.get(gname)
+                if vg:
+                    group_map[vg.index] = key
+            arrs = read_vertex_group_arrays(obj, group_map)
+            zeros = np.zeros(n_verts, dtype=np.float32)
+            w_l = arrs.get("l", zeros)
+            w_r = arrs.get("r", zeros)
+            is_rigid = (arrs.get("rigid", zeros) > 0.5).astype(np.float32)
 
-            for v in mesh.vertices:
-                for g in v.groups:
-                    if g.group == vg_l_idx:
-                        w_l[v.index] = g.weight
-                    elif g.group == vg_r_idx:
-                        w_r[v.index] = g.weight
-                    elif g.group == vg_rigid_idx and g.weight > 0.5:
-                        is_rigid[v.index] = 1.0
+            weighted = np.nonzero((w_l > 1e-5) | (w_r > 1e-5))[0]
+            if len(weighted) == 0:
+                continue
 
-            kd = KDTree(n_verts)
-            for i, v in enumerate(mesh.vertices):
-                kd.insert(v.co, i)
-            kd.balance()
+            co = np.empty(n_verts * 3, dtype=np.float32)
+            obj.data.vertices.foreach_get("co", co)
+            co = co.reshape(-1, 3).astype(np.float64)
+            wco = co[weighted]
 
-            obj_sample_size = min(300, n_verts)
-            sample_obj = [
-                mesh.vertices[int(k * (n_verts - 1) / max(1, obj_sample_size - 1))].co.copy()
-                for k in range(obj_sample_size)
-            ] if n_verts > 0 else []
+            n_sample = min(300, len(wco))
+            sample_idx = np.linspace(0, len(wco) - 1, n_sample).astype(np.int64)
+            sample_obj = [Vector(p) for p in wco[sample_idx].tolist()]
 
             mesh_caches.append({
                 "obj": obj,
-                "kd": kd,
+                "wco": wco,
+                "w_l": w_l[weighted],
+                "w_r": w_r[weighted],
+                "rigid": is_rigid[weighted],
                 "sample_obj": sample_obj,
-                "w_l": w_l,
-                "w_r": w_r,
-                "is_rigid": is_rigid,
             })
+
+        if not mesh_caches:
+            self.report({'ERROR'}, "가슴 가중치가 설정된 정점이 없습니다. 1단계에서 가슴 선택 영역을 먼저 등록해주세요.")
+            return {'CANCELLED'}
 
         global_peak_weight = 0.0
         for mcache in mesh_caches:
-            max_l = max(mcache["w_l"]) if mcache["w_l"] else 0.0
-            max_r = max(mcache["w_r"]) if mcache["w_r"] else 0.0
-            global_peak_weight = max(global_peak_weight, max_l, max_r)
+            global_peak_weight = max(global_peak_weight, float(mcache["w_l"].max()), float(mcache["w_r"].max()))
         if global_peak_weight < 0.05:
             global_peak_weight = 1.0
         ini_files = []
@@ -731,75 +786,82 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             matched_in_ini = []
 
             for idx, res_name, raw_fname, buf_v_count, norm_path, blend_sec, draw_sec in pos_buffers:
-                buf_positions = _read_buf_positions(norm_path)
-                if not buf_positions:
+                buf_np = _read_buf_positions_np(norm_path)
+                n_buf = len(buf_np)
+                if n_buf == 0:
                     continue
+                buf_positions = [Vector(p) for p in buf_np.tolist()]
 
-                sample_size = min(300, len(buf_positions))
-                sample_buf = [buf_positions[int(k * (len(buf_positions) - 1) / (sample_size - 1))] for k in range(sample_size)]
-
-                kd_buf = KDTree(len(buf_positions))
+                kd_buf = KDTree(n_buf)
                 for bp_i, bp_co in enumerate(buf_positions):
                     kd_buf.insert(bp_co, bp_i)
                 kd_buf.balance()
 
                 valid_matches = []
-                best_overall_score = 999.0
-
                 for mcache in mesh_caches:
-                    cand_obj = mcache["obj"]
-                    b_mat, b_score = _find_best_transform_for_buffer(
-                        sample_buf, mcache["kd"], cand_obj, kd_buf=kd_buf, sample_obj=mcache["sample_obj"]
-                    )
+                    b_mat, b_score = _find_best_transform_for_object(kd_buf, mcache["sample_obj"], mcache["obj"])
                     if b_mat is not None and b_score <= 0.05:
-                        valid_matches.append((mcache, b_mat.inverted(), b_score))
-                        if b_score < best_overall_score:
-                            best_overall_score = b_score
+                        valid_matches.append((mcache, b_mat, b_score))
 
-                if not valid_matches or best_overall_score > 0.05:
+                if not valid_matches:
                     continue
 
-                # 가장 일치도가 높은 메쉬를 우선하되, 동일 버퍼로 병합된 서브 메쉬들도 함께 매핑
-                valid_matches.sort(key=lambda x: x[2])
                 for mcache, _, _ in valid_matches:
                     matched_obj_names.add(mcache["obj"].name)
 
+                # 모든 매칭 오브젝트의 가중치 정점을 버퍼 좌표계로 변환하여 하나의 KD-Tree로 통합
+                # (동일 3D 좌표의 정점은 오브젝트(Body/Hair 등)와 무관하게 동일한 가중치를 공유)
+                pts_chunks = []
+                wl_chunks = []
+                wr_chunks = []
+                rig_chunks = []
+                for mcache, b_mat, _ in valid_matches:
+                    M = np.array(b_mat, dtype=np.float64)
+                    pts_chunks.append(mcache["wco"] @ M[:3, :3].T + M[:3, 3])
+                    wl_chunks.append(mcache["w_l"])
+                    wr_chunks.append(mcache["w_r"])
+                    rig_chunks.append(mcache["rigid"])
+
+                all_pts = np.concatenate(pts_chunks, axis=0)
+                all_wl = np.concatenate(wl_chunks)
+                all_wr = np.concatenate(wr_chunks)
+                all_rig = np.concatenate(rig_chunks)
+
+                tol = min(0.02, max(2e-4, 2.0 * max(s for _, _, s in valid_matches)))
+
+                kd_w = KDTree(len(all_pts))
+                for k, p in enumerate(all_pts.tolist()):
+                    kd_w.insert(p, k)
+                kd_w.balance()
+
+                # 가중치 정점 영역(AABB) 밖의 버퍼 정점은 검색 없이 0으로 처리 (대형 모드 속도 최적화)
+                lo = all_pts.min(axis=0) - tol
+                hi = all_pts.max(axis=0) + tol
+                in_box = np.all((buf_np >= lo) & (buf_np <= hi), axis=1)
+                cand_idx = np.nonzero(in_box)[0]
+
+                wl_out = np.zeros(n_buf, dtype=np.float32)
+                wr_out = np.zeros(n_buf, dtype=np.float32)
+                rig_out = np.zeros(n_buf, dtype=np.float32)
+
+                for i in cand_idx.tolist():
+                    hits = kd_w.find_range(buf_positions[i], tol)
+                    if not hits:
+                        continue
+                    k = max((h[1] for h in hits), key=lambda kk: all_wl[kk] + all_wr[kk])
+                    wl_out[i] = all_wl[k]
+                    wr_out[i] = all_wr[k]
+                    rig_out[i] = all_rig[k]
+
+                max_wl = float(wl_out.max())
+                max_wr = float(wr_out.max())
+                peak_l_idx = int(wl_out.argmax())
+                peak_r_idx = int(wr_out.argmax())
+
                 # 버퍼 정점별 가중치 매핑: stride 16 (float4: wl, wr, is_rigid, 0.0)
-                map_bytes = bytearray()
-                max_wl = 0.0
-                max_wr = 0.0
-                peak_l_idx = 0
-                peak_r_idx = 0
-
-                for bp_idx, bp in enumerate(buf_positions):
-                    best_dist = 999.0
-                    vl = 0.0
-                    vr = 0.0
-                    vrigid = 0.0
-
-                    for m_i, (mcache, inv_mat, _) in enumerate(valid_matches):
-                        local_p = inv_mat @ bp
-                        _, v_idx, dist = mcache["kd"].find(local_p)
-                        max_tol = 0.02 if m_i == 0 else 0.002
-                        if dist <= max_tol:
-                            cand_wl = mcache["w_l"][v_idx]
-                            cand_wr = mcache["w_r"][v_idx]
-                            cand_rig = mcache["is_rigid"][v_idx]
-                            # 더 가까운 정점 선택 (동일 좌표 공유 시 가중치가 있는 쪽 우선)
-                            if dist < best_dist - 1e-4 or (abs(dist - best_dist) <= 1e-4 and (cand_wl + cand_wr) > (vl + vr)):
-                                best_dist = dist
-                                vl = cand_wl
-                                vr = cand_wr
-                                vrigid = cand_rig
-
-                    if vl > max_wl:
-                        max_wl = vl
-                        peak_l_idx = bp_idx
-                    if vr > max_wr:
-                        max_wr = vr
-                        peak_r_idx = bp_idx
-
-                    map_bytes.extend(struct.pack('<4f', vl, vr, vrigid, 0.0))
+                map_bytes = np.stack(
+                    [wl_out, wr_out, rig_out, np.zeros(n_buf, dtype=np.float32)], axis=1
+                ).astype('<f4').tobytes()
 
                 # 사용자가 직접 선택한 가슴 영역 가중치(XXMI_Breast_L / XXMI_Breast_R) 존재 여부 확인
                 has_breast = (max_wl > 0.001 or max_wr > 0.001)
@@ -810,23 +872,14 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         f.write(map_bytes)
 
                     # 흉골/몸통 중심 정점(가슴 가중치가 0이면서 양 가슴 중심에 가장 가까운 기준점) 탐색
-                    breast_pts = []
-                    for bp_idx, bp in enumerate(buf_positions):
-                        wl, wr, _, _ = struct.unpack_from('<4f', map_bytes, bp_idx * 16)
-                        if wl > 0.1 or wr > 0.1:
-                            breast_pts.append(bp)
-
                     best_root_idx = 0
-                    if breast_pts:
-                        center_breast = sum(breast_pts, Vector((0, 0, 0))) / len(breast_pts)
-                        best_root_dist = 999.0
-                        for bp_idx, bp in enumerate(buf_positions):
-                            wl, wr, _, _ = struct.unpack_from('<4f', map_bytes, bp_idx * 16)
-                            if wl < 0.01 and wr < 0.01:
-                                dist = (bp - center_breast).length
-                                if dist < best_root_dist:
-                                    best_root_dist = dist
-                                    best_root_idx = bp_idx
+                    breast_mask = (wl_out > 0.1) | (wr_out > 0.1)
+                    if breast_mask.any():
+                        center_breast = buf_np[breast_mask].mean(axis=0)
+                        root_dist = np.linalg.norm(buf_np - center_breast, axis=1)
+                        root_dist[(wl_out >= 0.01) | (wr_out >= 0.01)] = np.inf
+                        if np.isfinite(root_dist).any():
+                            best_root_idx = int(root_dist.argmin())
 
                     # 1. 런타임 물리 상태 버퍼 초기화 (.buf)
                     _export_physics_state_buf(custom_physics_dir, idx)
@@ -834,10 +887,10 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     _export_physics_motion_hlsl(custom_physics_dir, idx, best_root_idx, props)
                     # 3. 계산된 변위를 정점에 적용하는 스키닝 쉐이더 (.hlsl)
                     # 다중 오브젝트(Body 케이스 + Hair 악세서리 등)가 동일한 가중치에서 100% 동일한 변위를 갖도록 global_peak_weight로 통일
-                    _export_vertex_physics_hlsl(custom_physics_dir, idx, len(buf_positions), props, global_peak_weight)
+                    _export_vertex_physics_hlsl(custom_physics_dir, idx, n_buf, props, global_peak_weight)
                     total_injected_buffers += 1
 
-                matched_in_ini.append((idx, res_name, raw_fname, len(buf_positions), has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
+                matched_in_ini.append((idx, res_name, raw_fname, n_buf, has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
 
             if matched_in_ini:
                 _inject_physics_into_ini(ini_path, matched_in_ini, props)
@@ -937,8 +990,6 @@ def _export_physics_config_json(export_dir, props, context):
         "inertia": float(getattr(props, "inertia", 1.2)),
         "idle_motion": float(getattr(props, "idle_motion", 0.4)),
         "falloff_power": float(getattr(props, "falloff_power", 1.6)),
-        "auto_detect_rigid": bool(getattr(props, "auto_detect_rigid", True)),
-        "rigid_max_verts": int(getattr(props, "rigid_max_verts", 120)),
         "debug_mode": bool(getattr(props, "debug_mode", False)),
         "debug_toggle_key": str(getattr(props, "debug_toggle_key", "h")),
         "bones": bones_data,
@@ -981,8 +1032,6 @@ def _load_physics_from_mod(mod_folder, context, props):
             props.inertia = float(cfg.get("inertia", props.inertia))
             props.idle_motion = float(cfg.get("idle_motion", props.idle_motion))
             props.falloff_power = float(cfg.get("falloff_power", props.falloff_power))
-            props.auto_detect_rigid = bool(cfg.get("auto_detect_rigid", props.auto_detect_rigid))
-            props.rigid_max_verts = int(cfg.get("rigid_max_verts", props.rigid_max_verts))
             props.debug_mode = bool(cfg.get("debug_mode", props.debug_mode))
             props.debug_toggle_key = str(cfg.get("debug_toggle_key", props.debug_toggle_key))
             bones_data = cfg.get("bones", {})

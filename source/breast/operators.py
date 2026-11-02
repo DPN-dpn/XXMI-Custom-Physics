@@ -1,9 +1,17 @@
 import bpy
 import bmesh
 import math
+import numpy as np
+from collections import deque
 from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
-from ..utils import ensure_object_visible
+from ..utils import (
+    ensure_object_visible,
+    read_vertex_group_arrays,
+    world_vertex_positions,
+    mesh_edge_arrays,
+    label_components,
+)
 
 BREAST_RIG_NAME = "XXMI_Breast_Rig"
 VG_BREAST_L = "XXMI_Breast_L"
@@ -63,10 +71,10 @@ def _find_connected_islands(vert_indices, edges_list):
     for v in vert_indices:
         if v not in visited:
             island = []
-            queue = [v]
+            queue = deque([v])
             visited.add(v)
             while queue:
-                curr = queue.pop(0)
+                curr = queue.popleft()
                 island.append(curr)
                 for neighbor in adj[curr]:
                     if neighbor not in visited:
@@ -103,8 +111,8 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         for obj in target_objs:
             ensure_object_visible(context, obj)
 
-        # 1. 대상 메쉬들에서 선택된 정점 수집
-        obj_sel_data = {}  # obj -> {"left": [vi, ...], "right": [vi, ...], "edges": [...], "mw": Matrix}
+        # 1. 대상 메쉬들에서 선택된 정점 수집 (numpy 일괄 처리)
+        obj_sel_data = {}  # obj -> {"left": [vi, ...], "right": [vi, ...], "world": ndarray(n,3), "mw": Matrix}
         all_left_world_pts = []
         all_right_world_pts = []
 
@@ -113,28 +121,30 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         for obj in target_objs:
             mesh = obj.data
             mw = obj.matrix_world
-            sel_indices = [v.index for v in mesh.vertices if v.select]
-            if not sel_indices:
+            n_verts = len(mesh.vertices)
+            if n_verts == 0:
                 continue
 
-            total_sel_count += len(sel_indices)
-            edges_list = [(e.vertices[0], e.vertices[1]) for e in mesh.edges]
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = np.nonzero(sel_mask)[0]
+            if len(sel_indices) == 0:
+                continue
 
-            left_verts = []
-            right_verts = []
-            for vi in sel_indices:
-                w_pos = mw @ mesh.vertices[vi].co
-                if w_pos.x >= 0.0:
-                    left_verts.append(vi)
-                    all_left_world_pts.append(w_pos)
-                else:
-                    right_verts.append(vi)
-                    all_right_world_pts.append(w_pos)
+            world = world_vertex_positions(obj)
+
+            total_sel_count += len(sel_indices)
+
+            is_left = world[sel_indices, 0] >= 0.0
+            left_idx = sel_indices[is_left]
+            right_idx = sel_indices[~is_left]
+            all_left_world_pts.extend(Vector(p) for p in world[left_idx].tolist())
+            all_right_world_pts.extend(Vector(p) for p in world[right_idx].tolist())
 
             obj_sel_data[obj] = {
-                "left": left_verts,
-                "right": right_verts,
-                "edges": edges_list,
+                "left": left_idx.tolist(),
+                "right": right_idx.tolist(),
+                "world": world,
                 "mw": mw,
             }
 
@@ -200,79 +210,52 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         falloff_p = props.falloff_power
         total_rigid_islands = 0
 
-        # 다중 오브젝트(Body, Hair 등) 전체에서 가장 큰 메쉬 섬(메인 가슴 표면) 크기 산출
-        global_max_island_len = {"L": 0, "R": 0}
-        obj_side_islands = {}
-        for obj, sdata in obj_sel_data.items():
-            edges_list = sdata["edges"]
-            obj_side_islands[obj] = {}
-            for side, vlist in (("L", sdata["left"]), ("R", sdata["right"])):
-                if not vlist:
-                    obj_side_islands[obj][side] = []
-                    continue
-                isls = _find_connected_islands(vlist, edges_list)
-                isls.sort(key=len, reverse=True)
-                obj_side_islands[obj][side] = isls
-                if isls:
-                    global_max_island_len[side] = max(global_max_island_len[side], len(isls[0]))
-
         for obj, sdata in obj_sel_data.items():
             mesh = obj.data
-            mw = sdata["mw"]
-            edges_list = sdata["edges"]
+            world = sdata["world"]
+            n_verts = len(mesh.vertices)
 
             vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
             vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
             vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-            vg_rigid_idx = obj.vertex_groups.find(VG_RIGID)
 
             # 사용자가 수동 지정해 둔 기존 강체 정점 보존
-            existing_rigid = set()
-            for v in mesh.vertices:
-                for g in v.groups:
-                    if g.group == vg_rigid_idx and g.weight > 0.5:
-                        existing_rigid.add(v.index)
+            prev = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"})
+            existing_rigid = prev["rigid"] > 0.5
 
-            all_v_indices = [v.index for v in mesh.vertices]
+            all_v_indices = list(range(n_verts))
             vg_l.remove(all_v_indices)
             vg_r.remove(all_v_indices)
             vg_rigid.remove(all_v_indices)
 
-            selected_set = set(sdata["left"]) | set(sdata["right"])
-            preserved_rigid = existing_rigid & selected_set
-            if preserved_rigid:
-                vg_rigid.add(list(preserved_rigid), 1.0, 'REPLACE')
+            selected = np.zeros(n_verts, dtype=bool)
+            selected[sdata["left"]] = True
+            selected[sdata["right"]] = True
 
+            rigid_all = existing_rigid & selected
+
+            # A) 강체 장신구는 사용자가 [선택 부위를 강체 장신구로 지정]으로 직접 지정한 정점만 사용합니다. (자동 감지 없음)
+
+            # B) 피부 및 옷감 정점 감쇠 베이크 (동일 3D 좌표의 다중 메쉬가 100% 동일한 가중치를 공유하도록 순수 거리 감쇠 유지)
             for side, vlist, vg in (("L", sdata["left"], vg_l), ("R", sdata["right"], vg_r)):
                 if not vlist or side not in anchor_info:
                     continue
 
-                cent = anchor_info[side]["centroid"]
+                cent = np.array(anchor_info[side]["centroid"], dtype=np.float64)
                 radius = anchor_info[side]["radius"]
 
-                # A) 장신구(독립 메쉬 섬) 자동 감지 (Hair 등 서브 오브젝트에 장신구만 단독으로 있는 경우도 감지)
-                rigid_verts = set(v for v in vlist if v in preserved_rigid)
-                if props.auto_detect_rigid:
-                    islands = obj_side_islands[obj].get(side, [])
-                    max_main_len = global_max_island_len[side]
-                    for idx_isl, isl in enumerate(islands):
-                        is_main_breast = (idx_isl == 0 and len(isl) == max_main_len and len(isl) > props.rigid_max_verts)
-                        if not is_main_breast and len(isl) <= props.rigid_max_verts:
-                            rigid_verts.update(isl)
-                            total_rigid_islands += 1
+                idx_arr = np.array(vlist, dtype=np.int64)
+                dist_norm = np.linalg.norm(world[idx_arr] - cent, axis=1) / max(0.02, radius * 1.5)
+                w_arr = np.power(np.clip(1.0 - dist_norm, 0.0, 1.0), falloff_p)
 
-                # B) 피부 및 옷감 정점 감쇠 베이크 (동일 3D 좌표의 다중 메쉬가 100% 동일한 가중치를 공유하도록 순수 거리 감쇠 유지)
-                for vi in vlist:
-                    if vi in rigid_verts:
+                for vi, wi in zip(vlist, w_arr.tolist()):
+                    if rigid_all[vi] or wi <= 0.0:
                         continue
-                    p_w = mw @ mesh.vertices[vi].co
-                    dist_norm = (p_w - cent).length / max(0.02, radius * 1.5)
-                    w = max(0.0, min(1.0, 1.0 - dist_norm))
-                    w = math.pow(w, falloff_p)
-                    vg.add([vi], w, 'REPLACE')
+                    vg.add([vi], wi, 'REPLACE')
 
-                if rigid_verts:
-                    vg_rigid.add(list(rigid_verts), 1.0, 'REPLACE')
+            rigid_list = np.nonzero(rigid_all)[0].tolist()
+            if rigid_list:
+                vg_rigid.add(rigid_list, 1.0, 'REPLACE')
 
         # C) 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
         num_clusters = _unify_rigid_clusters_across_objects(list(obj_sel_data.keys()), anchor_info, falloff_p)
@@ -294,100 +277,95 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
     """
     여러 오브젝트(예: Hair의 악세서리 + Body의 악세서리 케이스)에 나뉘어 있는 강체 장신구(XXMI_Role_Rigid)들을
-    3D 월드 공간 위치 기준으로 하나의 '통합 강체 클러스터(Cross-Object Rigid Cluster)'로 묶어
-    완벽히 동일한 단일 (w_l, w_r) 가중치를 부여하고, 강체 바로 밑/주변 케이스 정점(6mm 이내)도
-    동일 가중치로 동기화하여 악세서리가 케이스를 뚫고 나오는 현상을 원천 방지합니다.
+    3D 월드 공간에서 서로 맞닿아 있는(5mm 이내) 덩어리끼리 하나의 '통합 강체 클러스터'로 묶어
+    완벽히 동일한 단일 (w_l, w_r) 가중치를 부여합니다. (악세서리가 케이스를 뚫고 나오는 현상 방지)
+    강체로 지정되지 않은 정점은 일절 건드리지 않습니다.
     """
     if not target_objs or not bone_info:
         return 0
 
-    all_islands = []  # list of dicts: {"obj": obj, "verts": isl, "world_pts": [...], "bmin": Vector, "bmax": Vector, "cent": Vector}
+    islands = []  # {"obj", "verts", "pts"(ndarray), "bmin", "bmax", "cent"}
 
     for obj in target_objs:
         if obj.type != 'MESH':
             continue
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
+        if vg_rigid is None:
+            continue
+
         mesh = obj.data
-        mw = obj.matrix_world
-        vg_rigid_idx = obj.vertex_groups.find(VG_RIGID)
-        if vg_rigid_idx < 0:
+        n_verts = len(mesh.vertices)
+        rigid_mask = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"})["rigid"] > 0.5
+        if not rigid_mask.any():
             continue
 
-        rigid_v_list = []
-        for v in mesh.vertices:
-            for g in v.groups:
-                if g.group == vg_rigid_idx and g.weight > 0.5:
-                    rigid_v_list.append(v.index)
-                    break
+        world = world_vertex_positions(obj)
+        e0, e1 = mesh_edge_arrays(mesh)
+        sub = rigid_mask[e0] & rigid_mask[e1]
+        lab = label_components(n_verts, e0[sub], e1[sub])
 
-        if not rigid_v_list:
-            continue
-
-        edges_list = [(e.vertices[0], e.vertices[1]) for e in mesh.edges]
-        islands = _find_connected_islands(rigid_v_list, edges_list)
-        for isl in islands:
-            if not isl:
+        ridx = np.nonzero(rigid_mask)[0]
+        _, inv = np.unique(lab[ridx], return_inverse=True)
+        order = np.argsort(inv, kind='stable')
+        sorted_idx = ridx[order]
+        splits = np.cumsum(np.bincount(inv))[:-1]
+        for group in np.split(sorted_idx, splits):
+            if len(group) == 0:
                 continue
-            w_pts = [mw @ mesh.vertices[vi].co for vi in isl]
-            xs = [p.x for p in w_pts]
-            ys = [p.y for p in w_pts]
-            zs = [p.z for p in w_pts]
-            bmin = Vector((min(xs), min(ys), min(zs)))
-            bmax = Vector((max(xs), max(ys), max(zs)))
-            cent = sum(w_pts, Vector((0.0, 0.0, 0.0))) / len(w_pts)
-            # 클러스터 거리 판별용 샘플 정점 (최대 40개)
-            step = max(1, len(w_pts) // 40)
-            sample_pts = w_pts[::step]
-            all_islands.append({
+            pts = world[group]
+            islands.append({
                 "obj": obj,
-                "verts": isl,
-                "world_pts": w_pts,
-                "sample_pts": sample_pts,
-                "bmin": bmin,
-                "bmax": bmax,
-                "cent": cent,
+                "verts": group.tolist(),
+                "pts": pts,
+                "bmin": pts.min(axis=0),
+                "bmax": pts.max(axis=0),
+                "cent": pts.mean(axis=0),
             })
 
-    if not all_islands:
+    if not islands:
         return 0
 
-    # 3D 바운딩 박스 중첩 및 근접도(2.5cm) 기준으로 다중 오브젝트 강체 섬들을 통합 클러스터로 병합
-    n_isl = len(all_islands)
-    margin = 0.025
-    adj = {i: [] for i in range(n_isl)}
+    n_isl = len(islands)
+    margin = 0.005
+    parent = list(range(n_isl))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    kd_cache = {}
+
+    def _get_kd(i):
+        kd = kd_cache.get(i)
+        if kd is None:
+            pts = islands[i]["pts"]
+            kd = KDTree(len(pts))
+            for k, p in enumerate(pts.tolist()):
+                kd.insert(Vector(p), k)
+            kd.balance()
+            kd_cache[i] = kd
+        return kd
 
     for i in range(n_isl):
-        a = all_islands[i]
+        a = islands[i]
         for j in range(i + 1, n_isl):
-            b = all_islands[j]
-            # AABB + margin 중첩 검사
-            if (a["bmin"].x - margin <= b["bmax"].x and a["bmax"].x + margin >= b["bmin"].x and
-                a["bmin"].y - margin <= b["bmax"].y and a["bmax"].y + margin >= b["bmin"].y and
-                a["bmin"].z - margin <= b["bmax"].z and a["bmax"].z + margin >= b["bmin"].z):
-                connected = (a["cent"] - b["cent"]).length <= 0.06
-                if not connected:
-                    for pa in a["sample_pts"]:
-                        if any((pa - pb).length <= margin for pb in b["sample_pts"]):
-                            connected = True
-                            break
-                if connected:
-                    adj[i].append(j)
-                    adj[j].append(i)
+            if _find(i) == _find(j):
+                continue
+            b = islands[j]
+            if np.any(a["bmin"] - margin > b["bmax"]) or np.any(a["bmax"] + margin < b["bmin"]):
+                continue
+            step = max(1, len(a["pts"]) // 64)
+            kd_b = _get_kd(j)
+            for p in a["pts"][::step].tolist():
+                if kd_b.find(Vector(p))[2] <= margin:
+                    parent[_find(i)] = _find(j)
+                    break
 
-    visited = set()
-    clusters = []
+    clusters = {}
     for i in range(n_isl):
-        if i not in visited:
-            comp = []
-            queue = [i]
-            visited.add(i)
-            while queue:
-                curr = queue.pop(0)
-                comp.append(all_islands[curr])
-                for nxt in adj[curr]:
-                    if nxt not in visited:
-                        visited.add(nxt)
-                        queue.append(nxt)
-            clusters.append(comp)
+        clusters.setdefault(_find(i), []).append(islands[i])
 
     def _eval_side_weight(pt, side):
         if side not in bone_info:
@@ -396,45 +374,35 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         radius = bone_info[side]["radius"]
         dist_norm = (pt - cent).length / max(0.02, radius * 1.5)
         w = math.pow(max(0.0, 1.0 - dist_norm), falloff_p)
-        return max(0.15, min(1.0, w))
+        return max(0.15, min(1.0, w)) if w > 0.0 else 0.0
 
-    # 모든 강체 정점들의 월드 좌표 KDTree 구축 (주변 케이스/소켓 정점 6mm 동기화용)
-    total_rigid_pts = sum(len(isl["world_pts"]) for comp in clusters for isl in comp)
-    kd_rigid = KDTree(total_rigid_pts) if total_rigid_pts > 0 else None
-    kd_cluster_weights = []
-    kd_idx = 0
+    for comp in clusters.values():
+        all_pts = np.concatenate([isl["pts"] for isl in comp], axis=0)
+        c_cent = Vector(all_pts.mean(axis=0).tolist())
+        min_x = float(all_pts[:, 0].min())
+        max_x = float(all_pts[:, 0].max())
 
-    for comp in clusters:
-        cluster_pts = [p for isl in comp for p in isl["world_pts"]]
-        c_cent = sum(cluster_pts, Vector((0.0, 0.0, 0.0))) / len(cluster_pts)
-        min_x = min(p.x for p in cluster_pts)
-        max_x = max(p.x for p in cluster_pts)
+        has_l = "L" in bone_info
+        has_r = "R" in bone_info
 
-        # 중앙선(X=0)에 걸쳐 있는 가슴 중앙 장신구/케이스는 좌/우 가중치를 동일 비율로 묶어 반으로 갈라지지 않게 보호
-        if min_x < -0.004 and max_x > 0.004 and "L" in bone_info and "R" in bone_info:
-            wl_raw = _eval_side_weight(c_cent, "L")
-            wr_raw = _eval_side_weight(c_cent, "R")
+        # 중앙선(X=0)에 걸쳐 있는 장신구/케이스는 좌/우 가중치를 비율로 묶어 반으로 갈라지지 않게 보호
+        if min_x < -0.004 and max_x > 0.004 and has_l and has_r:
             span = max(0.02, max_x - min_x)
             t_l = max(0.0, min(1.0, 0.5 + c_cent.x / span))
-            cluster_wl = wl_raw * t_l
-            cluster_wr = wr_raw * (1.0 - t_l)
+            cluster_wl = _eval_side_weight(c_cent, "L") * t_l
+            cluster_wr = _eval_side_weight(c_cent, "R") * (1.0 - t_l)
         elif c_cent.x >= 0.0:
-            cluster_wl = _eval_side_weight(c_cent, "L") if "L" in bone_info else _eval_side_weight(c_cent, "R")
-            cluster_wr = 0.0 if "L" in bone_info else cluster_wl
-            if "L" not in bone_info:
-                cluster_wl = 0.0
+            cluster_wl = _eval_side_weight(c_cent, "L") if has_l else 0.0
+            cluster_wr = 0.0
         else:
-            cluster_wr = _eval_side_weight(c_cent, "R") if "R" in bone_info else _eval_side_weight(c_cent, "L")
-            cluster_wl = 0.0 if "R" in bone_info else cluster_wr
-            if "R" not in bone_info:
-                cluster_wr = 0.0
+            cluster_wl = 0.0
+            cluster_wr = _eval_side_weight(c_cent, "R") if has_r else 0.0
 
         for isl in comp:
             obj = isl["obj"]
             verts = isl["verts"]
             vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
             vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
 
             if cluster_wl > 0.0:
                 vg_l.add(verts, cluster_wl, 'REPLACE')
@@ -445,77 +413,6 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
                 vg_r.add(verts, cluster_wr, 'REPLACE')
             else:
                 vg_r.remove(verts)
-
-            vg_rigid.add(verts, 1.0, 'REPLACE')
-
-            if kd_rigid is not None:
-                for p in isl["world_pts"]:
-                    kd_rigid.insert(p, kd_idx)
-                    kd_cluster_weights.append((cluster_wl, cluster_wr))
-                    kd_idx += 1
-
-    # 다른 오브젝트(예: Body에 붙어 있는 케이스 테두리/바닥)에서 강체 장신구와 밀착(6mm 이내)된 정점들을
-    # 해당 강체 클러스터와 동일한 가중치로 고정하고, 주변 피부(6mm~15mm)를 매끄럽게 보간
-    if kd_rigid is not None and kd_idx > 0:
-        kd_rigid.balance()
-        r_lock = 0.006   # 6mm 이내: 케이스/소켓 정점으로 간주하여 강체와 100% 동일 가중치로 잠금
-        r_blend = 0.015  # 6mm ~ 15mm: 주변 피부 찢어짐 방지용 스무스 전이 구간
-
-        for obj in target_objs:
-            if obj.type != 'MESH':
-                continue
-            mesh = obj.data
-            mw = obj.matrix_world
-            vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
-            vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-            vg_l_idx = obj.vertex_groups.find(VG_BREAST_L)
-            vg_r_idx = obj.vertex_groups.find(VG_BREAST_R)
-            vg_rigid_idx = obj.vertex_groups.find(VG_RIGID)
-
-            for v in mesh.vertices:
-                cur_wl = 0.0
-                cur_wr = 0.0
-                is_already_rigid = False
-                for g in v.groups:
-                    if g.group == vg_rigid_idx and g.weight > 0.5:
-                        is_already_rigid = True
-                        break
-                    elif g.group == vg_l_idx:
-                        cur_wl = g.weight
-                    elif g.group == vg_r_idx:
-                        cur_wr = g.weight
-
-                if is_already_rigid or (cur_wl <= 0.0001 and cur_wr <= 0.0001):
-                    continue
-
-                p_w = mw @ v.co
-                _, nearest_idx, dist = kd_rigid.find(p_w)
-                if dist <= r_lock:
-                    c_wl, c_wr = kd_cluster_weights[nearest_idx]
-                    if c_wl > 0.0:
-                        vg_l.add([v.index], c_wl, 'REPLACE')
-                    else:
-                        vg_l.remove([v.index])
-                    if c_wr > 0.0:
-                        vg_r.add([v.index], c_wr, 'REPLACE')
-                    else:
-                        vg_r.remove([v.index])
-                    vg_rigid.add([v.index], 1.0, 'REPLACE')
-                elif dist < r_blend:
-                    c_wl, c_wr = kd_cluster_weights[nearest_idx]
-                    u = (dist - r_lock) / (r_blend - r_lock)
-                    s = u * u * (3.0 - 2.0 * u)
-                    new_wl = c_wl * (1.0 - s) + cur_wl * s
-                    new_wr = c_wr * (1.0 - s) + cur_wr * s
-                    if new_wl > 0.0001:
-                        vg_l.add([v.index], new_wl, 'REPLACE')
-                    else:
-                        vg_l.remove([v.index])
-                    if new_wr > 0.0001:
-                        vg_r.add([v.index], new_wr, 'REPLACE')
-                    else:
-                        vg_r.remove([v.index])
 
     return len(clusters)
 
@@ -604,63 +501,55 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
 
     for obj in target_objs:
         ensure_object_visible(context, obj)
-        mesh = obj.data
-        mw = obj.matrix_world
 
         vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
         vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
-        vg_l_idx = obj.vertex_groups.find(VG_BREAST_L)
-        vg_r_idx = obj.vertex_groups.find(VG_BREAST_R)
-        vg_rigid_idx = obj.vertex_groups.find(VG_RIGID)
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
 
-        l_verts = []
-        r_verts = []
-        rigid_verts = set()
+        group_map = {vg_l.index: "l", vg_r.index: "r"}
+        if vg_rigid:
+            group_map[vg_rigid.index] = "rigid"
+        arrs = read_vertex_group_arrays(obj, group_map)
+        world = world_vertex_positions(obj)
 
-        for v in mesh.vertices:
-            for g in v.groups:
-                if g.group == vg_rigid_idx and g.weight > 0.5:
-                    rigid_verts.add(v.index)
-                if g.group == vg_l_idx and g.weight > 0.0001:
-                    l_verts.append(v.index)
-                elif g.group == vg_r_idx and g.weight > 0.0001:
-                    r_verts.append(v.index)
+        l_mask = arrs["l"] > 0.0001
+        r_mask = arrs["r"] > 0.0001
+        rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world), dtype=bool)
 
-        # 만약 해당 메쉬에 등록된 가슴/강체 정점이 전혀 없다면, 본 앵커 반경(radius * 1.5) 내의 정점들을 자동 수집
-        if not l_verts and not rigid_verts and "L" in bone_info:
-            cent_l = bone_info["L"]["centroid"]
-            rad_l = bone_info["L"]["radius"]
-            for v in mesh.vertices:
-                p_w = mw @ v.co
-                if p_w.x >= 0.0 and (p_w - cent_l).length <= rad_l * 1.5:
-                    l_verts.append(v.index)
+        # 해당 메쉬에 등록된 가슴/강체 정점이 전혀 없을 때만, 본 앵커 반경(radius * 1.5) 내의 정점을 자동 수집
+        if not l_mask.any() and not r_mask.any() and not rigid_mask.any():
+            if "L" in bone_info:
+                d = np.linalg.norm(world - np.array(bone_info["L"]["centroid"]), axis=1)
+                l_mask = (world[:, 0] >= 0.0) & (d <= bone_info["L"]["radius"] * 1.5)
+            if "R" in bone_info:
+                d = np.linalg.norm(world - np.array(bone_info["R"]["centroid"]), axis=1)
+                r_mask = (world[:, 0] < 0.0) & (d <= bone_info["R"]["radius"] * 1.5)
 
-        if not r_verts and not rigid_verts and "R" in bone_info:
-            cent_r = bone_info["R"]["centroid"]
-            rad_r = bone_info["R"]["radius"]
-            for v in mesh.vertices:
-                p_w = mw @ v.co
-                if p_w.x < 0.0 and (p_w - cent_r).length <= rad_r * 1.5:
-                    r_verts.append(v.index)
-
-        for side, vlist, vg in (("L", l_verts, vg_l), ("R", r_verts, vg_r)):
-            if not vlist or not vg or side not in bone_info:
+        for side, mask, vg in (("L", l_mask, vg_l), ("R", r_mask, vg_r)):
+            if side not in bone_info:
                 continue
 
-            cent = bone_info[side]["centroid"]
+            idx_arr = np.nonzero(mask & ~rigid_mask)[0]
+            if len(idx_arr) == 0:
+                continue
+
+            cent = np.array(bone_info[side]["centroid"], dtype=np.float64)
             radius = bone_info[side]["radius"]
 
-            for vi in vlist:
-                if vi in rigid_verts:
-                    continue
-                p_w = mw @ mesh.vertices[vi].co
-                dist_norm = (p_w - cent).length / max(0.02, radius * 1.5)
-                w = max(0.0, min(1.0, 1.0 - dist_norm))
-                w = math.pow(w, falloff_p)
-                vg.add([vi], w, 'REPLACE')
-                total_recomputed_verts += 1
+            dist_norm = np.linalg.norm(world[idx_arr] - cent, axis=1) / max(0.02, radius * 1.5)
+            w_arr = np.power(np.clip(1.0 - dist_norm, 0.0, 1.0), falloff_p)
 
-        total_recomputed_verts += len(rigid_verts)
+            zero_list = []
+            for vi, wi in zip(idx_arr.tolist(), w_arr.tolist()):
+                if wi <= 0.0:
+                    zero_list.append(vi)
+                else:
+                    vg.add([vi], wi, 'REPLACE')
+                    total_recomputed_verts += 1
+            if zero_list:
+                vg.remove(zero_list)
+
+        total_recomputed_verts += int(np.count_nonzero(rigid_mask))
         updated_obj_count += 1
 
     # 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화

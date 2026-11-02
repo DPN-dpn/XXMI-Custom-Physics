@@ -33,6 +33,74 @@ def ensure_object_visible(context, obj):
         obj.hide_viewport = False
 
 
+def read_vertex_group_arrays(obj, group_map):
+    """
+    {그룹 인덱스: 키} 매핑에 해당하는 버텍스 그룹 가중치를 한 번의 순회로 numpy 배열({키: float32[n]})로 읽어옵니다.
+    """
+    import numpy as np
+    n = len(obj.data.vertices)
+    arrs = {k: np.zeros(n, dtype=np.float32) for k in group_map.values()}
+    if not group_map:
+        return arrs
+    for v in obj.data.vertices:
+        for g in v.groups:
+            key = group_map.get(g.group)
+            if key is not None:
+                arrs[key][v.index] = g.weight
+    return arrs
+
+
+def world_vertex_positions(obj):
+    """오브젝트의 모든 정점을 월드 좌표 (n, 3) float64 numpy 배열로 일괄 반환합니다."""
+    import numpy as np
+    n = len(obj.data.vertices)
+    co = np.empty(n * 3, dtype=np.float32)
+    if n:
+        obj.data.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3).astype(np.float64)
+    m = np.array(obj.matrix_world, dtype=np.float64)
+    return co @ m[:3, :3].T + m[:3, 3]
+
+
+def mesh_edge_arrays(mesh):
+    """메쉬 엣지의 양 끝 정점 인덱스를 (e0, e1) int64 numpy 배열로 반환합니다."""
+    import numpy as np
+    m = len(mesh.edges)
+    if m == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    arr = np.empty(m * 2, dtype=np.int32)
+    mesh.edges.foreach_get("vertices", arr)
+    arr = arr.reshape(-1, 2)
+    return arr[:, 0].astype(np.int64), arr[:, 1].astype(np.int64)
+
+
+def label_components(n, e0, e1):
+    """
+    정점 n개와 엣지 (e0, e1)로 이루어진 그래프의 연결 요소 라벨(각 요소의 대표 정점 인덱스)을 numpy로 계산합니다.
+    파이썬 BFS보다 훨씬 빠르며 정점 수십만 개도 즉시 처리합니다.
+    """
+    import numpy as np
+    lab = np.arange(n, dtype=np.int64)
+    if len(e0) == 0:
+        return lab
+    for _ in range(128):
+        la = lab[e0]
+        lb = lab[e1]
+        mn = np.minimum(la, lb)
+        new = lab.copy()
+        np.minimum.at(new, la, mn)
+        np.minimum.at(new, lb, mn)
+        while True:
+            jumped = new[new]
+            if np.array_equal(jumped, new):
+                break
+            new = jumped
+        if np.array_equal(new, lab):
+            break
+        lab = new
+    return lab
+
+
 def get_local_axes(obj):
     """블렌더 월드 기준 Up(+Z), Right(+X), Forward(-Y)가 오브젝트 로컬 공간에서 어느 방향인지 반환합니다."""
     try:
