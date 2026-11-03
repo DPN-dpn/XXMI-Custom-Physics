@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="3. 모드에 바스트모핑 주입", icon='SHADERFX')
+        layout.label(text="3. 모드에 물리 주입", icon='SHADERFX')
 
     def draw(self, context):
         layout = self.layout
@@ -21,15 +21,13 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[3단계: 타겟 모드에 바스트모핑 HLSL 주입 & 롤백]\n\n"
-                "• 먼저 [대상 게임]을 선택하세요. 게임마다 파이프라인 구조가 달라 주입 방식이 다릅니다.\n"
-                "  (붕괴: 스타레일은 SRMI 스키닝 무결성을 100% 보존하며 DrawIndexed 단계에서 포스트-스키닝 관성을 연산합니다)\n"
-                "• 익스포트된 타겟 모드의 폴더를 지정하고 [모드에 바스트모핑 주입]을 누르면\n"
-                "  가슴 정점 가중치 버퍼(CustomPhysicsMap.buf)와 실시간 HLSL Compute Shader를 생성하고\n"
-                "  모드의 .ini에 자동으로 연결합니다.\n\n"
-                "• 모핑 정보 불러오기: 선택된 모드 폴더 내의 물리 설정(JSON/HLSL)을 읽어와 블렌더로 복원합니다.\n"
-                "• 디버그 모드: 인게임에서 h 키(또는 지정한 키)로 바스트모핑 ON/OFF를 즉시 비교할 수 있습니다.\n"
-                "• 물리 효과 롤백: 주입된 모든 파일과 .ini 구문을 100% 원본 상태로 복원합니다."
+                "[3단계: 모드에 물리 주입 & 롤백]\n\n"
+                "1. [대상 게임]을 선택합니다.\n"
+                "2. 물리를 적용할 [모드 폴더]를 지정합니다.\n"
+                "3. [모드에 물리 주입]을 누르면 인게임에서 동작하는 물리 효과가 모드에 적용됩니다.\n\n"
+                "• [모드 폴더에서 물리 설정 불러오기]: 이미 물리가 주입된 모드 폴더에서 본 위치와 물리 파라미터를 다시 블렌더로 가져옵니다.\n"
+                "• [인게임 ON/OFF 토글 사용]: 게임 실행 중 단축키(기본: h)를 눌러 물리 적용 전/후를 실시간으로 비교할 수 있습니다.\n"
+                "• [물리 효과 롤백 (원본 복원)]: 주입된 물리 효과를 완전히 제거하고 모드를 원본 상태로 복원합니다."
             ),
         )
 
@@ -51,9 +49,9 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
             bcol.prop(props, "debug_toggle_key")
 
         layout.separator()
-        layout.operator("object.xxmi_apply_custom_physics", text="모드에 바스트모핑 주입", icon='SHADERFX')
-        layout.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 모핑 정보 불러오기", icon='IMPORT')
-        layout.operator("object.xxmi_rollback_custom_physics", text="바스트모핑 효과 롤백", icon='RECOVER_LAST')
+        layout.operator("object.xxmi_apply_custom_physics", text="모드에 물리 주입", icon='SHADERFX')
+        layout.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 물리 설정 불러오기", icon='IMPORT')
+        layout.operator("object.xxmi_rollback_custom_physics", text="물리 효과 롤백 (원본 복원)", icon='RECOVER_LAST')
 
 
 classes = (

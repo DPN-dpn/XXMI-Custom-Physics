@@ -339,7 +339,7 @@ def _export_physics_config_json(export_dir, props, context):
 def _load_physics_from_mod(mod_folder, context, props):
     """
     모드 폴더(또는 CustomPhysics 서브폴더)의 XXMI_Physics_Config.json 또는 주입된 HLSL/INI/Map.buf를 읽어
-    물리 시뮬레이션 파라미터, 가상 뼈대(XXMI_Breast_Rig), 가슴 및 강체 장신구(XXMI_Role_Rigid) 정점 그룹을 100% 복원합니다.
+    물리 시뮬레이션 파라미터, 가상 뼈대(XXMI_Breast_Rig), 가슴 및 강체(XXMI_Role_Rigid) 정점 그룹을 100% 복원합니다.
     """
     physics_dir = os.path.join(mod_folder, "CustomPhysics")
     if not os.path.isdir(physics_dir):
@@ -434,7 +434,7 @@ def _load_physics_from_mod(mod_folder, context, props):
             loaded_source = "주입된 HLSL 및 .ini 파싱"
 
     if not loaded_source:
-        return False, "모드 폴더에서 바스트모핑 설정 파일이나 쉐이더를 찾지 못했습니다."
+        return False, "모드 폴더에서 저장된 물리 설정 파일을 찾지 못했습니다."
 
     # 1. Map.buf 및 Position.buf 검색 (서브폴더 및 모드 루트)
     map_files = []
@@ -527,7 +527,7 @@ def _load_physics_from_mod(mod_folder, context, props):
         props.anchor_obj = rig
         restored_rig = True
 
-    # 4. KD-Tree 3D 정합 기반으로 블렌더 메쉬에 가슴 및 강체 장신구(XXMI_Role_Rigid) 정점 그룹 복원
+    # 4. KD-Tree 3D 정합 기반으로 블렌더 메쉬에 가슴 및 강체(XXMI_Role_Rigid) 정점 그룹 복원
     restored_mesh_names = []
     if pairs:
         pair_caches = []
@@ -605,12 +605,12 @@ def _load_physics_from_mod(mod_folder, context, props):
             if non_zero_breast > 0 or rigid_count > 0:
                 restored_mesh_names.append(f"{obj.name} (가슴: {non_zero_breast}개, 강체: {rigid_count}개)")
 
-    # 5. 복원 완료 후 본 위치 기반 가중치 재계산 동기화 (강체 장신구 그룹 보존)
+    # 5. 복원 완료 후 본 위치 기반 가중치 재계산 동기화 (강체 그룹 보존)
     if restored_rig and rig:
         from ..breast.operators import _rebake_mesh_weights_from_rig
         _rebake_mesh_weights_from_rig(context, rig, props)
 
-    rig_str = " (가상 rig 및 가슴/강체 그룹 복원 완료)" if restored_rig else ""
+    rig_str = " (물리 본 및 가슴/강체 그룹 복원 완료)" if restored_rig else ""
     mesh_str = f" [복원 메쉬: {', '.join(restored_mesh_names)}]" if restored_mesh_names else ""
-    summary = f"[{loaded_source}] 파라미터 로드 완료{rig_str}{mesh_str} - 강도: {props.strength:.2f}, 속도: {props.speed:.2f}, 감쇠: {props.damping:.2f}, 관성: {props.inertia:.2f}, 호흡: {props.idle_motion:.2f}"
+    summary = f"물리 설정 불러오기 완료{rig_str}{mesh_str} (강도: {props.strength:.2f}, 속도: {props.speed:.2f}, 탄성: {props.damping:.2f}, 관성: {props.inertia:.2f}, 숨쉬기: {props.idle_motion:.2f})"
     return True, summary

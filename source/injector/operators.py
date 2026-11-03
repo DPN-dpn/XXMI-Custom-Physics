@@ -35,8 +35,8 @@ from .hsr import (
 
 class XXMI_OT_apply_custom_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_apply_custom_physics"
-    bl_label = "모드에 바스트모핑 주입"
-    bl_description = "가슴 물리 웨이트가 등록된 모든 메쉬 오브젝트를 모드의 각 Position.buf와 매칭하여 실시간 HLSL 및 버퍼를 주입합니다"
+    bl_label = "모드에 물리 주입"
+    bl_description = "가슴 가중치와 물리 설정값을 캐릭터 모드에 적용하여 인게임에서 동작하도록 주입합니다"
 
     @classmethod
     def poll(cls, context):
@@ -54,7 +54,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             stop_physics_preview(context)
 
         if not target_mod_input or not os.path.exists(target_mod_input):
-            self.report({'ERROR'}, "타겟 모드 폴더(또는 .ini 파일) 경로를 올바르게 지정해주세요.")
+            self.report({'ERROR'}, "모드 폴더 경로를 먼저 지정해주세요.")
             return {'CANCELLED'}
 
         # 앵커 본(XXMI_Breast_Rig)이 존재하면 주입 전 웨이트를 본 위치 기준으로 강제 재베이크 동기화
@@ -70,7 +70,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         ]
 
         if not breast_objs:
-            self.report({'ERROR'}, "1단계에서 가슴 선택 영역을 먼저 등록해주세요 (XXMI_Breast_L/R 그룹 없음).")
+            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴으로 등록]을 진행해주세요.")
             return {'CANCELLED'}
 
         mesh_caches = []
@@ -114,7 +114,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             })
 
         if not mesh_caches:
-            self.report({'ERROR'}, "가슴 가중치가 설정된 정점이 없습니다. 1단계에서 가슴 선택 영역을 먼저 등록해주세요.")
+            self.report({'ERROR'}, "가슴 가중치가 계산되지 않았습니다. 먼저 [4. 본 기준 가중치(웨이트) 자동 계산]을 진행해주세요.")
             return {'CANCELLED'}
 
         global_peak_weight = 0.0
@@ -134,7 +134,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         ini_files.append(os.path.join(root, f))
 
         if not ini_files:
-            self.report({'ERROR'}, "지정한 경로에서 .ini 파일을 찾을 수 없습니다.")
+            self.report({'ERROR'}, "모드 폴더 내에 .ini 파일이 없습니다.")
             return {'CANCELLED'}
 
         total_injected_buffers = 0
@@ -295,17 +295,17 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         if total_injected_buffers > 0:
             names_str = ", ".join(matched_obj_names)
             game_label = "붕괴: 스타레일" if target_game == 'HSR' else "젠레스 존 제로"
-            self.report({'INFO'}, f"성공: [{game_label}] {total_injected_buffers}개 Position 버퍼에 가슴 물리 주입 완료! (매칭 오브젝트: {names_str})")
+            self.report({'INFO'}, f"물리 주입 완료! [{game_label}] {total_injected_buffers}개 메쉬에 물리 효과가 적용되었습니다.")
             return {'FINISHED'}
         else:
-            self.report({'WARNING'}, "모드 폴더에서 매칭되는 Position.buf를 찾지 못했습니다. 올바른 캐릭터 모드 폴더인지 확인해주세요.")
+            self.report({'WARNING'}, "모드 폴더 내에서 일치하는 메쉬 데이터를 찾지 못했습니다. 올바른 캐릭터 모드 폴더인지 확인해주세요.")
             return {'CANCELLED'}
 
 
 class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_rollback_custom_physics"
-    bl_label = "바스트모핑 효과 롤백"
-    bl_description = "모드 폴더에 주입된 가슴 물리 쉐이더 및 버퍼를 모두 제거하고 .ini 파일을 100% 원본으로 복원합니다"
+    bl_label = "물리 효과 롤백 (원본 복원)"
+    bl_description = "주입된 물리 효과를 완전히 제거하고 모드를 원본 상태로 복원합니다"
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
@@ -315,7 +315,7 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
             stop_physics_preview(context)
 
         if not target_mod_input or not os.path.exists(target_mod_input):
-            self.report({'ERROR'}, "타겟 모드 폴더(또는 .ini 파일) 경로를 올바르게 지정해주세요.")
+            self.report({'ERROR'}, "모드 폴더 경로를 먼저 지정해주세요.")
             return {'CANCELLED'}
 
         ini_files = []
@@ -360,14 +360,14 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
                     except Exception:
                         pass
 
-        self.report({'INFO'}, f"롤백 완료: {cleaned_count}개 .ini 복원, {removed_files}개 생성 파일 삭제됨.")
+        self.report({'INFO'}, f"롤백 완료: 모드가 주입 전 원본 상태로 복원되었습니다. ({cleaned_count}개 .ini 복원, {removed_files}개 물리 파일 삭제)")
         return {'FINISHED'}
 
 
 class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
     bl_idname = "object.xxmi_load_physics_from_mod"
-    bl_label = "모드 폴더에서 모핑 정보 불러오기"
-    bl_description = "선택된 모드 폴더 내의 설정 파일(JSON) 또는 주입된 HLSL을 읽어 물리 파라미터와 앵커 본 정보를 복원합니다"
+    bl_label = "모드 폴더에서 물리 설정 불러오기"
+    bl_description = "선택된 모드 폴더에 저장된 물리 본 위치와 파라미터를 블렌더로 복원합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -387,14 +387,14 @@ class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
             self.report({'WARNING'}, msg)
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"성공: {msg}")
+        self.report({'INFO'}, f"{msg}")
         return {'FINISHED'}
 
 
 class XXMI_OT_physics_dir_picker(bpy.types.Operator):
     bl_idname = "object.xxmi_physics_dir_picker"
     bl_label = "모드 폴더 선택"
-    bl_description = "바스트모핑을 주입할 타겟 모드 폴더를 선택합니다"
+    bl_description = "물리를 적용할 타겟 모드 폴더를 선택합니다"
 
     directory: bpy.props.StringProperty(subtype='DIR_PATH')
 
@@ -407,7 +407,7 @@ class XXMI_OT_physics_dir_picker(bpy.types.Operator):
             if os.path.exists(cfg_p) or has_hlsl:
                 success, msg = _load_physics_from_mod(self.directory, context, props)
                 if success:
-                    self.report({'INFO'}, f"폴더 선택 및 모핑 정보 자동 동기화: {msg}")
+                    self.report({'INFO'}, f"폴더 선택 완료 (물리 설정 동기화: {msg})")
                     return {'FINISHED'}
         return {'FINISHED'}
 

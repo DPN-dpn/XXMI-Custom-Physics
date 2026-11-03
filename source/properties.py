@@ -2,7 +2,7 @@ import bpy
 
 
 class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
-    # ── 1. 대상 메쉬 및 앵커 ──
+    # ── 1. 대상 메쉬 및 물리 본 ──
     target_obj: bpy.props.PointerProperty(
         name="대상 메쉬",
         type=bpy.types.Object,
@@ -11,16 +11,16 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     anchor_obj: bpy.props.PointerProperty(
-        name="가슴 앵커",
+        name="가슴 물리 본",
         type=bpy.types.Object,
-        description="가슴 물리 모션의 중심점 역할을 하는 앵커 오브젝트(XXMI_Breast_Rig)입니다",
+        description="가슴 물리 움직임의 중심이 되는 본 오브젝트(XXMI_Breast_Rig)입니다",
         poll=lambda self, obj: obj.type == 'ARMATURE'
     )
 
     # ── 2. 가슴 가중치 감쇠 옵션 ──
     falloff_power: bpy.props.FloatProperty(
-        name="가중치 퍼짐/집중",
-        description="가슴 웨이트가 퍼지는 정도입니다. 1.0이 기본이며, 낮을수록(0.6~0.8) 가슴 전체로 넓고 풍성하게 퍼지고, 높을수록(1.3~2.0) 꼭지점 끝쪽으로 집중됩니다",
+        name="가중치 퍼짐 정도",
+        description="가슴 가중치가 퍼지는 범위입니다. 기본값 1.0이며, 낮추면 전체로 부드럽게 퍼지고, 높이면 끝쪽으로 집중됩니다",
         default=1.0,
         min=0.3,
         max=3.0,
@@ -29,22 +29,21 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     lock_registered_verts: bpy.props.BoolProperty(
-        name="등록 정점 범위 엄격 유지",
-        description="가중치 재계산 시 본 반경으로 인해 주변 정점이 자동으로 추가되거나 기존 정점이 탈락하지 않고, 처음에 선택/등록된 정점 범위만을 100% 엄격히 유지합니다",
+        name="등록된 영역만 유지",
+        description="가중치를 다시 계산할 때 처음에 등록한 정점 영역만 유지합니다",
         default=True
     )
 
     show_advanced_breast_settings: bpy.props.BoolProperty(
-        name="세부 감쇠 설정 & 관리 도구 (초기화)",
-        description="가중치 감쇠 세부 옵션, 정점 재선택 및 강체 관리 도구, 초기화 기능을 펼치거나 접습니다",
+        name="세부 설정 및 관리 도구",
+        description="가중치 퍼짐 조절, 정점 다시 선택 및 강체 관리, 초기화 도구를 펼치거나 접습니다",
         default=False
     )
 
-
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
-        name="흔들림 강도",
-        description="가슴 물리 바운스의 전체 진폭 배율입니다 (0.0이면 정지, 1.0이 기본)",
+        name="흔들림 크기",
+        description="가슴이 흔들리는 전체적인 움직임 폭입니다 (0.0이면 정지, 1.0이 기본)",
         default=1.0,
         min=0.0,
         max=3.0,
@@ -54,7 +53,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     speed: bpy.props.FloatProperty(
         name="탄력 속도",
-        description="가슴이 통통 튀는 복원 탄력 속도입니다",
+        description="흔들릴 때 튕겨오르는 속도감입니다",
         default=1.1,
         min=0.2,
         max=3.0,
@@ -63,8 +62,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     damping: bpy.props.FloatProperty(
-        name="탄성 감쇠",
-        description="흔들린 후 원래 자리로 가라앉는 감쇠율입니다 (낮을수록 여운이 길고 출렁거림, 높을수록 단단히 빨리 멈춤)",
+        name="출렁임 멈춤 (감쇠)",
+        description="흔들린 뒤 제자리로 멈추는 빠르기입니다 (낮을수록 오래 출렁이고, 높을수록 빨리 멈춤)",
         default=0.85,
         min=0.1,
         max=2.5,
@@ -73,8 +72,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     inertia: bpy.props.FloatProperty(
-        name="모션 관성 반응",
-        description="캐릭터 애니메이션 가속도에 가슴이 반응하는 관성 강도입니다",
+        name="이동 관성 반응",
+        description="달리거나 멈출 때 캐릭터 움직임에 가슴이 반응하는 정도입니다",
         default=1.2,
         min=0.0,
         max=3.0,
@@ -83,8 +82,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     idle_motion: bpy.props.FloatProperty(
-        name="호흡 미동 강도",
-        description="가만히 서 있을 때에도 미세하게 숨 쉬듯 움직이는 기본 호흡 미동 강도입니다 (0.0으로 설정 시 순수 이동 관성만 작동)",
+        name="숨쉬기 미동",
+        description="가만히 서 있을 때 숨 쉬듯 미세하게 움직이는 정도입니다",
         default=0.4,
         min=0.0,
         max=2.0,
@@ -101,35 +100,35 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     # ── 4. 인게임 주입 및 디버그 ──
     target_game: bpy.props.EnumProperty(
         name="대상 게임",
-        description="주입할 모드가 속한 게임입니다. 게임마다 스키닝 파이프라인 구조가 달라 주입 방식이 달라집니다",
+        description="물리를 적용할 모드의 대상 게임입니다",
         items=[
-            ('ZZZ', "젠레스 존 제로 (ZZMI)", "vb0 교체 방식으로 주입합니다"),
-            ('HSR', "붕괴: 스타레일 (SRMI)", "SRMI 스키닝 무결성 보존 + DrawIndexed 포스트-스키닝 관성 연산 방식으로 주입합니다"),
+            ('ZZZ', "젠레스 존 제로 (ZZMI)", "젠레스 존 제로 모드 전용으로 최적화하여 주입합니다"),
+            ('HSR', "붕괴: 스타레일 (SRMI)", "붕괴: 스타레일 모드 전용으로 최적화하여 주입합니다"),
         ],
         default='ZZZ'
     )
 
     target_mod_dir: bpy.props.StringProperty(
-        name="타겟 모드 폴더",
-        description="바스트모핑 셰이더를 주입할 모드 폴더(또는 .ini 파일) 경로입니다",
+        name="모드 폴더",
+        description="물리를 적용할 모드 폴더 경로입니다",
         subtype='NONE'
     )
 
     merge_existing: bpy.props.BoolProperty(
         name="기존 물리 설정 유지",
-        description="켜두면 이미 다른 파츠에 적용된 물리 데이터를 지우지 않고 가슴 물리를 함께 주입합니다",
+        description="이미 적용된 다른 물리 데이터가 있다면 지우지 않고 가슴 물리를 함께 주입합니다",
         default=True
     )
 
     debug_mode: bpy.props.BoolProperty(
-        name="디버그 모드 (인게임 토글)",
-        description="켜두면 인게임에서 단축키로 바스트모핑 ON/OFF를 실시간 비교할 수 있습니다",
+        name="인게임 ON/OFF 토글 사용",
+        description="게임 실행 중 단축키를 눌러 물리 적용 전/후를 실시간으로 비교할 수 있습니다",
         default=False
     )
 
     debug_toggle_key: bpy.props.StringProperty(
         name="토글 단축키",
-        description="인게임에서 바스트모핑을 켜고(ON) 끌(OFF) 단축키입니다 (예: h)",
+        description="인게임에서 물리를 켜고 끌 키를 입력하세요 (기본: h)",
         default="h"
     )
 
@@ -148,7 +147,7 @@ def register():
 
 
 def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
     if hasattr(bpy.types.Scene, "xxmi_custom_physics_props"):
         del bpy.types.Scene.xxmi_custom_physics_props
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

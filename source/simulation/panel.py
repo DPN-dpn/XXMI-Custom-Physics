@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="2. 가슴 물리 파라미터 & 프리뷰", icon='PHYSICS')
+        layout.label(text="2. 물리 설정 & 프리뷰", icon='PHYSICS')
 
     def draw(self, context):
         layout = self.layout
@@ -21,12 +21,10 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[2단계: 가슴 물리 파라미터 조절 & 뷰포트 프리뷰]\n\n"
-                "• 흔들림 강도, 탄력 속도, 탄성 감쇠, 모션 관성, 호흡 미동 강도를 설정합니다.\n"
-                "• 인게임 캐릭터 자체 모션에 반응하는 실시간 ODE 스프링 탄성 모핑을 제어합니다.\n"
-                "• [뷰포트 실시간 바운스 프리뷰]를 누르면 뷰포트 상에서 즉시 가슴이 통통 튀며\n"
-                "  모핑되는 물리 움직임을 실시간으로 확인할 수 있습니다.\n"
-                "• 슬라이더를 실시간으로 조절하면서 원하는 탄력감을 맞춰보세요."
+                "[2단계: 물리 움직임 설정 & 프리뷰]\n\n"
+                "• 캐릭터가 움직일 때 가슴이 반응하는 흔들림 크기, 튀는 속도, 멈추는 탄성을 조절합니다.\n"
+                "• [뷰포트 실시간 물리 프리뷰 시작]을 누르면 블렌더 화면에서 가슴이 통통 튀는 움직임을 실시간으로 확인할 수 있습니다.\n"
+                "• 프리뷰를 켜둔 상태로 슬라이더를 움직여 마음에 드는 움직임으로 맞춰보세요."
             ),
         )
 
@@ -35,7 +33,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
 
         box_params = layout.box()
         p_col = box_params.column(align=True)
-        p_col.label(text="바운스 탄성 파라미터:", icon='PREFERENCES')
+        p_col.label(text="물리 움직임 파라미터:", icon='PREFERENCES')
         p_col.prop(props, "strength")
         p_col.prop(props, "speed")
         p_col.prop(props, "damping")
@@ -48,9 +46,9 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
 
         box_prev = layout.box()
         pr_col = box_prev.column(align=True)
-        pr_col.label(text="뷰포트 프리뷰 확인:", icon='PLAY')
+        pr_col.label(text="뷰포트 프리뷰:", icon='PLAY')
 
-        preview_text = "뷰포트 프리뷰 정지 (원상 복구)" if props.is_preview_running else "뷰포트 실시간 바운스 프리뷰 시작"
+        preview_text = "물리 프리뷰 정지" if props.is_preview_running else "뷰포트 실시간 물리 프리뷰 시작"
         preview_icon = 'PAUSE' if props.is_preview_running else 'PLAY'
         pr_col.operator(
             "object.xxmi_preview_physics",

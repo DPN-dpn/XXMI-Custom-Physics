@@ -155,8 +155,8 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
 
 class XXMI_OT_register_breast_selection(bpy.types.Operator):
     bl_idname = "object.xxmi_register_breast_selection"
-    bl_label = "1. 선택 영역을 가슴 정점으로 등록"
-    bl_description = "에디트 모드에서 선택한 정점들을 가슴 정점(XXMI_Breast_L / R)으로 등록합니다"
+    bl_label = "1. 선택 영역을 가슴으로 등록"
+    bl_description = "에디트 모드에서 선택한 정점들을 가슴 영역으로 등록합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -247,16 +247,16 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         self.report(
             {'INFO'},
             f"1단계 완료: 가슴 정점 총 {total_sel}개(좌: {total_l}개, 우: {total_r}개) 등록 완료! "
-            f"장신구가 있다면 에디트 모드에서 선택 후 [2. 강체 장신구 등록]을, 없다면 [3. 본 생성]을 진행하세요."
+            f"형태를 유지할 부위가 있다면 에디트 모드에서 선택 후 [2. 선택 부위를 강체로 등록]을, 없다면 [3. 가슴 물리 본 생성 (강체 제외)]를 진행하세요."
         )
         return {'FINISHED'}
 
 
 def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
     """
-    여러 오브젝트(예: Hair의 악세서리 + Body의 악세서리 케이스)에 나뉘어 있는 강체 장신구(XXMI_Role_Rigid)들을
+    여러 오브젝트에 나뉘어 있는 강체(XXMI_Role_Rigid)들을
     3D 월드 공간에서 서로 맞닿아 있는(5mm 이내) 덩어리끼리 하나의 '통합 강체 클러스터'로 묶어
-    완벽히 동일한 단일 (w_l, w_r) 가중치를 부여합니다. (악세서리가 케이스를 뚫고 나오는 현상 방지)
+    완벽히 동일한 단일 (w_l, w_r) 가중치를 부여합니다. (메쉬가 뚫고 나오는 현상 방지)
     강체로 지정되지 않은 정점은 일절 건드리지 않습니다.
     """
     if not target_objs or not bone_info:
@@ -377,7 +377,7 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         has_l = "L" in bone_info
         has_r = "R" in bone_info
 
-        # 중앙선(X=0)에 걸쳐 있는 장신구/케이스는 좌/우 가중치를 비율로 묶어 반으로 갈라지지 않게 보호
+        # 중앙선(X=0)에 걸쳐 있는 강체 부위는 좌/우 가중치를 비율로 묶어 반으로 갈라지지 않게 보호
         if min_x < -0.004 and max_x > 0.004 and has_l and has_r:
             span = max(0.02, max_x - min_x)
             t_l = max(0.0, min(1.0, 0.5 + c_cent.x / span))
@@ -634,8 +634,8 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
     bl_idname = "object.xxmi_rebake_breast_weights"
-    bl_label = "4. 본 기준 가중치 계산 & 베이크"
-    bl_description = "수동 조정한 XXMI_Breast_Rig 아머처의 본(Breast.L / Breast.R) 위치를 기준으로 가슴 버텍스 가중치(XXMI_Breast_L/R)를 다시 계산합니다"
+    bl_label = "4. 본 기준 가중치(웨이트) 자동 계산"
+    bl_description = "가슴 물리 본을 기준으로 자연스러운 움직임 가중치를 계산하여 적용합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -648,7 +648,7 @@ class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
         props = context.scene.xxmi_custom_physics_props
         rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
         if not rig:
-            self.report({'ERROR'}, "XXMI_Breast_Rig 아머처를 찾을 수 없습니다.")
+            self.report({'ERROR'}, "가슴 물리 본을 찾을 수 없습니다. [3. 가슴 물리 본 생성 (강체 제외)]를 먼저 진행해주세요.")
             return {'CANCELLED'}
 
         # 1. 메쉬 또는 아머처의 Edit 모드 버퍼를 Object 모드로 커밋하고 뷰레이어 갱신
@@ -676,14 +676,14 @@ class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
             self.report({'WARNING'}, msg)
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"본 위치 동기화 완료: {msg}")
+        self.report({'INFO'}, f"가슴 가중치 계산 완료: {msg}")
         return {'FINISHED'}
 
 
 class XXMI_OT_select_breast_vertices(bpy.types.Operator):
     bl_idname = "object.xxmi_select_breast_vertices"
-    bl_label = "적용된 가슴 정점 재선택"
-    bl_description = "가슴 물리 웨이트가 등록된 모든 메쉬 오브젝트(Body, 의상, 악세서리 등)를 함께 선택하고 에디트 모드에서 해당 가슴 정점들을 다시 선택합니다"
+    bl_label = "가슴 정점 다시 선택"
+    bl_description = "등록된 가슴 정점들을 에디트 모드에서 다시 선택합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -700,7 +700,7 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
         ]
 
         if not target_objs:
-            self.report({'WARNING'}, "가슴 물리 웨이트(XXMI_Breast_L/R)가 등록된 메쉬 오브젝트가 없습니다.")
+            self.report({'WARNING'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴으로 등록]을 진행해주세요.")
             return {'CANCELLED'}
 
         # 1. 오브젝트 모드로 전환 후 기존 선택 해제
@@ -748,14 +748,14 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
             bmesh.update_edit_mesh(obj.data)
 
         obj_names = ", ".join(o.name for o in target_objs)
-        self.report({'INFO'}, f"총 {len(target_objs)}개 오브젝트({obj_names})에서 {total_selected}개 가슴 정점을 재선택했습니다.")
+        self.report({'INFO'}, f"총 {len(target_objs)}개 오브젝트에서 {total_selected}개 가슴 정점을 다시 선택했습니다.")
         return {'FINISHED'}
 
 
 class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
     bl_idname = "object.xxmi_mark_selection_rigid"
-    bl_label = "2. 선택 부위를 강체 장신구로 등록"
-    bl_description = "선택된 모든 오브젝트에서 에디트 모드로 선택한 단추, 브로치 등의 장신구 정점들을 강체(XXMI_Role_Rigid)로 등록합니다"
+    bl_label = "2. 선택 부위를 강체로 등록"
+    bl_description = "선택된 정점들을 강체(XXMI_Role_Rigid)로 등록하여 물리 동작 시 형태를 유지합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -800,20 +800,20 @@ class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='EDIT')
 
         if total_marked == 0:
-            self.report({'ERROR'}, "장신구로 지정할 정점들을 에디트 모드에서 선택해주세요.")
+            self.report({'ERROR'}, "강체로 등록할 정점들을 에디트 모드에서 선택해주세요.")
             return {'CANCELLED'}
 
         self.report(
             {'INFO'},
-            f"2단계 완료: 총 {total_marked}개 정점을 강체 장신구(XXMI_Role_Rigid)로 등록했습니다! 이어서 [3. 가슴 앵커 본 생성]을 누르세요."
+            f"2단계 완료: 강체 정점 총 {total_marked}개 등록 완료! 이어서 [3. 가슴 물리 본 생성 (강체 제외)]를 누르세요."
         )
         return {'FINISHED'}
 
 
 class XXMI_OT_unmark_selection_rigid(bpy.types.Operator):
     bl_idname = "object.xxmi_unmark_selection_rigid"
-    bl_label = "선택 부위 강체 등록 해제"
-    bl_description = "선택된 오브젝트에서 에디트 모드로 선택한 정점들을 강체 장신구(XXMI_Role_Rigid)에서 제외합니다"
+    bl_label = "선택 부위 강체 해제"
+    bl_description = "선택된 정점을 강체 목록에서 제외합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -849,8 +849,8 @@ class XXMI_OT_unmark_selection_rigid(bpy.types.Operator):
 
 class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
     bl_idname = "object.xxmi_select_rigid_vertices"
-    bl_label = "강체 장신구 정점 재선택"
-    bl_description = "강체 장신구(XXMI_Role_Rigid)로 등록된 모든 메쉬 오브젝트의 정점들을 에디트 모드에서 다시 선택합니다"
+    bl_label = "강체 정점 다시 선택"
+    bl_description = "등록된 강체 정점들을 에디트 모드에서 다시 선택합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -867,7 +867,7 @@ class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
         ]
 
         if not target_objs:
-            self.report({'WARNING'}, "강체 장신구(XXMI_Role_Rigid)가 등록된 메쉬 오브젝트가 없습니다.")
+            self.report({'WARNING'}, "등록된 강체 정점이 없습니다. 먼저 [2. 선택 부위를 강체로 등록]을 진행해주세요.")
             return {'CANCELLED'}
 
         if context.mode != 'OBJECT':
@@ -902,14 +902,14 @@ class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
 
             bmesh.update_edit_mesh(obj.data)
 
-        self.report({'INFO'}, f"총 {total_selected}개 강체 장신구 정점을 재선택했습니다.")
+        self.report({'INFO'}, f"총 {total_selected}개 강체 정점을 다시 선택했습니다.")
         return {'FINISHED'}
 
 
 class XXMI_OT_generate_breast_rig(bpy.types.Operator):
     bl_idname = "object.xxmi_generate_breast_rig"
-    bl_label = "3. 가슴 앵커 본 생성 (강체 제외)"
-    bl_description = "등록된 가슴 정점 중 강체 장신구를 제외한 순수 가슴 메쉬만을 기준으로 정확한 위치/방향의 가슴 앵커 본(XXMI_Breast_Rig)을 생성합니다"
+    bl_label = "3. 가슴 물리 본 생성 (강체 제외)"
+    bl_description = "강체 정점을 제외한 가슴 형태만을 기준으로 알맞은 위치와 방향의 가슴 물리 본을 자동 생성합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -927,7 +927,7 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
         ]
 
         if not target_objs:
-            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴 정점으로 등록]을 진행해주세요.")
+            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴으로 등록]을 진행해주세요.")
             return {'CANCELLED'}
 
         if context.mode != 'OBJECT':
@@ -981,7 +981,7 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
         final_right = soft_right_pts if soft_right_pts else all_right_pts
 
         if not final_left and not final_right:
-            self.report({'ERROR'}, "유효한 가슴 정점을 찾을 수 없습니다. [1. 가슴 정점 등록]을 다시 진행해주세요.")
+            self.report({'ERROR'}, "유효한 가슴 정점을 찾을 수 없습니다. [1. 선택 영역을 가슴으로 등록]을 다시 진행해주세요.")
             return {'CANCELLED'}
 
         anchor_info = {}
@@ -1042,16 +1042,16 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"3단계 완료: 강체({total_rigid_count}개) 제외 순수 가슴 정점(좌 {len(final_left)}개, 우 {len(final_right)}개) 기준 앵커 본 생성 완료! "
-            f"뷰포트에서 본의 위치/각도를 확인 및 조정한 뒤 [4. 본 기준 가중치 계산 & 베이크]를 실행하세요."
+            f"3단계 완료: 강체({total_rigid_count}개 제외) 가슴 정점(좌 {len(final_left)}개, 우 {len(final_right)}개) 기준 물리 본 생성 완료! "
+            f"뷰포트에서 본의 위치나 각도를 확인 및 조정한 뒤 [4. 본 기준 가중치(웨이트) 자동 계산]을 누르세요."
         )
         return {'FINISHED'}
 
 
 class XXMI_OT_clear_breast_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_clear_breast_physics"
-    bl_label = "가슴 물리 초기화"
-    bl_description = "가슴 앵커 오브젝트 및 씬 내 모든 메쉬에 등록된 가슴 웨이트 그룹을 일괄 제거합니다"
+    bl_label = "가슴 물리 설정 전체 초기화"
+    bl_description = "생성된 물리 본과 가슴 가중치 설정을 모두 지우고 초기화합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

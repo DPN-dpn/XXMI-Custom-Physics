@@ -219,8 +219,8 @@ def stop_physics_preview(context):
 
 class XXMI_OT_preview_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_preview_physics"
-    bl_label = "뷰포트 실시간 바운스 프리뷰"
-    bl_description = "가슴 물리 웨이트가 등록된 모든 메쉬 오브젝트(Body, 의상 등)의 바운스 모핑을 실시간 애니메이션으로 동시 미리보기합니다"
+    bl_label = "뷰포트 실시간 물리 프리뷰"
+    bl_description = "뷰포트에서 가슴 물리 움직임을 실시간으로 미리 확인합니다"
 
     @classmethod
     def poll(cls, context):
@@ -248,7 +248,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
         ]
 
         if not breast_objs:
-            self.report({'ERROR'}, "1단계에서 가슴 선택 영역을 먼저 등록해주세요 (XXMI_Breast_L/R 그룹 없음).")
+            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴으로 등록]을 진행해주세요.")
             return {'CANCELLED'}
 
         # 공통 앵커(XXMI_Breast_Rig) 월드 좌표 취득
@@ -327,7 +327,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             })
 
         if not objects_data:
-            self.report({'ERROR'}, "유효한 가슴 가중치를 가진 메쉬가 없습니다.")
+            self.report({'ERROR'}, "가슴 가중치가 계산되지 않았습니다. 먼저 [4. 본 기준 가중치(웨이트) 자동 계산]을 진행해주세요.")
             return {'CANCELLED'}
 
         # 인게임 NORM_FACTOR와 100% 동일하게 전체 대상 메쉬의 최대 가중치로 정규화 배율 산출
@@ -360,14 +360,14 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             pass
 
         obj_list_str = ", ".join(d["obj_name"] for d in objects_data)
-        self.report({'INFO'}, f"다중 오브젝트({len(objects_data)}개: {obj_list_str}) 가슴 물리 동시 프리뷰 재생 시작!")
+        self.report({'INFO'}, f"물리 프리뷰 시작 ({len(objects_data)}개 메쉬 오브젝트)")
         return {'FINISHED'}
 
 
 class XXMI_OT_reset_physics_params(bpy.types.Operator):
     bl_idname = "object.xxmi_reset_physics_params"
     bl_label = "기본값으로 초기화"
-    bl_description = "가슴 물리 및 관성 파라미터(강도, 속도, 감쇠, 관성, 호흡 모션)를 권장 기본값으로 되돌립니다"
+    bl_description = "물리 파라미터를 권장 기본값으로 되돌립니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -377,8 +377,8 @@ class XXMI_OT_reset_physics_params(bpy.types.Operator):
         props.damping = 0.85
         props.inertia = 1.2
         props.idle_motion = 0.4
-        props.falloff_power = 1.6
-        self.report({'INFO'}, "가슴 물리 파라미터가 권장 기본값으로 초기화되었습니다.")
+        props.falloff_power = 1.0
+        self.report({'INFO'}, "물리 파라미터가 기본값으로 초기화되었습니다.")
         return {'FINISHED'}
 
 

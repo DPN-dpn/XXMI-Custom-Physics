@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="1. 가슴 선택 & 앵커 생성", icon='SPHERE')
+        layout.label(text="1. 가슴 선택 & 본 생성", icon='SPHERE')
 
     def draw(self, context):
         layout = self.layout
@@ -21,14 +21,13 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[가슴 물리 작업 순서]\n\n"
-                "1. 에디트 모드에서 가슴 정점을 선택하고 [1. 선택 영역을 가슴 정점으로 등록]을 누릅니다.\n"
-                "2. 단추, 브로치, 엠블럼 등 모핑되면 안 되는 단단한 장신구가 있다면 에디트 모드에서 선택 후 [2. 선택 부위를 강체 장신구로 등록]을 누릅니다. (장신구가 없다면 3단계로 바로 이동)\n"
-                "3. [3. 가슴 앵커 본 생성 (강체 제외)]를 누릅니다.\n"
-                "   ➔ 장신구를 제외한 순수 가슴 메쉬만을 기준으로 중심점과 돌출 방향(Nipple)을 평가하므로, 장신구 쪽으로 본이 쏠리지 않고 정확하게 생성됩니다.\n"
-                "4. 뷰포트에서 생성된 본(XXMI_Breast_Rig)의 위치/각도를 확인하고 필요 시 미세 조정한 뒤, [4. 본 기준 가중치 계산 & 베이크]를 누릅니다.\n"
-                "5. '2. 가슴 물리 파라미터 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 바스트모핑 주입'으로 인게임에 적용합니다.\n\n"
-                "※ 하단의 [세부 감쇠 설정 & 관리 도구 (초기화)]를 펼치면 가중치 퍼짐 조절, 정점 재선택, 강체 등록 해제 및 초기화 도구를 사용할 수 있습니다."
+                "[1단계: 가슴 선택 & 물리 본 생성]\n\n"
+                "1. 에디트 모드에서 가슴 표면을 선택하고 [1. 선택 영역을 가슴으로 등록]을 누릅니다.\n"
+                "2. 단추, 브로치, 장식 등 모핑 시 일그러지면 안 되는 부위가 있다면 에디트 모드에서 선택 후 [2. 선택 부위를 강체로 등록]을 누릅니다. (강체가 없다면 바로 3단계로 이동)\n"
+                "3. [3. 가슴 물리 본 생성 (강체 제외)]를 누릅니다.\n"
+                "4. 뷰포트에서 생성된 본의 위치나 각도를 확인하고, 필요 시 조정한 뒤 [4. 본 기준 가중치(웨이트) 자동 계산]을 누릅니다.\n"
+                "5. '2. 물리 설정 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 물리 주입'으로 인게임에 적용합니다.\n\n"
+                "※ 하단의 [세부 설정 및 관리 도구]를 펼치면 가중치 퍼짐 조절, 정점 다시 선택, 초기화 기능을 사용할 수 있습니다."
             ),
         )
 
@@ -43,81 +42,89 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
         b_col.operator(
             "object.xxmi_register_breast_selection",
-            text="1. 선택 영역을 가슴 정점으로 등록",
+            text="1. 선택 영역을 가슴으로 등록",
             icon='SPHERE'
         )
         b_col.separator(factor=0.5)
 
         b_col.operator(
             "object.xxmi_mark_selection_rigid",
-            text="2. 선택 부위를 강체 장신구로 등록",
+            text="2. 선택 부위를 강체로 등록",
             icon='RADIOBUT_ON'
         )
         b_col.separator(factor=0.5)
 
         b_col.operator(
             "object.xxmi_generate_breast_rig",
-            text="3. 가슴 앵커 본 생성 (강체 제외)",
+            text="3. 가슴 물리 본 생성 (강체 제외)",
             icon='BONE_DATA'
         )
         b_col.separator(factor=0.5)
 
         b_col.operator(
             "object.xxmi_rebake_breast_weights",
-            text="4. 본 기준 가중치 계산 & 베이크",
+            text="4. 본 기준 가중치(웨이트) 자동 계산",
             icon='MOD_VERTEX_WEIGHT'
         )
 
         layout.separator()
 
-        # --- 통합 접이식 고급 설정 & 관리 도구 (감쇠 설정, 관리 도구, 초기화 통합) ---
+        # --- 통합 접이식 세부 설정 & 관리 도구 (아코디언 UI) ---
         box_adv = layout.box()
-        row_adv = box_adv.row(align=True)
+
+        # 헤더 토글 버튼: 전체 행 클릭 상호작용 및 라벨 잘림 방지 (use_property_split = False)
+        col_toggle = box_adv.column(align=True)
+        col_toggle.use_property_split = False
+        col_toggle.use_property_decorate = False
         adv_icon = 'TRIA_DOWN' if props.show_advanced_breast_settings else 'TRIA_RIGHT'
-        row_adv.prop(
+        col_toggle.prop(
             props,
             "show_advanced_breast_settings",
-            text="세부 감쇠 설정 & 관리 도구 (초기화)",
+            text="세부 설정 및 관리 도구",
             icon=adv_icon,
-            emboss=False
+            toggle=True
         )
 
         if props.show_advanced_breast_settings:
             col_adv = box_adv.column(align=True)
+            col_adv.use_property_split = True
+            col_adv.use_property_decorate = False
             col_adv.separator(factor=0.5)
 
-            # 1) 가중치 감쇠 설정
-            col_adv.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
+            # 1) 가중치 세부 설정
+            col_adv.label(text="가중치 세부 설정:", icon='MOD_VERTEX_WEIGHT')
             col_adv.prop(props, "falloff_power")
             col_adv.prop(props, "lock_registered_verts")
 
             col_adv.separator()
 
-            # 2) 정점 재선택 & 강체 관리 도구
-            col_adv.label(text="정점 재선택 & 관리 도구:", icon='RESTRICT_SELECT_OFF')
-            col_adv.operator(
+            # 2) 정점 관리 도구 (버튼들은 풀 너비로 깔끔하게 배치)
+            col_tools = box_adv.column(align=True)
+            col_tools.use_property_split = False
+            col_tools.use_property_decorate = False
+            col_tools.label(text="정점 관리 도구:", icon='RESTRICT_SELECT_OFF')
+            col_tools.operator(
                 "object.xxmi_select_breast_vertices",
-                text="가슴 정점 재선택",
+                text="가슴 정점 다시 선택",
                 icon='RESTRICT_SELECT_OFF'
             )
-            col_adv.operator(
+            col_tools.operator(
                 "object.xxmi_select_rigid_vertices",
-                text="강체 장신구 정점 재선택",
+                text="강체 정점 다시 선택",
                 icon='RESTRICT_SELECT_OFF'
             )
-            col_adv.operator(
+            col_tools.operator(
                 "object.xxmi_unmark_selection_rigid",
-                text="선택 부위 강체 등록 해제",
+                text="선택 부위 강체 해제",
                 icon='X'
             )
 
-            col_adv.separator()
+            col_tools.separator(factor=0.5)
 
             # 3) 초기화
-            col_adv.label(text="초기화:", icon='TRASH')
-            col_adv.operator(
+            col_tools.operator(
                 "object.xxmi_clear_breast_physics",
-                text="가슴 물리 설정 초기화",
+                text="가슴 물리 설정 전체 초기화",
                 icon='TRASH'
             )
 
