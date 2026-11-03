@@ -34,6 +34,12 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         default=True
     )
 
+    show_advanced_breast_settings: bpy.props.BoolProperty(
+        name="세부 감쇠 설정 & 관리 도구 (초기화)",
+        description="가중치 감쇠 세부 옵션, 정점 재선택 및 강체 관리 도구, 초기화 기능을 펼치거나 접습니다",
+        default=False
+    )
+
 
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(

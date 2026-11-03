@@ -27,7 +27,8 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
                 "3. [3. 가슴 앵커 본 생성 (강체 제외)]를 누릅니다.\n"
                 "   ➔ 장신구를 제외한 순수 가슴 메쉬만을 기준으로 중심점과 돌출 방향(Nipple)을 평가하므로, 장신구 쪽으로 본이 쏠리지 않고 정확하게 생성됩니다.\n"
                 "4. 뷰포트에서 생성된 본(XXMI_Breast_Rig)의 위치/각도를 확인하고 필요 시 미세 조정한 뒤, [4. 본 기준 가중치 계산 & 베이크]를 누릅니다.\n"
-                "5. '2. 가슴 물리 파라미터 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 바스트모핑 주입'으로 인게임에 적용합니다."
+                "5. '2. 가슴 물리 파라미터 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 바스트모핑 주입'으로 인게임에 적용합니다.\n\n"
+                "※ 하단의 [세부 감쇠 설정 & 관리 도구 (초기화)]를 펼치면 가중치 퍼짐 조절, 정점 재선택, 강체 등록 해제 및 초기화 도구를 사용할 수 있습니다."
             ),
         )
 
@@ -69,46 +70,56 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
         layout.separator()
 
-        # --- 정점 재선택 & 강체 관리 도구 ---
-        box_tools = layout.box()
-        t_col = box_tools.column(align=True)
-        t_col.label(text="정점 재선택 & 강체 관리 도구:", icon='RESTRICT_SELECT_OFF')
-        t_col.operator(
-            "object.xxmi_select_breast_vertices",
-            text="가슴 정점 재선택",
-            icon='RESTRICT_SELECT_OFF'
-        )
-        t_col.operator(
-            "object.xxmi_select_rigid_vertices",
-            text="강체 장신구 정점 재선택",
-            icon='RESTRICT_SELECT_OFF'
-        )
-        t_col.operator(
-            "object.xxmi_unmark_selection_rigid",
-            text="선택 부위 강체 등록 해제",
-            icon='X'
+        # --- 통합 접이식 고급 설정 & 관리 도구 (감쇠 설정, 관리 도구, 초기화 통합) ---
+        box_adv = layout.box()
+        row_adv = box_adv.row(align=True)
+        adv_icon = 'TRIA_DOWN' if props.show_advanced_breast_settings else 'TRIA_RIGHT'
+        row_adv.prop(
+            props,
+            "show_advanced_breast_settings",
+            text="세부 감쇠 설정 & 관리 도구 (초기화)",
+            icon=adv_icon,
+            emboss=False
         )
 
-        layout.separator()
+        if props.show_advanced_breast_settings:
+            col_adv = box_adv.column(align=True)
+            col_adv.separator(factor=0.5)
 
-        # --- 가중치 세부 옵션 ---
-        box_opt = layout.box()
-        o_col = box_opt.column(align=True)
-        o_col.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
-        o_col.prop(props, "falloff_power")
-        o_col.prop(props, "lock_registered_verts")
+            # 1) 가중치 감쇠 설정
+            col_adv.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
+            col_adv.prop(props, "falloff_power")
+            col_adv.prop(props, "lock_registered_verts")
 
-        layout.separator()
+            col_adv.separator()
 
-        # --- 초기화 ---
-        box_sub = layout.box()
-        s_col = box_sub.column(align=True)
-        s_col.label(text="초기화:", icon='TRASH')
-        s_col.operator(
-            "object.xxmi_clear_breast_physics",
-            text="가슴 물리 설정 초기화",
-            icon='TRASH'
-        )
+            # 2) 정점 재선택 & 강체 관리 도구
+            col_adv.label(text="정점 재선택 & 관리 도구:", icon='RESTRICT_SELECT_OFF')
+            col_adv.operator(
+                "object.xxmi_select_breast_vertices",
+                text="가슴 정점 재선택",
+                icon='RESTRICT_SELECT_OFF'
+            )
+            col_adv.operator(
+                "object.xxmi_select_rigid_vertices",
+                text="강체 장신구 정점 재선택",
+                icon='RESTRICT_SELECT_OFF'
+            )
+            col_adv.operator(
+                "object.xxmi_unmark_selection_rigid",
+                text="선택 부위 강체 등록 해제",
+                icon='X'
+            )
+
+            col_adv.separator()
+
+            # 3) 초기화
+            col_adv.label(text="초기화:", icon='TRASH')
+            col_adv.operator(
+                "object.xxmi_clear_breast_physics",
+                text="가슴 물리 설정 초기화",
+                icon='TRASH'
+            )
 
 
 classes = (

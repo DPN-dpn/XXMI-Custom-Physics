@@ -27,6 +27,7 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
                 "• 익스포트된 타겟 모드의 폴더를 지정하고 [모드에 바스트모핑 주입]을 누르면\n"
                 "  가슴 정점 가중치 버퍼(CustomPhysicsMap.buf)와 실시간 HLSL Compute Shader를 생성하고\n"
                 "  모드의 .ini에 자동으로 연결합니다.\n\n"
+                "• 모핑 정보 불러오기: 선택된 모드 폴더 내의 물리 설정(JSON/HLSL)을 읽어와 블렌더로 복원합니다.\n"
                 "• 디버그 모드: 인게임에서 h 키(또는 지정한 키)로 바스트모핑 ON/OFF를 즉시 비교할 수 있습니다.\n"
                 "• 물리 효과 롤백: 주입된 모든 파일과 .ini 구문을 100% 원본 상태로 복원합니다."
             ),
@@ -43,9 +44,6 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
         row.operator("object.xxmi_physics_dir_picker", text="", icon='FILE_FOLDER')
 
         col.separator()
-        col.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 모핑 정보 불러오기", icon='IMPORT')
-
-        col.separator()
         col.prop(props, "debug_mode")
         if props.debug_mode:
             box = layout.box()
@@ -54,6 +52,7 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
 
         layout.separator()
         layout.operator("object.xxmi_apply_custom_physics", text="모드에 바스트모핑 주입", icon='SHADERFX')
+        layout.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 모핑 정보 불러오기", icon='IMPORT')
         layout.operator("object.xxmi_rollback_custom_physics", text="바스트모핑 효과 롤백", icon='RECOVER_LAST')
 
 

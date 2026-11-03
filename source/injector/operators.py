@@ -367,17 +367,15 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
 class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
     bl_idname = "object.xxmi_load_physics_from_mod"
     bl_label = "모드 폴더에서 모핑 정보 불러오기"
-    bl_description = "모드 폴더 내의 설정 파일(JSON) 또는 주입된 HLSL을 읽어 물리 파라미터와 앵커 본 정보를 복원합니다"
+    bl_description = "선택된 모드 폴더 내의 설정 파일(JSON) 또는 주입된 HLSL을 읽어 물리 파라미터와 앵커 본 정보를 복원합니다"
     bl_options = {'REGISTER', 'UNDO'}
-
-    directory: bpy.props.StringProperty(subtype='DIR_PATH')
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
-        target_dir = self.directory.strip() if self.directory else props.target_mod_dir.strip()
+        target_dir = props.target_mod_dir.strip() if props.target_mod_dir else ""
 
         if not target_dir or not os.path.exists(target_dir):
-            self.report({'ERROR'}, "모드 폴더 경로를 지정해주세요.")
+            self.report({'ERROR'}, "모드 폴더 경로를 먼저 지정해주세요.")
             return {'CANCELLED'}
 
         if os.path.isfile(target_dir):
@@ -391,13 +389,6 @@ class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
 
         self.report({'INFO'}, f"성공: {msg}")
         return {'FINISHED'}
-
-    def invoke(self, context, event):
-        props = context.scene.xxmi_custom_physics_props
-        if props.target_mod_dir and os.path.isdir(props.target_mod_dir):
-            return self.execute(context)
-        context.window_manager.fileselect_add(self)
-        return {'RUNNING_MODAL'}
 
 
 class XXMI_OT_physics_dir_picker(bpy.types.Operator):
