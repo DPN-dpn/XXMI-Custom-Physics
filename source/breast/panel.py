@@ -62,6 +62,7 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         o_col = box_opt.column(align=True)
         o_col.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
         o_col.prop(props, "falloff_power")
+        o_col.prop(props, "lock_registered_verts")
 
         layout.separator()
 

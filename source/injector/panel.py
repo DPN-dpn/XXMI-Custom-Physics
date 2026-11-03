@@ -22,6 +22,8 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
             layout,
             (
                 "[3단계: 타겟 모드에 바스트모핑 HLSL 주입 & 롤백]\n\n"
+                "• 먼저 [대상 게임]을 선택하세요. 게임마다 파이프라인 구조가 달라 주입 방식이 다릅니다.\n"
+                "  (붕괴: 스타레일은 SRMI 스키닝 무결성을 100% 보존하며 DrawIndexed 단계에서 포스트-스키닝 관성을 연산합니다)\n"
                 "• 익스포트된 타겟 모드의 폴더를 지정하고 [모드에 바스트모핑 주입]을 누르면\n"
                 "  가슴 정점 가중치 버퍼(CustomPhysicsMap.buf)와 실시간 HLSL Compute Shader를 생성하고\n"
                 "  모드의 .ini에 자동으로 연결합니다.\n\n"
@@ -34,6 +36,8 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
         layout.use_property_decorate = False
 
         col = layout.column(align=True)
+        col.prop(props, "target_game")
+        col.separator()
         row = col.row(align=True)
         row.prop(props, "target_mod_dir", text="모드 폴더")
         row.operator("object.xxmi_physics_dir_picker", text="", icon='FILE_FOLDER')

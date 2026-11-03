@@ -28,6 +28,12 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         precision=2
     )
 
+    lock_registered_verts: bpy.props.BoolProperty(
+        name="등록 정점 범위 엄격 유지",
+        description="가중치 재계산 시 본 반경으로 인해 주변 정점이 자동으로 추가되거나 기존 정점이 탈락하지 않고, 처음에 선택/등록된 정점 범위만을 100% 엄격히 유지합니다",
+        default=True
+    )
+
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
         name="흔들림 강도",
@@ -86,6 +92,16 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     # ── 4. 인게임 주입 및 디버그 ──
+    target_game: bpy.props.EnumProperty(
+        name="대상 게임",
+        description="주입할 모드가 속한 게임입니다. 게임마다 스키닝 파이프라인 구조가 달라 주입 방식이 달라집니다",
+        items=[
+            ('ZZZ', "젠레스 존 제로 (ZZMI)", "vb0 교체 방식으로 주입합니다"),
+            ('HSR', "붕괴: 스타레일 (SRMI)", "SRMI 스키닝 무결성 보존 + DrawIndexed 포스트-스키닝 관성 연산 방식으로 주입합니다"),
+        ],
+        default='ZZZ'
+    )
+
     target_mod_dir: bpy.props.StringProperty(
         name="타겟 모드 폴더",
         description="바스트모핑 셰이더를 주입할 모드 폴더(또는 .ini 파일) 경로입니다",
