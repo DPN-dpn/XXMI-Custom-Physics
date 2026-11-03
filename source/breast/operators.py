@@ -117,19 +117,21 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
 
     pts_rel = world_pts - head_arr
 
-    # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 Hermite Smoothstep 감쇠 (Head=0 -> Tail=1)
+    # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 Sine 감쇠 (Head=0 -> Tail=1)
+    # Sine 곡선은 앞쪽 돔 영역의 볼륨감을 풍성하게 유지하면서 흉벽 부착부로 갈수록 매끄럽게 0에 수렴합니다.
     t_proj = pts_rel @ bone_u
     t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
-    w_depth = 3.0 * (t_norm ** 2) - 2.0 * (t_norm ** 3)
+    w_depth = np.sin(t_norm * (np.pi * 0.5))
 
-    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 Cosine 감쇠 (Axis=1 -> Edge=0)
+    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 Quadratic Cosine 감쇠 (Axis=1 -> Edge=0)
+    # rho_norm^2 곡선은 가슴 앞쪽 표면 전체를 탄탄하게 받쳐주어 꼭지점에만 웨이트가 좁게 뭉치는 현상을 방지합니다.
     v_perp = pts_rel - np.outer(t_proj, bone_u)
     rho = np.linalg.norm(v_perp, axis=1)
     radius = max(1e-4, float(eff_radius))
     rho_norm = np.clip(rho / radius, 0.0, 1.0)
-    w_radial = np.cos(rho_norm * (np.pi * 0.5))
+    w_radial = np.cos((rho_norm ** 2) * (np.pi * 0.5))
 
-    # 3. 해부학적 합성 가중치 계산 및 최소 보장 가중치(0.005) 적용
+    # 3. 해부학적 합성 가중치 계산 (falloff_p 반영: 1.0 기본, 낮으면 넓게 퍼짐, 높으면 꼭지점 집중)
     w_comb = np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
     w_arr = np.clip(w_comb, 0.005, 1.0)
 
@@ -153,8 +155,8 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
 
 class XXMI_OT_register_breast_selection(bpy.types.Operator):
     bl_idname = "object.xxmi_register_breast_selection"
-    bl_label = "선택 영역을 가슴 물리로 등록"
-    bl_description = "선택된 모든 메쉬 오브젝트(Body, 의상 등)에서 가슴 정점을 좌/우로 분할하고, 장신구 강체 감지 및 가슴 웨이트를 일괄 생성합니다"
+    bl_label = "1. 선택 영역을 가슴 정점으로 등록"
+    bl_description = "에디트 모드에서 선택한 정점들을 가슴 정점(XXMI_Breast_L / R)으로 등록합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -163,9 +165,7 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         return len(objs) > 0
 
     def execute(self, context):
-        props = context.scene.xxmi_custom_physics_props
         target_objs = _get_target_mesh_objects(context)
-
         if not target_objs:
             self.report({'ERROR'}, "선택된 메쉬 오브젝트가 없습니다.")
             return {'CANCELLED'}
@@ -177,16 +177,11 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         for obj in target_objs:
             ensure_object_visible(context, obj)
 
-        # 1. 대상 메쉬들에서 선택된 정점 수집 (numpy 일괄 처리)
-        obj_sel_data = {}  # obj -> {"left": [vi, ...], "right": [vi, ...], "world": ndarray(n,3), "mw": Matrix}
-        all_left_world_pts = []
-        all_right_world_pts = []
-
-        total_sel_count = 0
+        total_l = 0
+        total_r = 0
 
         for obj in target_objs:
             mesh = obj.data
-            mw = obj.matrix_world
             n_verts = len(mesh.vertices)
             if n_verts == 0:
                 continue
@@ -216,22 +211,27 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             if extra_indices:
                 sel_indices = np.nonzero(sel_mask)[0]
 
-            total_sel_count += len(sel_indices)
+            vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
+            vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
+
+            # 이전 가슴 가중치를 초기화하고 새로 선택된 정점을 가슴 그룹에 등록 (초기 기본 가중치 0.05 부여)
+            all_v = list(range(n_verts))
+            vg_l.remove(all_v)
+            vg_r.remove(all_v)
 
             is_left = world[sel_indices, 0] >= 0.0
-            left_idx = sel_indices[is_left]
-            right_idx = sel_indices[~is_left]
-            all_left_world_pts.extend(Vector(p) for p in world[left_idx].tolist())
-            all_right_world_pts.extend(Vector(p) for p in world[right_idx].tolist())
+            left_idx = sel_indices[is_left].tolist()
+            right_idx = sel_indices[~is_left].tolist()
 
-            obj_sel_data[obj] = {
-                "left": left_idx.tolist(),
-                "right": right_idx.tolist(),
-                "world": world,
-                "mw": mw,
-            }
+            if left_idx:
+                vg_l.add(left_idx, 0.05, 'REPLACE')
+                total_l += len(left_idx)
+            if right_idx:
+                vg_r.add(right_idx, 0.05, 'REPLACE')
+                total_r += len(right_idx)
 
-        if total_sel_count < 6 or (not all_left_world_pts and not all_right_world_pts):
+        total_sel = total_l + total_r
+        if total_sel < 6:
             if was_edit:
                 for obj in target_objs:
                     context.view_layer.objects.active = obj
@@ -239,155 +239,15 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             self.report({'ERROR'}, "에디트 모드에서 가슴 표면 정점들을 먼저 선택해주세요. (최소 6개 이상)")
             return {'CANCELLED'}
 
-        # 2. 전체 선택 정점 기준 통합 가슴 앵커 위치(월드 좌표) 계산
-        anchor_info = {}
-        for side, pts, bname in (("L", all_left_world_pts, "Breast.L"), ("R", all_right_world_pts, "Breast.R")):
-            if not pts:
-                continue
-            centroid = sum(pts, Vector((0.0, 0.0, 0.0))) / len(pts)
-            # 블렌더 좌표계에서 캐릭터 전방(가슴 돌출 방향)은 -Y 축입니다 (Front View는 +Y를 바라봄)
-            tip_pos = min(pts, key=lambda p: p.y)
-            fwd_dir = (tip_pos - centroid)
-            if fwd_dir.length < 0.01:
-                fwd_dir = Vector((0.0, -0.06, 0.0))
-            else:
-                fwd_dir = fwd_dir.normalized() * max(0.04, (centroid - tip_pos).length)
-
-            head_pos = centroid - fwd_dir * 0.8
-            tail_pos = tip_pos
-            bone_vec_v = tail_pos - head_pos
-            bone_len_v = bone_vec_v.length
-            bone_u_v = bone_vec_v.normalized() if bone_len_v > 1e-4 else Vector((0.0, -1.0, 0.0))
-            max_rho = max(((p - head_pos) - ((p - head_pos).dot(bone_u_v)) * bone_u_v).length for p in pts)
-            radius = max(0.03, max_rho)
-
-            anchor_info[side] = {
-                "bname": bname,
-                "centroid": centroid,
-                "tip": tip_pos,
-                "head": head_pos,
-                "tail": tail_pos,
-                "fwd_unit": (tail_pos - head_pos).normalized(),
-                "radius": radius,
-            }
-
-        # 3. 통합 가슴 앵커 아머처(XXMI_Breast_Rig) 생성/갱신
-        ref_obj = target_objs[0]
-        rig = _get_or_create_breast_rig(context, props, ref_obj)
-        ensure_object_visible(context, rig)
-        context.view_layer.objects.active = rig
-        bpy.ops.object.mode_set(mode='EDIT')
-
-        ebones = rig.data.edit_bones
-        for eb in list(ebones):
-            ebones.remove(eb)
-
-        for side, d in anchor_info.items():
-            eb = ebones.new(d["bname"])
-            eb.head = d["head"]
-            eb.tail = d["tail"]
-            eb.head_radius = d["radius"]
-            eb.tail_radius = d["radius"] * 0.7
-            eb.envelope_distance = d["radius"] * 1.4
-            eb["xxmi_bone_type"] = "BREAST"
-            eb["xxmi_side"] = side
-
-        bpy.ops.object.mode_set(mode='OBJECT')
-
-        # 4. 각 메쉬 오브젝트별로 가중치 그룹 생성 및 베이크
-        falloff_p = props.falloff_power
-        total_rigid_islands = 0
-
-        for obj, sdata in obj_sel_data.items():
-            mesh = obj.data
-            world = sdata["world"]
-            n_verts = len(mesh.vertices)
-
-            vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
-            vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-
-            # 사용자가 수동 지정해 둔 기존 강체 정점 보존
-            prev = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"})
-            existing_rigid = prev["rigid"] > 0.5
-
-            all_v_indices = list(range(n_verts))
-            vg_l.remove(all_v_indices)
-            vg_r.remove(all_v_indices)
-            vg_rigid.remove(all_v_indices)
-
-            selected = np.zeros(n_verts, dtype=bool)
-            selected[sdata["left"]] = True
-            selected[sdata["right"]] = True
-
-            rigid_all = existing_rigid & selected
-
-            # A) 강체 장신구는 사용자가 [선택 부위를 강체 장신구로 지정]으로 직접 지정한 정점만 사용합니다. (자동 감지 없음)
-
-            # B) 피부 및 옷감 정점 감쇠 베이크 (원통형 해부학적 거리 + Anti-Clipping 필터 적용)
-            for side, vlist, vg in (("L", sdata["left"], vg_l), ("R", sdata["right"], vg_r)):
-                if not vlist or side not in anchor_info:
-                    continue
-
-                head = np.array(anchor_info[side]["head"], dtype=np.float64)
-                tail = np.array(anchor_info[side]["tail"], dtype=np.float64)
-                radius = anchor_info[side]["radius"]
-                eff_radius = max(0.02, radius)
-
-                idx_arr = np.array(vlist, dtype=np.int64)
-                world_sub = world[idx_arr]
-                w_arr = _calculate_anatomical_weights_with_anti_clipping(
-                    world_sub, head, tail, eff_radius, falloff_p
-                )
-
-
-
-                for vi, wi in zip(vlist, w_arr.tolist()):
-                    if rigid_all[vi]:
-                        continue
-                    vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
-
-            # C) 가슴 중앙 골(Cleavage) 대칭 크로스 블렌딩 (중앙선 분리 찢어짐 영구 차단)
-            center_x = 0.0
-            if "L" in anchor_info and "R" in anchor_info:
-                center_x = (anchor_info["L"]["head"][0] + anchor_info["R"]["head"][0]) * 0.5
-
-            blend_w = 0.025  # 2.5cm 대칭 블렌드 반경
-            arrs_now = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
-            wl_all = arrs_now["l"]
-            wr_all = arrs_now["r"]
-            near_center = np.abs(world[:, 0] - center_x) < blend_w
-            active = (wl_all > 0.0001) | (wr_all > 0.0001)
-            target_mask = near_center & active & ~rigid_all
-            for vi in np.nonzero(target_mask)[0].tolist():
-                x_dist = abs(world[vi, 0] - center_x)
-                t = x_dist / blend_w
-                # Hermite Curve: t=0 -> k=0.5 (완전 5:5 대칭 결합), t=1 -> k=0.0 (독립 거동)
-                k = 0.5 * (1.0 - (3.0 * t * t - 2.0 * t * t * t))
-                orig_l = wl_all[vi]
-                orig_r = wr_all[vi]
-                new_l = (1.0 - k) * orig_l + k * orig_r
-                new_r = (1.0 - k) * orig_r + k * orig_l
-                vg_l.add([vi], max(0.0, min(1.0, float(new_l))), 'REPLACE')
-                vg_r.add([vi], max(0.0, min(1.0, float(new_r))), 'REPLACE')
-
-            rigid_list = np.nonzero(rigid_all)[0].tolist()
-            if rigid_list:
-                vg_rigid.add(rigid_list, 1.0, 'REPLACE')
-
-        # D) 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
-        num_clusters = _unify_rigid_clusters_across_objects(list(obj_sel_data.keys()), anchor_info, falloff_p)
-        total_rigid_islands = max(total_rigid_islands, num_clusters)
-
         if was_edit:
             for obj in target_objs:
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
 
-        obj_names_str = ", ".join(o.name for o in obj_sel_data.keys())
         self.report(
             {'INFO'},
-            f"다중 오브젝트({len(obj_sel_data)}개: {obj_names_str}) 가슴 물리 등록 완료! (총 정점: {total_sel_count}개, 통합 강체: {total_rigid_islands}개)"
+            f"1단계 완료: 가슴 정점 총 {total_sel}개(좌: {total_l}개, 우: {total_r}개) 등록 완료! "
+            f"장신구가 있다면 에디트 모드에서 선택 후 [2. 강체 장신구 등록]을, 없다면 [3. 본 생성]을 진행하세요."
         )
         return {'FINISHED'}
 
@@ -498,12 +358,12 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         v = pt - head
         t = v.dot(fwd_u)
         t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
-        w_depth = 3.0 * (t_norm ** 2) - 2.0 * (t_norm ** 3)
+        w_depth = math.sin(t_norm * (math.pi * 0.5))
 
         v_perp = v - t * fwd_u
         rho = v_perp.length
         rho_norm = max(0.0, min(1.0, rho / radius))
-        w_radial = math.cos(rho_norm * (math.pi * 0.5))
+        w_radial = math.cos((rho_norm ** 2) * (math.pi * 0.5))
 
         w = math.pow(max(0.0, w_depth * w_radial), falloff_p)
         return max(0.05, min(1.0, w)) if w > 0.0 else 0.0
@@ -774,7 +634,7 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
     bl_idname = "object.xxmi_rebake_breast_weights"
-    bl_label = "조정된 본 위치 기준으로 가중치 재계산"
+    bl_label = "4. 본 기준 가중치 계산 & 베이크"
     bl_description = "수동 조정한 XXMI_Breast_Rig 아머처의 본(Breast.L / Breast.R) 위치를 기준으로 가슴 버텍스 가중치(XXMI_Breast_L/R)를 다시 계산합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -894,8 +754,8 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
 
 class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
     bl_idname = "object.xxmi_mark_selection_rigid"
-    bl_label = "선택 부위를 강체 장신구로 지정"
-    bl_description = "선택된 모든 오브젝트에서 에디트 모드로 선택한 정점들을 강체 장신구(XXMI_Role_Rigid)로 등록합니다"
+    bl_label = "2. 선택 부위를 강체 장신구로 등록"
+    bl_description = "선택된 모든 오브젝트에서 에디트 모드로 선택한 단추, 브로치 등의 장신구 정점들을 강체(XXMI_Role_Rigid)로 등록합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -911,19 +771,28 @@ class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
 
         total_marked = 0
         for obj in target_objs:
-            sel = [v.index for v in obj.data.vertices if v.select]
-            if not sel:
+            n_verts = len(obj.data.vertices)
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            obj.data.vertices.foreach_get("select", sel_mask)
+            sel_indices = np.nonzero(sel_mask)[0]
+            if len(sel_indices) == 0:
                 continue
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-            vg_rigid.add(sel, 1.0, 'REPLACE')
-            total_marked += len(sel)
 
-        props = context.scene.xxmi_custom_physics_props
-        rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
-        sync_msg = ""
-        if rig and rig.type == 'ARMATURE' and total_marked > 0:
-            _, sync_msg = _rebake_mesh_weights_from_rig(context, rig, props)
-            sync_msg = f" -> {sync_msg}"
+            world = world_vertex_positions(obj)
+            kd_local = KDTree(n_verts)
+            for vi, wpos in enumerate(world):
+                kd_local.insert(Vector(wpos), vi)
+            kd_local.balance()
+
+            for si in sel_indices.tolist():
+                hits = kd_local.find_range(Vector(world[si]), 0.0005)
+                for _, hi, _ in hits:
+                    sel_mask[hi] = True
+
+            final_sel = np.nonzero(sel_mask)[0].tolist()
+            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
+            vg_rigid.add(final_sel, 1.0, 'REPLACE')
+            total_marked += len(final_sel)
 
         if was_edit:
             for obj in target_objs:
@@ -931,10 +800,251 @@ class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='EDIT')
 
         if total_marked == 0:
-            self.report({'ERROR'}, "장신구로 지정할 정점들을 선택해주세요.")
+            self.report({'ERROR'}, "장신구로 지정할 정점들을 에디트 모드에서 선택해주세요.")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"총 {total_marked}개 정점을 강체 장신구(XXMI_Role_Rigid)로 등록 및 가중치 동기화 완료!{sync_msg}")
+        self.report(
+            {'INFO'},
+            f"2단계 완료: 총 {total_marked}개 정점을 강체 장신구(XXMI_Role_Rigid)로 등록했습니다! 이어서 [3. 가슴 앵커 본 생성]을 누르세요."
+        )
+        return {'FINISHED'}
+
+
+class XXMI_OT_unmark_selection_rigid(bpy.types.Operator):
+    bl_idname = "object.xxmi_unmark_selection_rigid"
+    bl_label = "선택 부위 강체 등록 해제"
+    bl_description = "선택된 오브젝트에서 에디트 모드로 선택한 정점들을 강체 장신구(XXMI_Role_Rigid)에서 제외합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        objs = _get_target_mesh_objects(context)
+        return any(o.vertex_groups.get(VG_RIGID) is not None for o in objs)
+
+    def execute(self, context):
+        target_objs = _get_target_mesh_objects(context)
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        total_unmarked = 0
+        for obj in target_objs:
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+            if not vg_rigid:
+                continue
+            sel = [v.index for v in obj.data.vertices if v.select]
+            if not sel:
+                continue
+            vg_rigid.remove(sel)
+            total_unmarked += len(sel)
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        self.report({'INFO'}, f"총 {total_unmarked}개 정점의 강체 등록을 해제했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
+    bl_idname = "object.xxmi_select_rigid_vertices"
+    bl_label = "강체 장신구 정점 재선택"
+    bl_description = "강체 장신구(XXMI_Role_Rigid)로 등록된 모든 메쉬 오브젝트의 정점들을 에디트 모드에서 다시 선택합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(
+            o.type == 'MESH' and o.vertex_groups.get(VG_RIGID) is not None
+            for o in bpy.data.objects
+        )
+
+    def execute(self, context):
+        target_objs = [
+            o for o in bpy.data.objects
+            if o.type == 'MESH' and o.vertex_groups.get(VG_RIGID) is not None
+        ]
+
+        if not target_objs:
+            self.report({'WARNING'}, "강체 장신구(XXMI_Role_Rigid)가 등록된 메쉬 오브젝트가 없습니다.")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in target_objs:
+            ensure_object_visible(context, obj)
+            obj.select_set(True)
+
+        context.view_layer.objects.active = target_objs[0]
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='VERT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+
+        total_selected = 0
+        for obj in target_objs:
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+            if not vg_rigid:
+                continue
+            g_idx = vg_rigid.index
+            dvert_lay = bm.verts.layers.deform.verify()
+
+            for v in bm.verts:
+                dvert = v[dvert_lay]
+                is_r = (g_idx in dvert and dvert[g_idx] > 0.5)
+                v.select_set(is_r)
+                if is_r:
+                    total_selected += 1
+
+            bmesh.update_edit_mesh(obj.data)
+
+        self.report({'INFO'}, f"총 {total_selected}개 강체 장신구 정점을 재선택했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_generate_breast_rig(bpy.types.Operator):
+    bl_idname = "object.xxmi_generate_breast_rig"
+    bl_label = "3. 가슴 앵커 본 생성 (강체 제외)"
+    bl_description = "등록된 가슴 정점 중 강체 장신구를 제외한 순수 가슴 메쉬만을 기준으로 정확한 위치/방향의 가슴 앵커 본(XXMI_Breast_Rig)을 생성합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(
+            o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
+            for o in bpy.data.objects
+        )
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        target_objs = [
+            o for o in bpy.data.objects
+            if o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
+        ]
+
+        if not target_objs:
+            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴 정점으로 등록]을 진행해주세요.")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        for obj in target_objs:
+            ensure_object_visible(context, obj)
+
+        all_left_pts = []
+        all_right_pts = []
+        soft_left_pts = []
+        soft_right_pts = []
+        total_rigid_count = 0
+
+        for obj in target_objs:
+            vg_l = obj.vertex_groups.get(VG_BREAST_L)
+            vg_r = obj.vertex_groups.get(VG_BREAST_R)
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+
+            group_map = {}
+            if vg_l: group_map[vg_l.index] = "l"
+            if vg_r: group_map[vg_r.index] = "r"
+            if vg_rigid: group_map[vg_rigid.index] = "rigid"
+
+            arrs = read_vertex_group_arrays(obj, group_map)
+            world = world_vertex_positions(obj)
+
+            rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world), dtype=bool)
+            total_rigid_count += int(np.count_nonzero(rigid_mask))
+
+            if "l" in arrs:
+                l_mask = arrs["l"] > 0.0001
+                l_idx = np.nonzero(l_mask)[0]
+                for vi in l_idx.tolist():
+                    pt = Vector(world[vi])
+                    all_left_pts.append(pt)
+                    if not rigid_mask[vi]:
+                        soft_left_pts.append(pt)
+
+            if "r" in arrs:
+                r_mask = arrs["r"] > 0.0001
+                r_idx = np.nonzero(r_mask)[0]
+                for vi in r_idx.tolist():
+                    pt = Vector(world[vi])
+                    all_right_pts.append(pt)
+                    if not rigid_mask[vi]:
+                        soft_right_pts.append(pt)
+
+        # 만약 모든 정점이 강체로 지정된 예외 상황인 경우 fallback
+        final_left = soft_left_pts if soft_left_pts else all_left_pts
+        final_right = soft_right_pts if soft_right_pts else all_right_pts
+
+        if not final_left and not final_right:
+            self.report({'ERROR'}, "유효한 가슴 정점을 찾을 수 없습니다. [1. 가슴 정점 등록]을 다시 진행해주세요.")
+            return {'CANCELLED'}
+
+        anchor_info = {}
+        for side, pts, bname in (("L", final_left, "Breast.L"), ("R", final_right, "Breast.R")):
+            if not pts:
+                continue
+            centroid = sum(pts, Vector((0.0, 0.0, 0.0))) / len(pts)
+            # 블렌더 좌표계에서 캐릭터 전방(가슴 돌출 방향)은 -Y 축입니다 (Front View는 +Y를 바라봄)
+            tip_pos = min(pts, key=lambda p: p.y)
+            fwd_dir = (tip_pos - centroid)
+            if fwd_dir.length < 0.01:
+                fwd_dir = Vector((0.0, -0.06, 0.0))
+            else:
+                fwd_dir = fwd_dir.normalized() * max(0.04, (centroid - tip_pos).length)
+
+            head_pos = centroid - fwd_dir * 0.8
+            tail_pos = tip_pos
+            bone_vec_v = tail_pos - head_pos
+            bone_len_v = bone_vec_v.length
+            bone_u_v = bone_vec_v.normalized() if bone_len_v > 1e-4 else Vector((0.0, -1.0, 0.0))
+            max_rho = max(((p - head_pos) - ((p - head_pos).dot(bone_u_v)) * bone_u_v).length for p in pts)
+            radius = max(0.03, max_rho)
+
+            anchor_info[side] = {
+                "bname": bname,
+                "centroid": centroid,
+                "tip": tip_pos,
+                "head": head_pos,
+                "tail": tail_pos,
+                "fwd_unit": bone_u_v,
+                "radius": radius,
+            }
+
+        ref_obj = target_objs[0]
+        rig = _get_or_create_breast_rig(context, props, ref_obj)
+        ensure_object_visible(context, rig)
+        context.view_layer.objects.active = rig
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        ebones = rig.data.edit_bones
+        for eb in list(ebones):
+            ebones.remove(eb)
+
+        for side, d in anchor_info.items():
+            eb = ebones.new(d["bname"])
+            eb.head = d["head"]
+            eb.tail = d["tail"]
+            eb.head_radius = d["radius"]
+            eb.tail_radius = d["radius"] * 0.7
+            eb.envelope_distance = d["radius"] * 1.4
+            eb["xxmi_bone_type"] = "BREAST"
+            eb["xxmi_side"] = side
+
+        bpy.ops.object.mode_set(mode='OBJECT')
+        rig.show_in_front = True
+        context.view_layer.objects.active = rig
+        rig.select_set(True)
+
+        self.report(
+            {'INFO'},
+            f"3단계 완료: 강체({total_rigid_count}개) 제외 순수 가슴 정점(좌 {len(final_left)}개, 우 {len(final_right)}개) 기준 앵커 본 생성 완료! "
+            f"뷰포트에서 본의 위치/각도를 확인 및 조정한 뒤 [4. 본 기준 가중치 계산 & 베이크]를 실행하세요."
+        )
         return {'FINISHED'}
 
 
@@ -979,9 +1089,12 @@ class XXMI_OT_clear_breast_physics(bpy.types.Operator):
 
 classes = (
     XXMI_OT_register_breast_selection,
-    XXMI_OT_select_breast_vertices,
-    XXMI_OT_rebake_breast_weights,
     XXMI_OT_mark_selection_rigid,
+    XXMI_OT_unmark_selection_rigid,
+    XXMI_OT_select_rigid_vertices,
+    XXMI_OT_generate_breast_rig,
+    XXMI_OT_rebake_breast_weights,
+    XXMI_OT_select_breast_vertices,
     XXMI_OT_clear_breast_physics,
 )
 

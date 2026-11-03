@@ -21,43 +21,77 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[1단계: 가슴 선택 & 장신구 보존 앵커 등록]\n\n"
-                "1. 모드 메쉬 오브젝트(예: Body, 의상 등)를 Shift+선택하고 Tab(에디트 모드)으로 들어갑니다.\n"
-                "   ➔ 단일 메쉬뿐만 아니라 여러 개로 분리된 메쉬를 동시에 선택하여 한 번에 작업할 수 있습니다.\n"
-                "2. 가슴 표면 정점들을 박스나 브러시로 쓱 드래그하여 선택합니다.\n"
-                "3. [선택 영역을 가슴 물리로 등록] 버튼을 클릭합니다.\n"
-                "   ➔ 중심선(X=0) 기준으로 좌/우 가슴 앵커가 자동 배치됩니다.\n"
-                "4. 단추, 브로치 등 모핑되면 안 되는 장신구는 에디트 모드에서 선택 후 [선택 부위를 강체 장신구로 지정]을 누르세요.\n"
-                "   ➔ 자동 감지는 없으며, 직접 지정한 정점만 강체로 처리됩니다. 여러 오브젝트에 걸친 강체도 같은 값으로 묶입니다."
+                "[가슴 물리 작업 순서]\n\n"
+                "1. 에디트 모드에서 가슴 정점을 선택하고 [1. 선택 영역을 가슴 정점으로 등록]을 누릅니다.\n"
+                "2. 단추, 브로치, 엠블럼 등 모핑되면 안 되는 단단한 장신구가 있다면 에디트 모드에서 선택 후 [2. 선택 부위를 강체 장신구로 등록]을 누릅니다. (장신구가 없다면 3단계로 바로 이동)\n"
+                "3. [3. 가슴 앵커 본 생성 (강체 제외)]를 누릅니다.\n"
+                "   ➔ 장신구를 제외한 순수 가슴 메쉬만을 기준으로 중심점과 돌출 방향(Nipple)을 평가하므로, 장신구 쪽으로 본이 쏠리지 않고 정확하게 생성됩니다.\n"
+                "4. 뷰포트에서 생성된 본(XXMI_Breast_Rig)의 위치/각도를 확인하고 필요 시 미세 조정한 뒤, [4. 본 기준 가중치 계산 & 베이크]를 누릅니다.\n"
+                "5. '2. 가슴 물리 파라미터 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 바스트모핑 주입'으로 인게임에 적용합니다."
             ),
         )
 
         layout.use_property_split = True
         layout.use_property_decorate = False
 
+        # --- 메인 작업 단계 (1 -> 2 -> 3 -> 4) ---
         box_main = layout.box()
         b_col = box_main.column(align=True)
-        b_col.label(text="가슴 정점 등록 & 본 동기화:", icon='EDITMODE_HLT')
+        b_col.label(text="가슴 물리 설정 순서:", icon='SETTINGS')
+        b_col.separator(factor=0.5)
+
         b_col.operator(
             "object.xxmi_register_breast_selection",
-            text="선택 영역을 가슴 물리로 등록",
+            text="1. 선택 영역을 가슴 정점으로 등록",
             icon='SPHERE'
         )
-        b_col.separator()
+        b_col.separator(factor=0.5)
+
         b_col.operator(
-            "object.xxmi_select_breast_vertices",
-            text="적용된 가슴 정점 재선택",
-            icon='RESTRICT_SELECT_OFF'
+            "object.xxmi_mark_selection_rigid",
+            text="2. 선택 부위를 강체 장신구로 등록",
+            icon='RADIOBUT_ON'
         )
-        b_col.separator()
+        b_col.separator(factor=0.5)
+
+        b_col.operator(
+            "object.xxmi_generate_breast_rig",
+            text="3. 가슴 앵커 본 생성 (강체 제외)",
+            icon='BONE_DATA'
+        )
+        b_col.separator(factor=0.5)
+
         b_col.operator(
             "object.xxmi_rebake_breast_weights",
-            text="조정된 본 위치 기준으로 가중치 재계산",
-            icon='BONE_DATA'
+            text="4. 본 기준 가중치 계산 & 베이크",
+            icon='MOD_VERTEX_WEIGHT'
         )
 
         layout.separator()
 
+        # --- 정점 재선택 & 강체 관리 도구 ---
+        box_tools = layout.box()
+        t_col = box_tools.column(align=True)
+        t_col.label(text="정점 재선택 & 강체 관리 도구:", icon='RESTRICT_SELECT_OFF')
+        t_col.operator(
+            "object.xxmi_select_breast_vertices",
+            text="가슴 정점 재선택",
+            icon='RESTRICT_SELECT_OFF'
+        )
+        t_col.operator(
+            "object.xxmi_select_rigid_vertices",
+            text="강체 장신구 정점 재선택",
+            icon='RESTRICT_SELECT_OFF'
+        )
+        t_col.operator(
+            "object.xxmi_unmark_selection_rigid",
+            text="선택 부위 강체 등록 해제",
+            icon='X'
+        )
+
+        layout.separator()
+
+        # --- 가중치 세부 옵션 ---
         box_opt = layout.box()
         o_col = box_opt.column(align=True)
         o_col.label(text="가중치 감쇠 설정:", icon='MOD_VERTEX_WEIGHT')
@@ -66,15 +100,10 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
         layout.separator()
 
+        # --- 초기화 ---
         box_sub = layout.box()
         s_col = box_sub.column(align=True)
-        s_col.label(text="수동 강체 지정 & 초기화:", icon='RESTRICT_SELECT_OFF')
-        s_col.operator(
-            "object.xxmi_mark_selection_rigid",
-            text="선택 부위를 강체 장신구로 지정",
-            icon='RADIOBUT_ON'
-        )
-        s_col.separator()
+        s_col.label(text="초기화:", icon='TRASH')
         s_col.operator(
             "object.xxmi_clear_breast_physics",
             text="가슴 물리 설정 초기화",
@@ -95,4 +124,3 @@ def register():
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-

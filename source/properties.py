@@ -19,11 +19,11 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     # ── 2. 가슴 가중치 감쇠 옵션 ──
     falloff_power: bpy.props.FloatProperty(
-        name="가슴 감쇠 부드러움",
-        description="가슴 꼭지점에서 몸통 둘레로 갈수록 가중치가 0으로 감쇠하는 부드러움 곡선 지수입니다 (높을수록 외곽이 단단히 고정됨)",
-        default=1.6,
-        min=0.5,
-        max=4.0,
+        name="가중치 퍼짐/집중",
+        description="가슴 웨이트가 퍼지는 정도입니다. 1.0이 기본이며, 낮을수록(0.6~0.8) 가슴 전체로 넓고 풍성하게 퍼지고, 높을수록(1.3~2.0) 꼭지점 끝쪽으로 집중됩니다",
+        default=1.0,
+        min=0.3,
+        max=3.0,
         step=10,
         precision=2
     )
