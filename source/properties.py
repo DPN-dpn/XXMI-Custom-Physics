@@ -34,6 +34,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         default=True
     )
 
+
     # ── 3. 가슴 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
         name="흔들림 강도",

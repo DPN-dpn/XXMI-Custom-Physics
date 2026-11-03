@@ -484,7 +484,8 @@ def _load_physics_from_mod(mod_folder, context, props):
                 continue
             total_w = sum(w for _, w in pts)
             cent = sum((p * w for p, w in pts), Vector((0.0, 0.0, 0.0))) / total_w
-            tip = max((p for p, _ in pts), key=lambda p: p.y)
+            # 버퍼 좌표계에서 전방(가슴 돌출 방향)은 +Z 축입니다
+            tip = max((p for p, _ in pts), key=lambda p: p.z)
             fwd = tip - cent
             if fwd.length < 0.01:
                 fwd = Vector((0.0, 0.06, 0.0))

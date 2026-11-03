@@ -1,6 +1,7 @@
 import bpy
 import bmesh
 import math
+import heapq
 import numpy as np
 from collections import deque
 from mathutils import Vector, Matrix
@@ -85,64 +86,67 @@ def _find_connected_islands(vert_indices, edges_list):
     return islands
 
 
-def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, fwd_u, eff_radius, falloff_p):
+def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd, eff_radius, falloff_p=1.0):
     """
-    원통형(Cylindrical) 해부학적 거리 메트릭 + 다중 레이어 Anti-Clipping 필터:
-    1. 가슴 앞쪽(전방 깊이 t >= 0)으로 돌출된 정점들은 깊이 때문에 가중치가 깎이지 않고,
-       오직 가슴 중심 축으로부터의 횡방향 반경(rho)으로만 감쇠되도록 하여
-       겉옷(바깥 레이어)이 안쪽 피부보다 가중치가 낮아지는 역전을 원천 차단합니다.
-    2. 국소 이웃 정점 간 KD-Tree 검사를 통해, 바깥쪽 정점의 가중치가 안쪽 정점보다 작지 않도록
-       w_outer >= w_inner 를 보장합니다 (단일/다중 오브젝트 무관, 클리핑 원천 방지).
+    해부학적 앵커 본 세그먼트[Head -> Tail] 기반 3D 이중 감쇠(전방 깊이 Smoothstep + 방사형 Cosine):
+    1. 전방 깊이 감쇠(Depth Falloff): 흉벽 부착부(Head)에서 0.0 -> 가슴 끝 유두(Tail)에서 1.0으로 매끄럽게 증가 (Hermite Curve)
+       -> 흉벽에 가까운 정점의 가중치가 ~0에 수렴하여 가슴이 움직일 때 몸통/피부와 벌어지는 틈(Tearing/Gap) 완벽 방지
+    2. 방사형 감쇠(Radial Falloff): 본 중심축에서 외곽 둘레(Perimeter)로 갈수록 1.0 -> 0.0으로 완만하게 감소 (Cosine Curve)
+       -> 선택 테두리 부위가 주변 메쉬와 단차 없이 부드럽게 이어짐
+    3. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 보장
+    4. 선택 보존: 최소 가중치 0.005를 보장하여 [적용된 가슴 정점 재선택] 시 선택 영역이 100% 온전히 유지됨
     """
     if len(world_pts) == 0:
         return np.array([], dtype=np.float64)
 
-    v = world_pts - head
-    t = v @ fwd_u
-    v_perp = v - np.outer(t, fwd_u)
+    head_arr = np.array(head, dtype=np.float64)
+    tail_arr = np.array(tail_or_fwd, dtype=np.float64)
+    norm3 = float(np.linalg.norm(tail_arr))
+
+    if abs(norm3 - 1.0) < 1e-3:
+        fwd_u = tail_arr / norm3
+        tail_arr = head_arr + fwd_u * float(eff_radius)
+
+    bone_vec = tail_arr - head_arr
+    bone_len = float(np.linalg.norm(bone_vec))
+    if bone_len < 1e-6:
+        bone_u = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        bone_len = max(1e-4, float(eff_radius))
+    else:
+        bone_u = bone_vec / bone_len
+
+    pts_rel = world_pts - head_arr
+
+    # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 Hermite Smoothstep 감쇠 (Head=0 -> Tail=1)
+    t_proj = pts_rel @ bone_u
+    t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
+    w_depth = 3.0 * (t_norm ** 2) - 2.0 * (t_norm ** 3)
+
+    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 Cosine 감쇠 (Axis=1 -> Edge=0)
+    v_perp = pts_rel - np.outer(t_proj, bone_u)
     rho = np.linalg.norm(v_perp, axis=1)
+    radius = max(1e-4, float(eff_radius))
+    rho_norm = np.clip(rho / radius, 0.0, 1.0)
+    w_radial = np.cos(rho_norm * (np.pi * 0.5))
 
-    # 전방 영역 (t >= 0): 횡방향 거리 rho만 반영
-    # 후방 영역 (t < 0): 뒤로 갈수록 감쇠 (베이스 ribcage 고정)
-    eff_dist = np.where(t >= 0.0, rho, np.sqrt(rho * rho + (t * 1.5) ** 2))
-    dist_norm = eff_dist / eff_radius
-    w_arr = np.power(np.clip(1.0 - dist_norm, 0.0, 1.0), falloff_p)
+    # 3. 해부학적 합성 가중치 계산 및 최소 보장 가중치(0.005) 적용
+    w_comb = np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
+    w_arr = np.clip(w_comb, 0.005, 1.0)
 
-    # Anti-Clipping Filter:
-    # 겹쳐 있는 다중 레이어(피부 vs 옷감)에서 바깥쪽(t가 더 큼) 정점이
-    # 안쪽 정점보다 가중치가 작지 않도록 보정
+    # 4. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
     if len(world_pts) > 1:
         kd = KDTree(len(world_pts))
         for k, pt in enumerate(world_pts.tolist()):
             kd.insert(Vector(pt), k)
         kd.balance()
 
-        sort_order = np.argsort(t)
-        w_filtered = w_arr.copy()
-        tol = 0.015  # 1.5cm 반경 내 이웃 레이어 검사
-
-        for idx in sort_order:
+        for idx in range(len(world_pts)):
             co = Vector(world_pts[idx])
-            hits = kd.find_range(co, tol)
-            if not hits:
-                continue
-            cur_t = t[idx]
-            cur_w = w_filtered[idx]
-            if cur_w <= 0.0001:
-                continue
-
-            for h_co, h_idx, h_dist in hits:
-                # 1) UV 심(Seam) 및 분리된 경계 정점: 0.5mm 이내의 동일 3D 좌표는 100% 동일 가중치 부여 (경계 벌어짐 방지)
-                if h_dist <= 0.0005:
-                    max_w = max(w_filtered[idx], w_filtered[h_idx])
-                    w_filtered[idx] = max_w
-                    w_filtered[h_idx] = max_w
-                # 2) h_idx가 idx보다 바깥쪽(전방)에 위치한 경우, 바깥쪽 가중치가 안쪽 가중치 이상이 되도록 보정 (Anti-Clipping)
-                elif t[h_idx] > cur_t + 1e-4:
-                    if w_filtered[h_idx] < cur_w:
-                        w_filtered[h_idx] = cur_w
-
-        w_arr = w_filtered
+            hits = kd.find_range(co, 0.0005)
+            if len(hits) > 1:
+                max_w = max(w_arr[h_idx] for _, h_idx, _ in hits)
+                for _, h_idx, _ in hits:
+                    w_arr[h_idx] = max_w
 
     return w_arr
 
@@ -241,17 +245,21 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             if not pts:
                 continue
             centroid = sum(pts, Vector((0.0, 0.0, 0.0))) / len(pts)
-            # 표면 전방(+Y) 방향으로 가장 튀어나온 꼭지점 탐색
-            tip_pos = max(pts, key=lambda p: p.y)
+            # 블렌더 좌표계에서 캐릭터 전방(가슴 돌출 방향)은 -Y 축입니다 (Front View는 +Y를 바라봄)
+            tip_pos = min(pts, key=lambda p: p.y)
             fwd_dir = (tip_pos - centroid)
             if fwd_dir.length < 0.01:
-                fwd_dir = Vector((0.0, 0.08, 0.0))
+                fwd_dir = Vector((0.0, -0.06, 0.0))
             else:
-                fwd_dir = fwd_dir.normalized() * max(0.04, (tip_pos - centroid).length * 1.2)
+                fwd_dir = fwd_dir.normalized() * max(0.04, (centroid - tip_pos).length)
 
-            head_pos = centroid - fwd_dir * 0.4
-            tail_pos = centroid + fwd_dir * 0.6
-            radius = max(0.03, (centroid - tip_pos).length * 0.75)
+            head_pos = centroid - fwd_dir * 0.8
+            tail_pos = tip_pos
+            bone_vec_v = tail_pos - head_pos
+            bone_len_v = bone_vec_v.length
+            bone_u_v = bone_vec_v.normalized() if bone_len_v > 1e-4 else Vector((0.0, -1.0, 0.0))
+            max_rho = max(((p - head_pos) - ((p - head_pos).dot(bone_u_v)) * bone_u_v).length for p in pts)
+            radius = max(0.03, max_rho)
 
             anchor_info[side] = {
                 "bname": bname,
@@ -322,27 +330,52 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
                     continue
 
                 head = np.array(anchor_info[side]["head"], dtype=np.float64)
-                fwd_u = np.array(anchor_info[side]["fwd_unit"], dtype=np.float64)
+                tail = np.array(anchor_info[side]["tail"], dtype=np.float64)
                 radius = anchor_info[side]["radius"]
-                eff_radius = max(0.02, radius * 1.5)
+                eff_radius = max(0.02, radius)
 
                 idx_arr = np.array(vlist, dtype=np.int64)
+                world_sub = world[idx_arr]
                 w_arr = _calculate_anatomical_weights_with_anti_clipping(
-                    world[idx_arr], head, fwd_u, eff_radius, falloff_p
+                    world_sub, head, tail, eff_radius, falloff_p
                 )
+
+
 
                 for vi, wi in zip(vlist, w_arr.tolist()):
                     if rigid_all[vi]:
                         continue
-                    # 사용자가 선택한 정점이 탈락되지 않도록 최소 가중치(0.001) 이상으로 등록
-                    wi_final = max(0.001, wi)
-                    vg.add([vi], wi_final, 'REPLACE')
+                    vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
+
+            # C) 가슴 중앙 골(Cleavage) 대칭 크로스 블렌딩 (중앙선 분리 찢어짐 영구 차단)
+            center_x = 0.0
+            if "L" in anchor_info and "R" in anchor_info:
+                center_x = (anchor_info["L"]["head"][0] + anchor_info["R"]["head"][0]) * 0.5
+
+            blend_w = 0.025  # 2.5cm 대칭 블렌드 반경
+            arrs_now = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
+            wl_all = arrs_now["l"]
+            wr_all = arrs_now["r"]
+            near_center = np.abs(world[:, 0] - center_x) < blend_w
+            active = (wl_all > 0.0001) | (wr_all > 0.0001)
+            target_mask = near_center & active & ~rigid_all
+            for vi in np.nonzero(target_mask)[0].tolist():
+                x_dist = abs(world[vi, 0] - center_x)
+                t = x_dist / blend_w
+                # Hermite Curve: t=0 -> k=0.5 (완전 5:5 대칭 결합), t=1 -> k=0.0 (독립 거동)
+                k = 0.5 * (1.0 - (3.0 * t * t - 2.0 * t * t * t))
+                orig_l = wl_all[vi]
+                orig_r = wr_all[vi]
+                new_l = (1.0 - k) * orig_l + k * orig_r
+                new_r = (1.0 - k) * orig_r + k * orig_l
+                vg_l.add([vi], max(0.0, min(1.0, float(new_l))), 'REPLACE')
+                vg_r.add([vi], max(0.0, min(1.0, float(new_r))), 'REPLACE')
 
             rigid_list = np.nonzero(rigid_all)[0].tolist()
             if rigid_list:
                 vg_rigid.add(rigid_list, 1.0, 'REPLACE')
 
-        # C) 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
+        # D) 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
         num_clusters = _unify_rigid_clusters_across_objects(list(obj_sel_data.keys()), anchor_info, falloff_p)
         total_rigid_islands = max(total_rigid_islands, num_clusters)
 
@@ -456,19 +489,24 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         if side not in bone_info:
             return 0.0
         head = Vector(bone_info[side]["head"])
-        fwd_u = Vector(bone_info[side]["fwd_unit"])
-        radius = bone_info[side]["radius"]
-        eff_radius = max(0.02, radius * 1.5)
+        tail = Vector(bone_info[side]["tail"])
+        bone_vec = tail - head
+        bone_len = bone_vec.length
+        fwd_u = bone_vec.normalized() if bone_len > 1e-4 else Vector((0.0, -1.0, 0.0))
+        radius = max(0.02, bone_info[side]["radius"])
 
         v = pt - head
         t = v.dot(fwd_u)
+        t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
+        w_depth = 3.0 * (t_norm ** 2) - 2.0 * (t_norm ** 3)
+
         v_perp = v - t * fwd_u
         rho = v_perp.length
+        rho_norm = max(0.0, min(1.0, rho / radius))
+        w_radial = math.cos(rho_norm * (math.pi * 0.5))
 
-        eff_dist = rho if t >= 0.0 else math.sqrt(rho * rho + (t * 1.5) ** 2)
-        dist_norm = eff_dist / eff_radius
-        w = math.pow(max(0.0, 1.0 - dist_norm), falloff_p)
-        return max(0.15, min(1.0, w)) if w > 0.0 else 0.0
+        w = math.pow(max(0.0, w_depth * w_radial), falloff_p)
+        return max(0.05, min(1.0, w)) if w > 0.0 else 0.0
 
     for comp in clusters.values():
         all_pts = np.concatenate([isl["pts"] for isl in comp], axis=0)
@@ -544,7 +582,7 @@ def _get_rig_bone_info(rig):
 
         fwd = tail_w - head_w
         fwd_len = fwd.length
-        fwd_unit = (fwd / fwd_len) if fwd_len > 1e-4 else Vector((0.0, 1.0, 0.0))
+        fwd_unit = (fwd / fwd_len) if fwd_len > 1e-4 else Vector((0.0, -1.0, 0.0))
         cent = head_w + fwd * 0.4
         tip = tail_w
 
@@ -636,7 +674,7 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
         head = np.array(bone_info[side]["head"], dtype=np.float64)
         fwd_u = np.array(bone_info[side]["fwd_unit"], dtype=np.float64)
         radius = bone_info[side]["radius"]
-        eff_radius = max(0.02, radius * 1.5)
+        eff_radius = max(0.02, radius)
 
         # 1. 모든 대상 오브젝트에서 해당 측면의 가슴 후보 정점을 3D 공간 상에서 통합 수집
         side_cand = []
@@ -667,33 +705,62 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
 
             cand_idx = np.nonzero(cand_mask)[0]
             for vi in cand_idx.tolist():
-                side_cand.append((vg, vi, world[vi]))
+                side_cand.append((obj, vg, vi, world[vi]))
 
         if not side_cand:
             continue
 
         # 2. 원통형 해부학적 거리 메트릭 + 다중 레이어 Anti-Clipping 필터를 모든 오브젝트에 통합 적용
-        cand_pts = np.array([c[2] for c in side_cand], dtype=np.float64)
+        cand_pts = np.array([c[3] for c in side_cand], dtype=np.float64)
+        tail = np.array(bone_info[side]["tail"], dtype=np.float64)
         baked_w = _calculate_anatomical_weights_with_anti_clipping(
-            cand_pts, head, fwd_u, eff_radius, falloff_p
+            cand_pts, head, tail, eff_radius, falloff_p
         )
 
-        for (vg, vi, _), wi in zip(side_cand, baked_w.tolist()):
+        final_weights = baked_w.copy()
+
+        for (obj, vg, vi, _), wi in zip(side_cand, final_weights.tolist()):
             if lock_registered:
-                # 등록된 정점 풀이 탈락되지 않도록 최소 가중치(0.001) 보존
-                wi_final = max(0.001, wi)
-                vg.add([vi], wi_final, 'REPLACE')
+                vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                 total_recomputed_verts += 1
             else:
                 if wi <= 0.0001:
                     vg.remove([vi])
                 else:
-                    vg.add([vi], wi, 'REPLACE')
+                    vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                     total_recomputed_verts += 1
 
         if not lock_registered:
             for vg, z_list in zero_entries:
                 vg.remove(z_list)
+
+    # 4. 가슴 중앙 골(Cleavage) 대칭 크로스 블렌딩 (중앙선 분리 찢어짐 영구 차단)
+    center_x = 0.0
+    if "L" in bone_info and "R" in bone_info:
+        center_x = (bone_info["L"]["head"][0] + bone_info["R"]["head"][0]) * 0.5
+
+    blend_w = 0.025  # 2.5cm 대칭 블렌드 반경
+    for obj, odata in obj_data.items():
+        vg_l = odata["vg_l"]
+        vg_r = odata["vg_r"]
+        world = odata["world"]
+        rigid_mask = odata["rigid_mask"]
+        arrs_now = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
+        wl_all = arrs_now["l"]
+        wr_all = arrs_now["r"]
+        near_center = np.abs(world[:, 0] - center_x) < blend_w
+        active = (wl_all > 0.0001) | (wr_all > 0.0001)
+        target_mask = near_center & active & ~rigid_mask
+        for vi in np.nonzero(target_mask)[0].tolist():
+            x_dist = abs(world[vi, 0] - center_x)
+            t = x_dist / blend_w
+            k = 0.5 * (1.0 - (3.0 * t * t - 2.0 * t * t * t))
+            orig_l = wl_all[vi]
+            orig_r = wr_all[vi]
+            new_l = (1.0 - k) * orig_l + k * orig_r
+            new_r = (1.0 - k) * orig_r + k * orig_l
+            vg_l.add([vi], max(0.0, min(1.0, float(new_l))), 'REPLACE')
+            vg_r.add([vi], max(0.0, min(1.0, float(new_r))), 'REPLACE')
 
     for obj, odata in obj_data.items():
         total_recomputed_verts += int(np.count_nonzero(odata["rigid_mask"]))
