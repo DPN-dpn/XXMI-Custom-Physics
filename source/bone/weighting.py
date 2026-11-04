@@ -729,3 +729,4 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         applied_slots += 1
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"
+

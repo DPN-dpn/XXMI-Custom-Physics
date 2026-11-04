@@ -246,3 +246,4 @@ def _find_motion_insert_index(lines, sec_name_lower):
         elif kind in ('else', 'endif'):
             break
     return outer
+

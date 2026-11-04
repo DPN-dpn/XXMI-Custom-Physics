@@ -17,3 +17,4 @@ def set_rigid_data(item, data):
         return
     item.data_json = json.dumps(data)
     item.vert_count = sum(len(v) for v in data.values())
+

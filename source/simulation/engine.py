@@ -206,3 +206,4 @@ def stop_physics_preview(context):
 
     if hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
         context.scene.xxmi_custom_physics_props.is_preview_running = False
+

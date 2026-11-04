@@ -284,3 +284,4 @@ def _load_physics_from_mod(mod_folder, context, props):
     mesh_str = f" [복원 메쉬: {', '.join(restored_mesh_names)}]" if restored_mesh_names else ""
     summary = f"물리 설정 불러오기 완료{rig_str}{mesh_str} (강도: {props.strength:.2f}, 속도: {props.speed:.2f}, 탄성: {props.damping:.2f}, 관성: {props.inertia:.2f}, 숨쉬기: {props.idle_motion:.2f})"
     return True, summary
+

@@ -84,3 +84,4 @@ def get_rig_bone_info(rig):
         }
 
     return bone_info
+

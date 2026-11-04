@@ -109,3 +109,4 @@ def _export_physics_config_json(export_dir, props, context):
             json.dump(cfg, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"XXMI_Physics_Config.json 저장 실패: {e}")
+

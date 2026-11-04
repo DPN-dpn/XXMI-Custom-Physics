@@ -1,7 +1,7 @@
 import os
 import re
 import math
-from .common import (
+from .ini_parser import (
     _clean_injected_lines,
     _parse_ini_sections,
     _extract_res_name,

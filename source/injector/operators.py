@@ -9,16 +9,20 @@ from mathutils.kdtree import KDTree
 from ..utils import ensure_object_visible, read_vertex_group_arrays
 from ..simulation.operators import stop_physics_preview
 
-from .common import (
+from .ini_parser import (
     _clean_injected_lines,
     _find_position_buffers,
+    backup_ini_file,
+)
+from .buffer_io import (
     _read_buf_positions_np,
     _read_buf_positions,
     _find_best_transform_for_object,
     _export_physics_state_buf,
     _export_physics_config_json,
+)
+from .loader import (
     _load_physics_from_mod,
-    backup_ini_file,
 )
 
 from .zzz import (
