@@ -8,11 +8,13 @@ class XXMI_UL_bone_items(bpy.types.UIList):
             row = layout.row(align=True)
             row.label(text="", icon='BONE_DATA')
             row.prop(item, "name", text="", emboss=False)
-            type_label = "커스텀"
+            type_label = "모핑"
             if item.bone_type == 'BREAST_L':
-                type_label = "가슴좌"
+                type_label = "모핑.L"
             elif item.bone_type == 'BREAST_R':
-                type_label = "가슴우"
+                type_label = "모핑.R"
+            elif item.bone_type == 'CUSTOM':
+                type_label = "커스텀"
             sub = row.row()
             sub.alignment = 'RIGHT'
             sub.label(text=f"[{type_label} | {item.vert_count}개 | W:{item.peak_weight:.2f} | P:{item.strength:.2f}]")

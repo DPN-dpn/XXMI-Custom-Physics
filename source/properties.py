@@ -2,20 +2,21 @@ import bpy
 
 
 class XXMI_PG_bone_item(bpy.types.PropertyGroup):
-    """개별 물리 본(Breast.L, Breast.R 등)을 독립 슬롯으로 관리하며 고유한 가중치 및 파라미터를 보관합니다."""
+    """개별 물리/모핑 본을 독립 슬롯으로 관리하며 고유한 가중치 및 파라미터를 보관합니다."""
     name: bpy.props.StringProperty(
         name="본 이름",
-        default="새 물리 본",
-        description="물리 본의 식별 이름입니다 (예: Breast.L, Breast.R)"
+        default="새 모핑 본",
+        description="모핑 본의 식별 이름입니다 (예: Breast.L, Breast.R, Morph_1 등)"
     )
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
         items=[
-            ('BREAST_L', "좌측 가슴 본 (Breast.L)", "좌측 가슴 물리 본"),
-            ('BREAST_R', "우측 가슴 본 (Breast.R)", "우측 가슴 물리 본"),
-            ('CUSTOM', "커스텀 물리 본", "사용자 정의 물리 본"),
+            ('MORPH', "모핑 본 (Morph)", "일반 모핑 물리 본"),
+            ('BREAST_L', "좌측 모핑 본 (Breast.L)", "좌측 모핑 물리 본"),
+            ('BREAST_R', "우측 모핑 본 (Breast.R)", "우측 모핑 물리 본"),
+            ('CUSTOM', "커스텀 모핑 본", "사용자 정의 모핑 본"),
         ],
-        default='BREAST_L'
+        default='MORPH'
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(
@@ -109,6 +110,46 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     )
 
 
+def get_target_bone_enum_items(self, context):
+    items = [
+        ('AUTO', "자동 (최근접 모핑 본)", "3D 위치에 따라 가장 가까운 모핑 본을 자동으로 추종합니다"),
+    ]
+    seen_ids = {'AUTO'}
+
+    # 1. 씬의 bone_items에 등록된 모핑 본들 동적 추가
+    if context and hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
+        props = context.scene.xxmi_custom_physics_props
+        for it in props.bone_items:
+            if it.name and it.name not in seen_ids:
+                seen_ids.add(it.name)
+                items.append((it.name, f"{it.name} (모핑 본)", f"'{it.name}' 모핑 본에 100% 고정되어 따라 움직입니다"))
+
+    # 2. 씬 내 가상 물리 스켈레톤(XXMI_Breast_Rig)에 실제 존재하는 본들 추가
+    rig = None
+    if context and hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
+        rig = context.scene.xxmi_custom_physics_props.anchor_obj
+    if not rig:
+        rig = bpy.data.objects.get("XXMI_Breast_Rig")
+    if rig and rig.type == 'ARMATURE':
+        for b in rig.data.bones:
+            if b.name not in seen_ids:
+                seen_ids.add(b.name)
+                items.append((b.name, f"{b.name} (모핑 본)", f"스켈레톤 내 '{b.name}' 본에 100% 고정됩니다"))
+
+    # 3. 호환용 표준 모핑 본 ID
+    if 'BREAST_L' not in seen_ids:
+        seen_ids.add('BREAST_L')
+        items.append(('BREAST_L', "좌측 모핑 본 (Breast.L)", "좌측 모핑 본에 100% 고정됩니다"))
+    if 'BREAST_R' not in seen_ids:
+        seen_ids.add('BREAST_R')
+        items.append(('BREAST_R', "우측 모핑 본 (Breast.R)", "우측 모핑 본에 100% 고정됩니다"))
+
+    if 'CENTER' not in seen_ids:
+        items.append(('CENTER', "중앙 일체화 (모핑 본 중첩)", "양쪽 모핑 본의 움직임을 균일하게 공유하여 매듭/버클이 찢어지지 않습니다"))
+
+    return items
+
+
 class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
     """개별 강체 부품(단추, 무전기, 리본 등)을 독립 슬롯으로 관리하는 데이터 구조입니다."""
     name: bpy.props.StringProperty(
@@ -117,15 +158,9 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
         description="강체 부품의 식별 이름입니다"
     )
     target_bone: bpy.props.EnumProperty(
-        name="추종 본",
-        description="이 강체가 100% 일체형으로 따라갈 대상 본입니다",
-        items=[
-            ('AUTO', "자동 (최근접 본)", "3D 위치에 따라 가장 가까운 물리 본을 자동으로 추종합니다"),
-            ('BREAST_L', "좌측 본 (Breast.L)", "좌측 가슴 물리 본에 100% 고정됩니다"),
-            ('BREAST_R', "우측 본 (Breast.R)", "우측 가슴 물리 본에 100% 고정됩니다"),
-            ('CENTER', "중앙 일체화 (L+R)", "좌/우 양쪽 가슴의 움직임을 동시에 100% 공유하여 중앙 매듭 등이 찢어지지 않습니다"),
-        ],
-        default='AUTO'
+        name="목표 본",
+        description="이 강체가 100% 일체형으로 따라갈 대상 모핑 본입니다",
+        items=get_target_bone_enum_items
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(

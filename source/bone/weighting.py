@@ -734,16 +734,25 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         base_wr = min(1.0, base_wr * w_scale)
 
         t_bone = item.target_bone
-        if t_bone == 'BREAST_L':
+        custom_target_bone = None
+        custom_bone_w = 0.0
+
+        if t_bone in ('BREAST_L', 'Breast.L'):
             slot_wl = base_wl if base_wl > 0.01 else anat_wl
             slot_wr = 0.0
-        elif t_bone == 'BREAST_R':
+        elif t_bone in ('BREAST_R', 'Breast.R'):
             slot_wl = 0.0
             slot_wr = base_wr if base_wr > 0.01 else anat_wr
         elif t_bone == 'CENTER':
             center_w = max(base_wl, base_wr, anat_wl, anat_wr)
             slot_wl = center_w * 0.5
             slot_wr = center_w * 0.5
+        elif t_bone != 'AUTO' and (t_bone in bone_info or f"Breast.{t_bone}" in bone_info):
+            matched_b = t_bone if t_bone in bone_info else f"Breast.{t_bone}"
+            custom_target_bone = matched_b
+            custom_bone_w = min(1.0, max(0.02, eval_bone_weight_at_point(c_cent, matched_b, bone_info, props) * w_scale))
+            slot_wl = 0.0
+            slot_wr = 0.0
         else:
             if c_x > 0.012:
                 slot_wl = base_wl if base_wl > 0.01 else anat_wl
@@ -765,14 +774,22 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
 
             vg_rigid.add(vis, 1.0, 'REPLACE')
-            if slot_wl > 0.0001:
-                vg_l.add(vis, slot_wl, 'REPLACE')
+            if custom_target_bone:
+                vg_target_name = VG_BREAST_L if custom_target_bone.lower() in ('breast.l', 'l') else (
+                    VG_BREAST_R if custom_target_bone.lower() in ('breast.r', 'r') else f"XXMI_{custom_target_bone}"
+                )
+                vg_c = robj.vertex_groups.get(vg_target_name) or robj.vertex_groups.new(name=vg_target_name)
+                vg_c.add(vis, custom_bone_w, 'REPLACE')
             else:
-                vg_l.remove(vis)
+                if slot_wl > 0.0001:
+                    vg_l.add(vis, slot_wl, 'REPLACE')
+                else:
+                    vg_l.remove(vis)
 
-            if slot_wr > 0.0001:
-                vg_r.add(vis, slot_wr, 'REPLACE')
-            else:
+                if slot_wr > 0.0001:
+                    vg_r.add(vis, slot_wr, 'REPLACE')
+                else:
+                    vg_r.remove(vis)
                 vg_r.remove(vis)
 
         applied_slots += 1

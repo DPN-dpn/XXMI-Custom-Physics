@@ -14,7 +14,9 @@ class XXMI_UL_rigid_items(bpy.types.UIList):
             elif item.target_bone == 'BREAST_R':
                 bone_label = "Breast.R"
             elif item.target_bone == 'CENTER':
-                bone_label = "중앙(L+R)"
+                bone_label = "중앙일체화"
+            elif item.target_bone != 'AUTO':
+                bone_label = item.target_bone
             sub = row.row()
             sub.alignment = 'RIGHT'
             sub.label(text=f"[{bone_label} | {item.vert_count}개]")
@@ -39,4 +41,3 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
-
