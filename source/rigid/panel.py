@@ -68,21 +68,6 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
         col_q = box_quick.column(align=True)
         col_q.operator("object.xxmi_rebake_breast_weights", text="강체 가중치 즉시 갱신", icon='FILE_REFRESH')
 
-        # 3. 레거시 도구 (접이식)
-        box_leg = layout.box()
-        row_leg = box_leg.row()
-        row_leg.prop(
-            props, "ui_show_advanced_rigid",
-            icon="TRIA_DOWN" if getattr(props, "ui_show_advanced_rigid", False) else "TRIA_RIGHT",
-            text="레거시 강체 도구 (단일 그룹)",
-            emboss=False
-        )
-        if getattr(props, "ui_show_advanced_rigid", False):
-            col_l = box_leg.column(align=True)
-            col_l.operator("object.xxmi_mark_selection_rigid", text="선택 부위 강체로 등록", icon='PINNED')
-            col_l.operator("object.xxmi_select_rigid_vertices", text="강체 정점 다시 선택", icon='RESTRICT_SELECT_OFF')
-            col_l.operator("object.xxmi_unmark_selection_rigid", text="선택 부위 강체 해제", icon='X')
-
 
 classes = (
     XXMI_PHYS_PT_rigid,

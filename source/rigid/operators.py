@@ -1,13 +1,8 @@
 import bpy
 import bmesh
 import numpy as np
-from mathutils import Vector
-from mathutils.kdtree import KDTree
 from ..utils import (
     ensure_object_visible,
-    world_vertex_positions,
-    mesh_edge_arrays,
-    label_components,
     get_target_mesh_objects,
     ROLE_RIGID_VG,
 )
@@ -267,179 +262,12 @@ class XXMI_OT_rigid_item_select_verts(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
-    bl_idname = "object.xxmi_mark_selection_rigid"
-    bl_label = "선택 부위를 강체로 등록"
-    bl_description = "선택된 정점들을 강체(XXMI_Role_Rigid)로 등록하여 물리 동작 시 형태를 유지합니다"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        objs = get_target_mesh_objects(context)
-        return len(objs) > 0
-
-    def execute(self, context):
-        target_objs = get_target_mesh_objects(context)
-        was_edit = (context.mode == 'EDIT_MESH')
-        if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        total_marked = 0
-        for obj in target_objs:
-            mesh = obj.data
-            n_verts = len(mesh.vertices)
-            sel_mask = np.zeros(n_verts, dtype=bool)
-            mesh.vertices.foreach_get("select", sel_mask)
-            sel_indices = np.nonzero(sel_mask)[0]
-            if len(sel_indices) == 0:
-                continue
-
-            world = world_vertex_positions(obj)
-            e0, e1 = mesh_edge_arrays(mesh)
-            lab_all = label_components(n_verts, e0, e1)
-            uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
-
-            for lab_id, cnt in zip(uniq_labs, lab_counts):
-                if cnt <= 2500:
-                    isl_mask = (lab_all == lab_id)
-                    n_sel = np.count_nonzero(sel_mask & isl_mask)
-                    if n_sel > 0 and (n_sel >= 4 or (n_sel / cnt) >= 0.10):
-                        sel_mask[isl_mask] = True
-
-            kd_local = KDTree(n_verts)
-            for vi, wpos in enumerate(world):
-                kd_local.insert(Vector(wpos), vi)
-            kd_local.balance()
-
-            cur_sel = np.nonzero(sel_mask)[0].tolist()
-            for si in cur_sel:
-                hits = kd_local.find_range(Vector(world[si]), 0.0005)
-                for _, hi, _ in hits:
-                    sel_mask[hi] = True
-
-            final_sel = np.nonzero(sel_mask)[0].tolist()
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-            vg_rigid.add(final_sel, 1.0, 'REPLACE')
-            total_marked += len(final_sel)
-
-        if was_edit:
-            for obj in target_objs:
-                context.view_layer.objects.active = obj
-                bpy.ops.object.mode_set(mode='EDIT')
-
-        if total_marked == 0:
-            self.report({'ERROR'}, "강체로 등록할 정점들을 에디트 모드에서 선택해주세요.")
-            return {'CANCELLED'}
-
-        self.report({'INFO'}, f"총 {total_marked}개 정점을 강체로 등록 완료했습니다.")
-        return {'FINISHED'}
-
-
-class XXMI_OT_unmark_selection_rigid(bpy.types.Operator):
-    bl_idname = "object.xxmi_unmark_selection_rigid"
-    bl_label = "선택 부위 강체 해제"
-    bl_description = "선택된 정점을 강체 목록에서 제외합니다"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        objs = get_target_mesh_objects(context)
-        return any(o.vertex_groups.get(VG_RIGID) is not None for o in objs)
-
-    def execute(self, context):
-        target_objs = get_target_mesh_objects(context)
-        was_edit = (context.mode == 'EDIT_MESH')
-        if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        total_unmarked = 0
-        for obj in target_objs:
-            vg_rigid = obj.vertex_groups.get(VG_RIGID)
-            if not vg_rigid:
-                continue
-            sel = [v.index for v in obj.data.vertices if v.select]
-            if not sel:
-                continue
-            vg_rigid.remove(sel)
-            total_unmarked += len(sel)
-
-        if was_edit:
-            for obj in target_objs:
-                context.view_layer.objects.active = obj
-                bpy.ops.object.mode_set(mode='EDIT')
-
-        self.report({'INFO'}, f"총 {total_unmarked}개 정점의 강체 등록을 해제했습니다.")
-        return {'FINISHED'}
-
-
-class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
-    bl_idname = "object.xxmi_select_rigid_vertices"
-    bl_label = "강체 정점 다시 선택"
-    bl_description = "등록된 강체 정점들을 에디트 모드에서 다시 선택합니다"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return any(
-            o.type == 'MESH' and o.vertex_groups.get(VG_RIGID) is not None
-            for o in bpy.data.objects
-        )
-
-    def execute(self, context):
-        target_objs = [
-            o for o in bpy.data.objects
-            if o.type == 'MESH' and o.vertex_groups.get(VG_RIGID) is not None
-        ]
-
-        if not target_objs:
-            self.report({'WARNING'}, "등록된 강체 정점이 없습니다.")
-            return {'CANCELLED'}
-
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in target_objs:
-            ensure_object_visible(context, obj)
-            obj.select_set(True)
-
-        context.view_layer.objects.active = target_objs[0]
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_mode(type='VERT')
-        bpy.ops.mesh.select_all(action='DESELECT')
-
-        total_selected = 0
-        for obj in target_objs:
-            bm = bmesh.from_edit_mesh(obj.data)
-            bm.verts.ensure_lookup_table()
-            vg_rigid = obj.vertex_groups.get(VG_RIGID)
-            if not vg_rigid:
-                continue
-            g_idx = vg_rigid.index
-            dvert_lay = bm.verts.layers.deform.verify()
-
-            for v in bm.verts:
-                dvert = v[dvert_lay]
-                is_r = (g_idx in dvert and dvert[g_idx] > 0.5)
-                v.select_set(is_r)
-                if is_r:
-                    total_selected += 1
-
-            bmesh.update_edit_mesh(obj.data)
-
-        self.report({'INFO'}, f"총 {total_selected}개 강체 정점을 다시 선택했습니다.")
-        return {'FINISHED'}
-
-
 classes = (
     XXMI_OT_rigid_item_add,
     XXMI_OT_rigid_item_remove,
     XXMI_OT_rigid_item_assign,
     XXMI_OT_rigid_item_remove_verts,
     XXMI_OT_rigid_item_select_verts,
-    XXMI_OT_mark_selection_rigid,
-    XXMI_OT_unmark_selection_rigid,
-    XXMI_OT_select_rigid_vertices,
 )
 
 

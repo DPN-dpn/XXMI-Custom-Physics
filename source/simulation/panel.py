@@ -52,13 +52,13 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
         box_w = layout.box()
         w_col = box_w.column(align=True)
         if target_item:
-            w_col.label(text=f"'{target_item.name}' 가중치(웨이트) 설정:", icon='WWEIGHT_HLT')
+            w_col.label(text=f"'{target_item.name}' 가중치(웨이트) 설정:", icon='WPAINT_HLT')
             w_col.prop(target_item, "peak_weight")
             w_col.prop(target_item, "falloff_power")
             w_col.prop(target_item, "smooth_iterations")
             w_col.prop(target_item, "lock_registered_verts")
         else:
-            w_col.label(text="전역 가중치(웨이트) 설정:", icon='WWEIGHT_HLT')
+            w_col.label(text="전역 가중치(웨이트) 설정:", icon='WPAINT_HLT')
             w_col.prop(props, "peak_weight")
             w_col.prop(props, "falloff_power")
             w_col.prop(props, "smooth_iterations")

@@ -271,12 +271,6 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         default=False
     )
 
-    ui_show_advanced_rigid: bpy.props.BoolProperty(
-        name="레거시 강체 도구 펼치기",
-        description="단일 강체 그룹 관리 도구를 펼치거나 접습니다",
-        default=False
-    )
-
     show_advanced_breast_settings: bpy.props.BoolProperty(
         name="세부 설정 및 관리 도구",
         description="가중치 세부 조절 및 초기화 도구를 펼치거나 접습니다",
