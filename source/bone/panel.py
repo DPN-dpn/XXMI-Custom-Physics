@@ -23,47 +23,69 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
             layout,
             (
                 "[1단계: 물리 본 & 웨이트 설정 가이드]\n\n"
-                "• 원하는 본 종류(가슴 등)를 선택합니다.\n"
-                "• 에디트 모드에서 물리 본을 적용할 표면 정점을 선택하고 [1. 가슴 영역 선택 등록]을 누릅니다.\n"
-                "• [2. 가슴 물리 본 생성]을 누르면 해부학적 위치에 알맞은 물리 본이 자동 배치됩니다.\n"
-                "• 뷰포트에서 본의 위치/각도를 조정한 후 [3. 본 기준 가중치 자동 계산]을 누르면 가중치가 베이킹됩니다."
+                "• 가슴, 꼬리, 헤어 등 물리 본을 슬롯 목록으로 독립 관리할 수 있습니다.\n"
+                "• 각 본마다 최대 가중치, 감쇠, 스무딩 등 웨이트 값을 완전히 따로따로 설정할 수 있습니다.\n"
+                "• 에디트 모드에서 정점을 선택한 후 [선택 정점 할당] 또는 [1. 가슴 영역 선택 등록]을 누릅니다.\n"
+                "• [2. 가슴 물리 본 생성] 후 [3. 본 기준 가중치 자동 계산]을 누르면 각 본의 설정값대로 개별 베이킹됩니다."
             ),
         )
 
-        # 0. 본 종류 선택
-        box_type = layout.box()
-        box_type.use_property_split = True
-        box_type.use_property_decorate = False
-        box_type.prop(props, "bone_type", text="본 종류", icon='BONE_DATA')
+        # 1. 다중 물리 본 슬롯 목록 (UIList)
+        layout.label(text="물리 본 슬롯 목록:", icon='ARMATURE_DATA')
+        row = layout.row()
+        row.template_list(
+            "XXMI_UL_bone_items", "",
+            props, "bone_items",
+            props, "bone_item_index",
+            rows=3
+        )
+        col_btns = row.column(align=True)
+        col_btns.operator("object.xxmi_bone_item_add", text="", icon='ADD')
+        col_btns.operator("object.xxmi_bone_item_remove", text="", icon='REMOVE')
 
-        # 1. 메인 작업 흐름 (본 중심 3단계)
+        # 2. 선택된 본 슬롯 상세 설정
+        if 0 <= props.bone_item_index < len(props.bone_items):
+            item = props.bone_items[props.bone_item_index]
+            box_item = layout.box()
+            box_item.use_property_split = True
+            box_item.use_property_decorate = False
+
+            box_item.prop(item, "name", text="본 이름")
+            box_item.prop(item, "bone_type", text="본 종류")
+
+            row_acts = box_item.row(align=True)
+            row_acts.operator("object.xxmi_bone_item_assign", text="선택 정점 할당", icon='PLUS')
+            row_acts.operator("object.xxmi_bone_item_select_verts", text="확인", icon='RESTRICT_SELECT_OFF')
+            row_acts.operator("object.xxmi_bone_item_remove_verts", text="제외", icon='X')
+
+            # 개별 본 가중치 설정
+            col_w = box_item.column(align=True)
+            col_w.separator()
+            col_w.label(text=f"'{item.name}' 가중치(웨이트) 설정:", icon='MOD_VERTEX_WEIGHT')
+            col_w.prop(item, "peak_weight", text="최대 가중치(Peak)")
+            col_w.prop(item, "falloff_power", text="가중치 퍼짐(Falloff)")
+            col_w.prop(item, "smooth_iterations", text="스무딩 반복 수")
+            col_w.prop(item, "lock_registered_verts", text="등록 영역만 유지")
+
+            if len(props.bone_items) > 1:
+                box_item.separator()
+                box_item.operator("object.xxmi_copy_bone_weights_to_all", text="가중치 설정 다른 본에 복사", icon='COPYDOWN')
+        else:
+            layout.label(text="등록된 본이 없습니다. [1. 가슴 영역 선택 등록] 또는 [+]를 누르세요.", icon='INFO')
+
+        layout.separator()
+
+        # 3. 메인 작업 흐름 (본 중심 3단계)
+        layout.label(text="물리 본 작업 워크플로우:", icon='MOD_ARMATURE')
         col_main = layout.column(align=True)
         col_main.operator("object.xxmi_register_breast_selection", text="1. 가슴 영역 선택 등록", icon='MESH_DATA')
         col_main.operator("object.xxmi_generate_breast_rig", text="2. 가슴 물리 본 생성", icon='ARMATURE_DATA')
         col_main.operator("object.xxmi_rebake_breast_weights", text="3. 본 기준 가중치 자동 계산", icon='MOD_VERTEX_WEIGHT')
 
-        # 2. 고급 웨이트 세부 조정 (접이식)
-        box_adv = layout.box()
-        row_adv = box_adv.row()
-        row_adv.prop(
-            props, "ui_show_advanced_breast",
-            icon="TRIA_DOWN" if getattr(props, "ui_show_advanced_breast", False) else "TRIA_RIGHT",
-            text="고급 가중치 설정",
-            emboss=False
-        )
-        if getattr(props, "ui_show_advanced_breast", False):
-            col_adv = box_adv.column(align=True)
-            col_adv.use_property_split = True
-            col_adv.use_property_decorate = False
-            col_adv.prop(props, "falloff_power", text="가중치 감쇠(Falloff)")
-            col_adv.prop(props, "peak_weight", text="최대 가중치(Peak)")
-            col_adv.prop(props, "smooth_iterations", text="스무딩 반복 수")
-            col_adv.prop(props, "lock_registered_verts", text="등록 정점만 가중치 적용")
-
-        # 3. 보조 도구 (정점 다시 선택 및 전체 초기화)
+        # 4. 보조 도구 (전체 정점 다시 선택 및 전체 초기화)
         box_tools = layout.box()
         col_t = box_tools.column(align=True)
-        col_t.operator("object.xxmi_select_breast_vertices", text="가슴 정점 다시 선택", icon='RESTRICT_SELECT_OFF')
+        col_t.operator("object.xxmi_select_breast_vertices", text="가슴 정점 전체 다시 선택", icon='RESTRICT_SELECT_OFF')
         col_t.operator("object.xxmi_clear_breast_physics", text="가슴 물리 전체 초기화", icon='TRASH')
 
 

@@ -5,6 +5,7 @@ from ..utils import (
     PREVIEW_SK_NAME,
     PREVIEW_BASIS_TAG,
 )
+from ..bone.data import get_bone_params
 
 # 다중 오브젝트 프리뷰 런타임 캐시 (인게임 HLSL ODE 상태와 1:1 동기화)
 _PREVIEW_CACHE = {
@@ -43,14 +44,26 @@ def _step_preview_ode(t, props):
 
     state["prev_t"] = t
 
-    speed = max(0.2, float(props.speed))
-    damping = max(0.1, float(props.damping))
-    inertia = max(0.0, float(props.inertia))
-    idle_motion = max(0.0, float(props.idle_motion))
+    params_l = get_bone_params(props, "Breast.L")
+    params_r = get_bone_params(props, "Breast.R")
 
-    omega_0 = 12.0 * speed
-    stiff_k = omega_0 * omega_0
-    damp_c = 2.0 * omega_0 * (damping * 0.50)
+    speed_l = max(0.2, float(params_l["speed"]))
+    damping_l = max(0.1, float(params_l["damping"]))
+    inertia_l = max(0.0, float(params_l["inertia"]))
+    idle_l = max(0.0, float(params_l["idle_motion"]))
+
+    speed_r = max(0.2, float(params_r["speed"]))
+    damping_r = max(0.1, float(params_r["damping"]))
+    inertia_r = max(0.0, float(params_r["inertia"]))
+    idle_r = max(0.0, float(params_r["idle_motion"]))
+
+    omega_l = 12.0 * speed_l
+    stiff_l = omega_l * omega_l
+    damp_l = 2.0 * omega_l * (damping_l * 0.50)
+
+    omega_r = 12.0 * speed_r
+    stiff_r = omega_r * omega_r
+    damp_r = 2.0 * omega_r * (damping_r * 0.50)
 
     # 3.0초 주기의 인게임 표준 몸통 모션 시뮬레이션
     cycle = t % 3.0
@@ -65,25 +78,20 @@ def _step_preview_ode(t, props):
         raw_vel = Vector((0.0, 0.0, 0.0))
 
     anim_vel = raw_vel / (1.0 + raw_vel.length * 0.8)
-    ext_force = -anim_vel * (12.0 * inertia)
+    ext_force_l = -anim_vel * (12.0 * inertia_l)
+    ext_force_r = -Vector((-anim_vel.x * 0.9, anim_vel.y, anim_vel.z)) * (12.0 * inertia_r)
 
-    ext_force_l = ext_force.copy()
-    ext_force_r = Vector((-ext_force.x * 0.9, ext_force.y, ext_force.z))
-
-    if idle_motion > 0.001:
+    if idle_l > 0.001:
         breath_phase = t * 2.5
-        ext_force_l.z += math.sin(breath_phase) * 1.5 * idle_motion
-        ext_force_l.y += math.cos(breath_phase) * 1.1 * idle_motion
-        ext_force_l.x += math.sin(breath_phase * 0.5) * 0.6 * idle_motion
+        ext_force_l.z += math.sin(breath_phase) * 1.5 * idle_l
+        ext_force_l.y += math.cos(breath_phase) * 1.1 * idle_l
+        ext_force_l.x += math.sin(breath_phase * 0.5) * 0.6 * idle_l
 
-        ext_force_r.z += math.sin(breath_phase + 0.35) * 1.5 * idle_motion
-        ext_force_r.y += math.cos(breath_phase + 0.35) * 1.1 * idle_motion
-        ext_force_r.x += -math.sin(breath_phase * 0.5 + 0.35) * 0.6 * idle_motion
-
-    stiff_l = stiff_k * 1.04
-    stiff_r = stiff_k * 0.96
-    damp_l = damp_c * 0.98
-    damp_r = damp_c * 1.02
+    if idle_r > 0.001:
+        breath_phase = t * 2.5
+        ext_force_r.z += math.sin(breath_phase + 0.35) * 1.5 * idle_r
+        ext_force_r.y += math.cos(breath_phase + 0.35) * 1.1 * idle_r
+        ext_force_r.x += -math.sin(breath_phase * 0.5 + 0.35) * 0.6 * idle_r
 
     disp_l = state["disp_l"]
     disp_r = state["disp_r"]
@@ -132,10 +140,16 @@ def preview_frame_handler(scene):
     t = scene.frame_current / max(fps, 24.0)
 
     disp_l_local, disp_r_local = _step_preview_ode(t, props)
-    strength = max(0.0, float(props.strength))
+
+    params_l = get_bone_params(props, "Breast.L")
+    params_r = get_bone_params(props, "Breast.R")
+    strength_l = max(0.0, float(params_l["strength"]))
+    strength_r = max(0.0, float(params_r["strength"]))
+
     norm_factor = _PREVIEW_CACHE.get("norm_factor", 1.0)
-    scale_factor = norm_factor * strength
-    max_disp = 0.024 * max(0.1, strength)
+    scale_l = norm_factor * strength_l
+    scale_r = norm_factor * strength_r
+    max_disp = max(0.024 * max(0.1, strength_l), 0.024 * max(0.1, strength_r))
 
     for odata in objects_data:
         obj_name = odata["obj_name"]
@@ -164,13 +178,13 @@ def preview_frame_handler(scene):
 
         for i in active_indices:
             base_co = base_coords[i]
-            if scale_factor <= 0.0001:
-                sk.data[i].co = base_co
-                continue
             wl = w_l[i]
             wr = w_r[i]
+            if (wl * scale_l <= 0.0001) and (wr * scale_r <= 0.0001):
+                sk.data[i].co = base_co
+                continue
 
-            total_disp = (disp_l * wl + disp_r * wr) * scale_factor
+            total_disp = disp_l * (wl * scale_l) + disp_r * (wr * scale_r)
             d_len = total_disp.length
             if d_len > max_disp and d_len > 1e-5:
                 total_disp = (total_disp / d_len) * max_disp

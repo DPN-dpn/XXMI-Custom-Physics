@@ -20,6 +20,12 @@ from .weighting import (
     synchronize_coincident_vertices_across_objects,
     rebake_mesh_weights_from_rig,
 )
+from .data import (
+    get_bone_data,
+    set_bone_data,
+    get_bone_item,
+    ensure_default_breast_bone_items,
+)
 
 # 하위 호환용 별칭
 _rebake_mesh_weights_from_rig = rebake_mesh_weights_from_rig
@@ -52,6 +58,8 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
         total_l = 0
         total_r = 0
+        data_l = {}
+        data_r = {}
 
         for obj in target_objs:
             mesh = obj.data
@@ -107,11 +115,22 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             if left_idx:
                 vg_l.add(left_idx, 0.05, 'REPLACE')
                 total_l += len(left_idx)
+                data_l[obj.name] = left_idx
             if right_idx:
                 vg_r.add(right_idx, 0.05, 'REPLACE')
                 total_r += len(right_idx)
+                data_r[obj.name] = right_idx
 
         synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
+
+        props = context.scene.xxmi_custom_physics_props
+        ensure_default_breast_bone_items(props)
+        item_l = get_bone_item(props, "Breast.L")
+        item_r = get_bone_item(props, "Breast.R")
+        if item_l:
+            set_bone_data(item_l, data_l)
+        if item_r:
+            set_bone_data(item_r, data_r)
 
         total_sel = total_l + total_r
         if total_sel < 6:
@@ -416,6 +435,313 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class XXMI_OT_bone_item_add(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_add"
+    bl_label = "물리 본 슬롯 추가"
+    bl_description = "새로운 물리 본 슬롯을 추가합니다 (버텍스 선택 상태에서 누르면 즉시 할당)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.bone_items.add()
+
+        # 이름 및 종류 자동 설정
+        n_items = len(props.bone_items)
+        has_l = any(it.bone_type == 'BREAST_L' or it.name == 'Breast.L' for it in props.bone_items[:-1])
+        has_r = any(it.bone_type == 'BREAST_R' or it.name == 'Breast.R' for it in props.bone_items[:-1])
+
+        if not has_l:
+            item.name = "Breast.L"
+            item.bone_type = 'BREAST_L'
+        elif not has_r:
+            item.name = "Breast.R"
+            item.bone_type = 'BREAST_R'
+        else:
+            item.name = f"Bone_{n_items}"
+            item.bone_type = 'CUSTOM'
+
+        item.peak_weight = getattr(props, "peak_weight", 0.40)
+        item.falloff_power = getattr(props, "falloff_power", 1.0)
+        item.smooth_iterations = getattr(props, "smooth_iterations", 2)
+        item.lock_registered_verts = getattr(props, "lock_registered_verts", True)
+        item.strength = getattr(props, "strength", 1.0)
+        item.speed = getattr(props, "speed", 1.1)
+        item.damping = getattr(props, "damping", 0.85)
+        item.inertia = getattr(props, "inertia", 1.2)
+        item.idle_motion = getattr(props, "idle_motion", 0.4)
+
+        props.bone_item_index = n_items - 1
+
+        # 현재 에디트 모드에서 선택된 정점이 있다면 즉시 할당
+        was_edit = (context.mode == 'EDIT_MESH')
+        target_objs = get_target_mesh_objects(context)
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        data = {}
+        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+        if target_objs:
+            for obj in target_objs:
+                mesh = obj.data
+                n_verts = len(mesh.vertices)
+                if n_verts == 0:
+                    continue
+                sel_mask = np.zeros(n_verts, dtype=bool)
+                mesh.vertices.foreach_get("select", sel_mask)
+                sel_indices = np.nonzero(sel_mask)[0].tolist()
+                if sel_indices:
+                    data[obj.name] = sel_indices
+                    vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
+                    vg.add(sel_indices, 0.05, 'REPLACE')
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if data:
+            set_bone_data(item, data)
+            self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}' 생성 및 정점 {item.vert_count}개 할당 완료!")
+        else:
+            self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}'이 추가되었습니다.")
+
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_remove(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_remove"
+    bl_label = "물리 본 슬롯 삭제"
+    bl_description = "선택된 물리 본 슬롯을 목록에서 삭제합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.bone_item_index < len(props.bone_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        idx = props.bone_item_index
+        item = props.bone_items[idx]
+        name = item.name
+
+        props.bone_items.remove(idx)
+        props.bone_item_index = max(0, min(idx, len(props.bone_items) - 1))
+        self.report({'INFO'}, f"물리 본 슬롯 '{name}'을 삭제했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_assign(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_assign"
+    bl_label = "선택 정점 이 본에 할당"
+    bl_description = "에디트 모드에서 현재 선택된 정점들을 이 물리 본 슬롯에 할당합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.bone_item_index < len(props.bone_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.bone_items[props.bone_item_index]
+        data = get_bone_data(item)
+
+        target_objs = get_target_mesh_objects(context)
+        if not target_objs:
+            self.report({'ERROR'}, "선택된 메쉬 오브젝트가 없습니다.")
+            return {'CANCELLED'}
+
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        assigned_any = False
+        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+
+        for obj in target_objs:
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = np.nonzero(sel_mask)[0].tolist()
+            if not sel_indices:
+                continue
+
+            existing = set(data.get(obj.name, []))
+            existing.update(sel_indices)
+            data[obj.name] = sorted(list(existing))
+            assigned_any = True
+
+            vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
+            vg.add(sel_indices, 0.05, 'REPLACE')
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if not assigned_any:
+            self.report({'WARNING'}, "에디트 모드에서 본에 할당할 정점을 먼저 선택해주세요.")
+            return {'CANCELLED'}
+
+        set_bone_data(item, data)
+        self.report({'INFO'}, f"본 '{item.name}'에 정점 할당 완료 (총 {item.vert_count}개).")
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_select_verts(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_select_verts"
+    bl_label = "정점 확인"
+    bl_description = "이 본에 할당된 정점들을 에디트 모드에서 선택하여 확인합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.bone_item_index < len(props.bone_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.bone_items[props.bone_item_index]
+        data = get_bone_data(item)
+
+        if not data:
+            self.report({'WARNING'}, f"본 '{item.name}'에 등록된 정점이 없습니다.")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        bpy.ops.object.select_all(action='DESELECT')
+        first_obj = None
+
+        for obj_name, v_indices in data.items():
+            obj = bpy.data.objects.get(obj_name)
+            if obj and obj.type == 'MESH':
+                ensure_object_visible(context, obj)
+                obj.select_set(True)
+                if not first_obj:
+                    first_obj = obj
+
+        if not first_obj:
+            self.report({'ERROR'}, "해당 정점을 포함하는 메쉬 오브젝트를 찾을 수 없습니다.")
+            return {'CANCELLED'}
+
+        context.view_layer.objects.active = first_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='VERT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+
+        total_selected = 0
+        for obj_name, v_indices in data.items():
+            obj = bpy.data.objects.get(obj_name)
+            if obj and obj.type == 'MESH':
+                bm = bmesh.from_edit_mesh(obj.data)
+                bm.verts.ensure_lookup_table()
+                v_set = set(v_indices)
+                for vi in v_set:
+                    if vi < len(bm.verts):
+                        bm.verts[vi].select_set(True)
+                        total_selected += 1
+                bmesh.update_edit_mesh(obj.data)
+
+        self.report({'INFO'}, f"본 '{item.name}'의 정점 {total_selected}개를 선택했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_remove_verts(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_remove_verts"
+    bl_label = "선택 정점 제외"
+    bl_description = "현재 선택된 정점들을 이 물리 본 슬롯에서 제외합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.bone_item_index < len(props.bone_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.bone_items[props.bone_item_index]
+        data = get_bone_data(item)
+
+        target_objs = get_target_mesh_objects(context)
+        if not target_objs:
+            self.report({'ERROR'}, "선택된 메쉬 오브젝트가 없습니다.")
+            return {'CANCELLED'}
+
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        removed_any = False
+        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+
+        for obj in target_objs:
+            if obj.name not in data:
+                continue
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = set(np.nonzero(sel_mask)[0].tolist())
+            if not sel_indices:
+                continue
+
+            existing = set(data[obj.name])
+            before_len = len(existing)
+            existing.difference_update(sel_indices)
+            if len(existing) < before_len:
+                data[obj.name] = sorted(list(existing))
+                removed_any = True
+                vg = obj.vertex_groups.get(vg_target_name)
+                if vg:
+                    vg.remove(list(sel_indices))
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if not removed_any:
+            self.report({'WARNING'}, "제외할 정점이 선택되지 않았습니다.")
+            return {'CANCELLED'}
+
+        data = {k: v for k, v in data.items() if v}
+        set_bone_data(item, data)
+        self.report({'INFO'}, f"본 '{item.name}'에서 정점 제외 완료 (남은 정점 {item.vert_count}개).")
+        return {'FINISHED'}
+
+
+class XXMI_OT_copy_bone_weights_to_all(bpy.types.Operator):
+    bl_idname = "object.xxmi_copy_bone_weights_to_all"
+    bl_label = "가중치 설정 다른 본에 복사"
+    bl_description = "현재 선택된 본의 가중치 설정(최대 가중치, 감쇠, 스무딩 등)을 모든 본에 동일하게 복사합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return len(props.bone_items) > 1 and (0 <= props.bone_item_index < len(props.bone_items))
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        curr = props.bone_items[props.bone_item_index]
+
+        count = 0
+        for i, item in enumerate(props.bone_items):
+            if i != props.bone_item_index:
+                item.peak_weight = curr.peak_weight
+                item.falloff_power = curr.falloff_power
+                item.smooth_iterations = curr.smooth_iterations
+                item.lock_registered_verts = curr.lock_registered_verts
+                count += 1
+
+        self.report({'INFO'}, f"본 '{curr.name}'의 가중치 설정을 {count}개 본에 복사했습니다.")
+        return {'FINISHED'}
+
+
 class XXMI_OT_clear_breast_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_clear_breast_physics"
     bl_label = "가슴 물리 설정 전체 초기화"
@@ -461,6 +787,12 @@ classes = (
     XXMI_OT_register_breast_selection,
     XXMI_OT_generate_breast_rig,
     XXMI_OT_rebake_breast_weights,
+    XXMI_OT_bone_item_add,
+    XXMI_OT_bone_item_remove,
+    XXMI_OT_bone_item_assign,
+    XXMI_OT_bone_item_select_verts,
+    XXMI_OT_bone_item_remove_verts,
+    XXMI_OT_copy_bone_weights_to_all,
     XXMI_OT_select_breast_vertices,
     XXMI_OT_clear_breast_physics,
 )

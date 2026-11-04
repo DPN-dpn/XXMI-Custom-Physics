@@ -8,17 +8,30 @@ from .ini_parser import (
     _find_motion_insert_index,
     backup_ini_file,
 )
+from ..bone.data import get_bone_params
 
 
 def export_physics_motion_hlsl_zzz(export_dir, idx, root_vert_idx, props):
-    speed = max(0.2, float(getattr(props, "speed", 1.1)))
-    damping = max(0.1, float(getattr(props, "damping", 0.85)))
-    inertia = max(0.0, float(getattr(props, "inertia", 1.2)))
-    idle_motion = max(0.0, float(getattr(props, "idle_motion", 0.4)))
+    params_l = get_bone_params(props, "Breast.L")
+    params_r = get_bone_params(props, "Breast.R")
 
-    omega_0 = 12.0 * speed
-    stiff_k = omega_0 * omega_0
-    damp_c = 2.0 * omega_0 * (damping * 0.55)
+    speed_l = max(0.2, float(params_l["speed"]))
+    damping_l = max(0.1, float(params_l["damping"]))
+    inertia_l = max(0.0, float(params_l["inertia"]))
+    idle_l = max(0.0, float(params_l["idle_motion"]))
+
+    speed_r = max(0.2, float(params_r["speed"]))
+    damping_r = max(0.1, float(params_r["damping"]))
+    inertia_r = max(0.0, float(params_r["inertia"]))
+    idle_r = max(0.0, float(params_r["idle_motion"]))
+
+    omega_l = 12.0 * speed_l
+    stiff_k_l = omega_l * omega_l
+    damp_c_l = 2.0 * omega_l * (damping_l * 0.55)
+
+    omega_r = 12.0 * speed_r
+    stiff_k_r = omega_r * omega_r
+    damp_c_r = 2.0 * omega_r * (damping_r * 0.55)
 
     hlsl_code = f"""// ============================================================================
 // XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics)
@@ -36,10 +49,15 @@ RWStructuredBuffer<float4> PhysState : register(u6);
 
 static const uint ROOT_VERTEX_IDX = {root_vert_idx};
 
-static const float STIFF_K = {stiff_k:.4f};
-static const float DAMP_C = {damp_c:.4f};
-static const float INERTIA_SCALE = {inertia:.4f};
-static const float IDLE_SCALE = {idle_motion:.4f};
+static const float STIFF_K_L = {stiff_k_l:.4f};
+static const float DAMP_C_L = {damp_c_l:.4f};
+static const float INERTIA_SCALE_L = {inertia_l:.4f};
+static const float IDLE_SCALE_L = {idle_l:.4f};
+
+static const float STIFF_K_R = {stiff_k_r:.4f};
+static const float DAMP_C_R = {damp_c_r:.4f};
+static const float INERTIA_SCALE_R = {inertia_r:.4f};
+static const float IDLE_SCALE_R = {idle_r:.4f};
 
 [numthreads(1, 1, 1)]
 void main() {{
@@ -63,8 +81,8 @@ void main() {{
 
     if (length(curr_root) < 1e-4) {{
         float breath_t = time * 2.5;
-        float3 fb_l = float3(sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE;
-        float3 fb_r = float3(-sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE;
+        float3 fb_l = float3(sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_L;
+        float3 fb_r = float3(-sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_R;
         PhysState[0] = float4(fb_l, 0.5);
         PhysState[1] = float4(fb_r, 0.5);
         return;
@@ -95,23 +113,26 @@ void main() {{
 
         float3 raw_vel = delta / dt;
         float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
-        float3 ext_force = -anim_vel * (12.0 * INERTIA_SCALE);
 
-        if (IDLE_SCALE > 0.001) {{
+        float3 ext_force_l = -anim_vel * (12.0 * INERTIA_SCALE_L);
+        float3 ext_force_r = -float3(-anim_vel.x * 0.9, anim_vel.y, anim_vel.z) * (12.0 * INERTIA_SCALE_R);
+
+        if (IDLE_SCALE_L > 0.001) {{
             float breath_t = time * 2.5;
-            float3 idle_f = float3(sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE;
-            ext_force += idle_f;
+            float3 idle_f_l = float3(sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_L;
+            ext_force_l += idle_f_l;
         }}
-
-        // Pre-overhaul L/R symmetric opposite X-axis force
-        float3 ext_force_l = ext_force;
-        float3 ext_force_r = float3(-ext_force.x * 0.9, ext_force.y, ext_force.z);
+        if (IDLE_SCALE_R > 0.001) {{
+            float breath_t = time * 2.5 + 0.35;
+            float3 idle_f_r = float3(-sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_R;
+            ext_force_r += idle_f_r;
+        }}
 
         float sub_dt = dt * 0.25;
         [unroll]
         for (int step = 0; step < 4; step++) {{
-            float3 accel_l = ext_force_l - STIFF_K * prev_disp_l - DAMP_C * spring_vel_l;
-            float3 accel_r = ext_force_r - STIFF_K * prev_disp_r - DAMP_C * spring_vel_r;
+            float3 accel_l = ext_force_l - STIFF_K_L * prev_disp_l - DAMP_C_L * spring_vel_l;
+            float3 accel_r = ext_force_r - STIFF_K_R * prev_disp_r - DAMP_C_R * spring_vel_r;
 
             spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -2.5, 2.5);
             spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -2.5, 2.5);
@@ -139,8 +160,20 @@ void main() {{
 
 
 def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_weight=1.0):
-    strength = max(0.0, float(getattr(props, "strength", 1.0)))
-    norm_factor = (1.0 / peak_weight) if peak_weight > 0.05 else 1.0
+    params_l = get_bone_params(props, "Breast.L")
+    params_r = get_bone_params(props, "Breast.R")
+
+    strength_l = max(0.0, float(params_l["strength"]))
+    strength_r = max(0.0, float(params_r["strength"]))
+
+    peak_w_l = float(params_l["peak_weight"])
+    peak_w_r = float(params_r["peak_weight"])
+    norm_l = (1.0 / peak_w_l) if peak_w_l > 0.05 else 1.0
+    norm_r = (1.0 / peak_w_r) if peak_w_r > 0.05 else 1.0
+
+    scale_l = norm_l * strength_l
+    scale_r = norm_r * strength_r
+    max_disp = 0.030 * max(0.1, max(strength_l, strength_r))
 
     hlsl_code = f"""// ============================================================================
 // XXMI Custom Physics - Breast Skinning Compute Shader (Displacement Pass)
@@ -157,8 +190,9 @@ StructuredBuffer<float4> PhysState : register(t54);
 RWStructuredBuffer<Vertex> Output : register(u5);
 
 static const uint VERTEX_COUNT = {vertex_count};
-static const float NORM_FACTOR = {norm_factor:.4f};
-static const float STRENGTH_SCALE = {strength:.4f};
+static const float SCALE_L = {scale_l:.4f};
+static const float SCALE_R = {scale_r:.4f};
+static const float MAX_DISP = {max_disp:.4f};
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -171,16 +205,15 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     float wr = bw.y;
     float total_w = wl + wr;
 
-    if (total_w > 0.0001 && STRENGTH_SCALE > 0.0001) {{
+    if (total_w > 0.0001 && (SCALE_L > 0.0001 || SCALE_R > 0.0001)) {{
         float3 disp_l = PhysState[0].xyz;
         float3 disp_r = PhysState[1].xyz;
 
-        float3 total_disp = (disp_l * wl + disp_r * wr) * (NORM_FACTOR * STRENGTH_SCALE);
+        float3 total_disp = disp_l * (wl * SCALE_L) + disp_r * (wr * SCALE_R);
 
-        float max_disp = 0.030 * max(0.1, STRENGTH_SCALE);
         float d_len = length(total_disp);
-        if (d_len > max_disp && d_len > 1e-5) {{
-            total_disp = (total_disp / d_len) * max_disp;
+        if (d_len > MAX_DISP && d_len > 1e-5) {{
+            total_disp = (total_disp / d_len) * MAX_DISP;
         }}
 
         v.position += total_disp;

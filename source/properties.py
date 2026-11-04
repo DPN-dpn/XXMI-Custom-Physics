@@ -1,6 +1,114 @@
 import bpy
 
 
+class XXMI_PG_bone_item(bpy.types.PropertyGroup):
+    """개별 물리 본(Breast.L, Breast.R 등)을 독립 슬롯으로 관리하며 고유한 가중치 및 파라미터를 보관합니다."""
+    name: bpy.props.StringProperty(
+        name="본 이름",
+        default="새 물리 본",
+        description="물리 본의 식별 이름입니다 (예: Breast.L, Breast.R)"
+    )
+    bone_type: bpy.props.EnumProperty(
+        name="본 종류",
+        items=[
+            ('BREAST_L', "좌측 가슴 본 (Breast.L)", "좌측 가슴 물리 본"),
+            ('BREAST_R', "우측 가슴 본 (Breast.R)", "우측 가슴 물리 본"),
+            ('CUSTOM', "커스텀 물리 본", "사용자 정의 물리 본"),
+        ],
+        default='BREAST_L'
+    )
+    # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
+    data_json: bpy.props.StringProperty(
+        name="정점 데이터",
+        default="{}",
+        description="오브젝트별 등록된 정점 인덱스 목록(JSON)"
+    )
+    vert_count: bpy.props.IntProperty(
+        name="정점 수",
+        default=0,
+        description="이 본 슬롯에 등록된 총 정점 개수입니다"
+    )
+
+    # ── 개별 본 가중치(웨이트) 설정 ──
+    peak_weight: bpy.props.FloatProperty(
+        name="최대 가중치 (끝단 강도)",
+        description="이 본의 꼭짓점 최대 가중치입니다 (기본값: 0.40)",
+        default=0.40,
+        min=0.01,
+        max=1.0,
+        step=5,
+        precision=2
+    )
+    falloff_power: bpy.props.FloatProperty(
+        name="가중치 퍼짐 (Falloff)",
+        description="가중치가 퍼지는 감쇠 곡선 지수입니다 (기본값: 1.0)",
+        default=1.0,
+        min=0.1,
+        max=4.0,
+        step=10,
+        precision=2
+    )
+    smooth_iterations: bpy.props.IntProperty(
+        name="경계 부드러움 (스무딩)",
+        description="메쉬 표면을 따라 가중치를 부드럽게 블렌딩하는 횟수입니다 (기본값: 2)",
+        default=2,
+        min=0,
+        max=8
+    )
+    lock_registered_verts: bpy.props.BoolProperty(
+        name="등록된 영역만 유지",
+        description="가중치를 다시 계산할 때 등록된 정점 영역만 유지합니다",
+        default=True
+    )
+
+    # ── 개별 본 물리 거동 파라미터 ──
+    strength: bpy.props.FloatProperty(
+        name="흔들림 크기",
+        description="이 본의 흔들리는 전체적인 움직임 폭 배율입니다 (기본값: 1.0)",
+        default=1.0,
+        min=0.0,
+        max=3.0,
+        step=5,
+        precision=2
+    )
+    speed: bpy.props.FloatProperty(
+        name="탄력 속도",
+        description="흔들릴 때 튕겨오르는 속도감입니다 (기본값: 1.1)",
+        default=1.1,
+        min=0.2,
+        max=3.0,
+        step=5,
+        precision=2
+    )
+    damping: bpy.props.FloatProperty(
+        name="출렁임 멈춤 (감쇠)",
+        description="흔들린 뒤 제자리로 멈추는 빠르기입니다 (기본값: 0.85)",
+        default=0.85,
+        min=0.1,
+        max=2.5,
+        step=5,
+        precision=2
+    )
+    inertia: bpy.props.FloatProperty(
+        name="이동 관성 반응",
+        description="캐릭터 이동 시 관성에 반응하는 정도입니다 (기본값: 1.2)",
+        default=1.2,
+        min=0.0,
+        max=3.0,
+        step=5,
+        precision=2
+    )
+    idle_motion: bpy.props.FloatProperty(
+        name="숨쉬기 미동",
+        description="정지 상태에서 숨 쉬듯 미세하게 움직이는 정도입니다 (기본값: 0.4)",
+        default=0.4,
+        min=0.0,
+        max=2.0,
+        step=5,
+        precision=2
+    )
+
+
 class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
     """개별 강체 부품(단추, 무전기, 리본 등)을 독립 슬롯으로 관리하는 데이터 구조입니다."""
     name: bpy.props.StringProperty(
@@ -56,6 +164,16 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
             ('BREAST', "가슴 모핑 본 (Breast Pair)", "좌/우 대칭 한 쌍의 가슴 물리 본을 생성합니다"),
         ],
         default='BREAST'
+    )
+
+    # ── 다중 물리 본 목록 ──
+    bone_items: bpy.props.CollectionProperty(
+        type=XXMI_PG_bone_item,
+        name="물리 본 목록"
+    )
+    bone_item_index: bpy.props.IntProperty(
+        name="활성 본 인덱스",
+        default=0
     )
 
     # ── 다중 강체 목록 ──
@@ -215,6 +333,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
 
 classes = (
+    XXMI_PG_bone_item,
     XXMI_PG_rigid_item,
     XXMI_PG_custom_physics_props,
 )

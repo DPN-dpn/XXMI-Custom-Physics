@@ -19,6 +19,7 @@ from .rig import (
     get_rig_bone_info,
 )
 from ..rigid.data import get_rigid_data
+from .data import get_bone_params
 
 VG_RIGID = ROLE_RIGID_VG
 
@@ -504,7 +505,10 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
     falloff_p = props.falloff_power
     peak_w = getattr(props, "peak_weight", 0.40)
-    smooth_iters = getattr(props, "smooth_iterations", 2)
+    smooth_iters = max(
+        get_bone_params(props, "Breast.L")["smooth_iterations"],
+        get_bone_params(props, "Breast.R")["smooth_iterations"]
+    )
     lock_registered = getattr(props, "lock_registered_verts", True)
     updated_obj_count = 0
     total_recomputed_verts = 0
@@ -555,6 +559,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         if side not in bone_info:
             continue
 
+        b_params = get_bone_params(props, f"Breast.{side}")
+        side_falloff_p = b_params["falloff_power"]
+        side_peak_w = b_params["peak_weight"]
+        side_lock_registered = b_params["lock_registered_verts"]
+
         cent = np.array(bone_info[side]["centroid"], dtype=np.float64)
         head = np.array(bone_info[side]["head"], dtype=np.float64)
         fwd_u = np.array(bone_info[side]["fwd_unit"], dtype=np.float64)
@@ -572,7 +581,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
             prev_weighted = (arrs[prev_vg_key] > 0.0001)
 
-            if lock_registered:
+            if side_lock_registered:
                 cand_mask = prev_weighted & ~rigid_mask
             else:
                 dist = np.linalg.norm(world - cent, axis=1)
@@ -596,13 +605,13 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         cand_pts = np.array([c[3] for c in side_cand], dtype=np.float64)
         tail = np.array(bone_info[side]["tail"], dtype=np.float64)
         baked_w = calculate_anatomical_weights_with_anti_clipping(
-            cand_pts, head, tail, eff_radius, falloff_p, peak_w
+            cand_pts, head, tail, eff_radius, side_falloff_p, side_peak_w
         )
 
         final_weights = baked_w.copy()
 
         for (obj, vg, vi, _), wi in zip(side_cand, final_weights.tolist()):
-            if lock_registered:
+            if side_lock_registered:
                 vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                 total_recomputed_verts += 1
             else:
@@ -612,7 +621,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                     vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                     total_recomputed_verts += 1
 
-        if not lock_registered:
+        if not side_lock_registered:
             for vg, z_list in zero_entries:
                 vg.remove(z_list)
 

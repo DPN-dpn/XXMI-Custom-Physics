@@ -42,6 +42,23 @@ def _load_physics_from_mod(mod_folder, context, props):
             props.debug_mode = bool(cfg.get("debug_mode", props.debug_mode))
             props.debug_toggle_key = str(cfg.get("debug_toggle_key", props.debug_toggle_key))
             bones_data = cfg.get("bones", {})
+            bone_items_data = cfg.get("bone_items", [])
+            if bone_items_data and hasattr(props, "bone_items"):
+                props.bone_items.clear()
+                for bd in bone_items_data:
+                    it = props.bone_items.add()
+                    it.name = str(bd.get("name", "물리 본"))
+                    it.bone_type = str(bd.get("bone_type", "BREAST_L"))
+                    it.peak_weight = float(bd.get("peak_weight", getattr(props, "peak_weight", 0.40)))
+                    it.falloff_power = float(bd.get("falloff_power", getattr(props, "falloff_power", 1.0)))
+                    it.smooth_iterations = int(bd.get("smooth_iterations", 2))
+                    it.lock_registered_verts = bool(bd.get("lock_registered_verts", True))
+                    it.strength = float(bd.get("strength", getattr(props, "strength", 1.0)))
+                    it.speed = float(bd.get("speed", getattr(props, "speed", 1.1)))
+                    it.damping = float(bd.get("damping", getattr(props, "damping", 0.85)))
+                    it.inertia = float(bd.get("inertia", getattr(props, "inertia", 1.2)))
+                    it.idle_motion = float(bd.get("idle_motion", getattr(props, "idle_motion", 0.4)))
+                    it.vert_count = int(bd.get("vert_count", 0))
             loaded_source = "XXMI_Physics_Config.json"
         except Exception as e:
             loaded_source = f"JSON 읽기 오류 ({e})"

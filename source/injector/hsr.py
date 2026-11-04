@@ -7,6 +7,7 @@ from .ini_parser import (
     _extract_res_name,
     backup_ini_file,
 )
+from ..bone.data import get_bone_params
 
 
 def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx, props):
@@ -15,25 +16,36 @@ def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx, props):
 
 
 def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_weight=1.0, root_vert_idx=0):
-    """
-    [4B단계: 실시간 뼈대 애니메이션 관성(Inertia) & 탄성 스프링 ODE 통합 셰이더]
-    - 단일 패스 Compute Shader:
-      1) 스레드 0: LiveMesh[ROOT_VERTEX_IDX]의 이동 델타(curr_root - prev_root)를 감지하여
-         실제 뼈대 애니메이션 가속도에 반발하는 물리 관성력(Inertia force)과 탄성 스프링 ODE(4단계 서브스텝)를 계산,
-         PhysState 버퍼에 기록.
-      2) 전체 스레드: 가슴 정점에 계산된 물리 변위를 가중치 비율로 정밀 가산.
-    - normalize(0) 배제로 NaN 방지, cs-t120 보존으로 타 모드 간섭 제로.
-    """
-    speed = max(0.2, float(getattr(props, "speed", 1.1)))
-    damping = max(0.1, float(getattr(props, "damping", 0.85)))
-    inertia = max(0.0, float(getattr(props, "inertia", 1.2)))
-    idle_motion = max(0.0, float(getattr(props, "idle_motion", 0.6)))
-    strength = max(0.0, float(getattr(props, "strength", 1.0)))
-    norm_factor = (1.0 / peak_weight) if peak_weight > 0.05 else 1.0
+    params_l = get_bone_params(props, "Breast.L")
+    params_r = get_bone_params(props, "Breast.R")
 
-    omega_0 = 12.0 * speed
-    stiff_k = omega_0 * omega_0
-    damp_c = 2.0 * omega_0 * (damping * 0.55)
+    speed_l = max(0.2, float(params_l["speed"]))
+    damping_l = max(0.1, float(params_l["damping"]))
+    inertia_l = max(0.0, float(params_l["inertia"]))
+    idle_l = max(0.0, float(params_l["idle_motion"]))
+    strength_l = max(0.0, float(params_l["strength"]))
+
+    speed_r = max(0.2, float(params_r["speed"]))
+    damping_r = max(0.1, float(params_r["damping"]))
+    inertia_r = max(0.0, float(params_r["inertia"]))
+    idle_r = max(0.0, float(params_r["idle_motion"]))
+    strength_r = max(0.0, float(params_r["strength"]))
+
+    peak_w_l = float(params_l["peak_weight"])
+    peak_w_r = float(params_r["peak_weight"])
+    norm_l = (1.0 / peak_w_l) if peak_w_l > 0.05 else 1.0
+    norm_r = (1.0 / peak_w_r) if peak_w_r > 0.05 else 1.0
+
+    scale_l = norm_l * strength_l
+    scale_r = norm_r * strength_r
+
+    omega_l = 12.0 * speed_l
+    stiff_k_l = omega_l * omega_l
+    damp_c_l = 2.0 * omega_l * (damping_l * 0.55)
+
+    omega_r = 12.0 * speed_r
+    stiff_k_r = omega_r * omega_r
+    damp_c_r = 2.0 * omega_r * (damping_r * 0.55)
 
     root_idx = root_vert_idx if (root_vert_idx is not None and root_vert_idx > 0) else (getattr(props, "root_vert_idx", 0) or 0)
 
@@ -55,13 +67,22 @@ RWStructuredBuffer<float4> PhysState : register(u6);
 
 static const uint VERTEX_COUNT = {vertex_count};
 static const uint ROOT_VERTEX_IDX = {root_idx};
-static const float SPEED = {speed:.4f};
-static const float INERTIA_SCALE = {inertia:.4f};
-static const float IDLE_SCALE = {idle_motion:.4f};
-static const float STIFF_K = {stiff_k:.4f};
-static const float DAMP_C = {damp_c:.4f};
-static const float NORM_FACTOR = {norm_factor:.4f};
-static const float STRENGTH_SCALE = {strength:.4f};
+
+static const float STIFF_K_L = {stiff_k_l:.4f};
+static const float DAMP_C_L = {damp_c_l:.4f};
+static const float INERTIA_SCALE_L = {inertia_l:.4f};
+static const float IDLE_SCALE_L = {idle_l:.4f};
+static const float SPEED_L = {speed_l:.4f};
+
+static const float STIFF_K_R = {stiff_k_r:.4f};
+static const float DAMP_C_R = {damp_c_r:.4f};
+static const float INERTIA_SCALE_R = {inertia_r:.4f};
+static const float IDLE_SCALE_R = {idle_r:.4f};
+static const float SPEED_R = {speed_r:.4f};
+
+static const float SCALE_L = {scale_l:.4f};
+static const float SCALE_R = {scale_r:.4f};
+static const float MAX_DISP = {0.045 * max(0.1, max(strength_l, strength_r)):.4f};
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -120,21 +141,25 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                 // 실제 뼈대 애니메이션 이동 속도 기반 반작용 관성력
                 float3 raw_vel = delta / dt;
                 float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
-                float3 ext_force = -anim_vel * (14.0 * INERTIA_SCALE);
+
+                float3 ext_force_l = -anim_vel * (14.0 * INERTIA_SCALE_L);
+                float3 ext_force_r = -float3(-anim_vel.x * 0.9, anim_vel.y, anim_vel.z) * (14.0 * INERTIA_SCALE_R);
 
                 // 부드러운 자연 호흡 바운스 중첩
-                float breath_t = time * (2.8 * SPEED);
-                float3 idle_f = float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * IDLE_SCALE;
-                ext_force += idle_f;
-
-                float3 ext_force_l = ext_force;
-                float3 ext_force_r = float3(-ext_force.x * 0.9, ext_force.y, ext_force.z);
+                if (IDLE_SCALE_L > 0.001) {{
+                    float breath_t_l = time * (2.8 * SPEED_L);
+                    ext_force_l += float3(0.0, sin(breath_t_l) * 1.5, cos(breath_t_l) * 1.0) * IDLE_SCALE_L;
+                }}
+                if (IDLE_SCALE_R > 0.001) {{
+                    float breath_t_r = time * (2.8 * SPEED_R) + 0.35;
+                    ext_force_r += float3(0.0, sin(breath_t_r) * 1.5, cos(breath_t_r) * 1.0) * IDLE_SCALE_R;
+                }}
 
                 float sub_dt = dt * 0.25;
                 [unroll]
                 for (int step = 0; step < 4; step++) {{
-                    float3 accel_l = ext_force_l - STIFF_K * prev_disp_l - DAMP_C * spring_vel_l;
-                    float3 accel_r = ext_force_r - STIFF_K * prev_disp_r - DAMP_C * spring_vel_r;
+                    float3 accel_l = ext_force_l - STIFF_K_L * prev_disp_l - DAMP_C_L * spring_vel_l;
+                    float3 accel_r = ext_force_r - STIFF_K_R * prev_disp_r - DAMP_C_R * spring_vel_r;
 
                     spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -3.0, 3.0);
                     spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -3.0, 3.0);
@@ -160,15 +185,14 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     float4 bw = BreastWeights[i];
     float total_w = bw.x + bw.y;
 
-    if (total_w > 0.0001 && STRENGTH_SCALE > 0.0001) {{
+    if (total_w > 0.0001 && (SCALE_L > 0.0001 || SCALE_R > 0.0001)) {{
         float3 disp_l = s0.xyz;
         float3 disp_r = s1.xyz;
-        float3 total_disp = (disp_l * bw.x + disp_r * bw.y) * (NORM_FACTOR * STRENGTH_SCALE);
+        float3 total_disp = disp_l * (bw.x * SCALE_L) + disp_r * (bw.y * SCALE_R);
 
-        float max_disp = 0.045 * max(0.1, STRENGTH_SCALE);
         float d_len = length(total_disp);
-        if (d_len > max_disp && d_len > 1e-5) {{
-            total_disp = (total_disp / d_len) * max_disp;
+        if (d_len > MAX_DISP && d_len > 1e-5) {{
+            total_disp = (total_disp / d_len) * MAX_DISP;
         }}
 
         v.position += total_disp;

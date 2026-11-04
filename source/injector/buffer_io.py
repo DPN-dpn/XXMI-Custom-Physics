@@ -89,6 +89,24 @@ def _export_physics_config_json(export_dir, props, context):
                     "radius": round(radius, 6),
                 }
 
+    bone_items_list = []
+    if hasattr(props, "bone_items"):
+        for it in props.bone_items:
+            bone_items_list.append({
+                "name": it.name,
+                "bone_type": it.bone_type,
+                "peak_weight": round(float(it.peak_weight), 4),
+                "falloff_power": round(float(it.falloff_power), 4),
+                "smooth_iterations": int(it.smooth_iterations),
+                "lock_registered_verts": bool(it.lock_registered_verts),
+                "strength": round(float(it.strength), 4),
+                "speed": round(float(it.speed), 4),
+                "damping": round(float(it.damping), 4),
+                "inertia": round(float(it.inertia), 4),
+                "idle_motion": round(float(it.idle_motion), 4),
+                "vert_count": int(it.vert_count),
+            })
+
     cfg = {
         "version": "1.0",
         "target_game": getattr(props, "target_game", "ZZZ"),
@@ -101,6 +119,7 @@ def _export_physics_config_json(export_dir, props, context):
         "debug_mode": bool(props.debug_mode),
         "debug_toggle_key": str(props.debug_toggle_key),
         "bones": bones_dict,
+        "bone_items": bone_items_list,
     }
 
     out_path = os.path.join(export_dir, "XXMI_Physics_Config.json")

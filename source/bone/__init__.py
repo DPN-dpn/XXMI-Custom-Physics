@@ -1,7 +1,9 @@
+from . import ui_list
 from . import operators
 from . import panel
 
 modules = [
+    ui_list,
     operators,
     panel,
 ]
