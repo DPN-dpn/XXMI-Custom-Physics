@@ -85,18 +85,19 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     # 1. 전방 깊이 축 투영 거리 및 매끄러운 돔 감쇠
     t_proj = pts_rel @ bone_u
     t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
-    w_depth = np.sin(np.sqrt(t_norm) * (np.pi * 0.5))
+    w_depth = 0.25 + 0.75 * np.sin(np.sqrt(t_norm) * (np.pi * 0.5))
 
-    # 2. 방사형 수직 거리 및 Hann Cosine 감쇠
-    v_perp = pts_rel - np.outer(t_proj, bone_u)
-    rho = np.linalg.norm(v_perp, axis=1)
+    # 2. 본 세그먼트 [Head -> Tail] 와의 3D 수직 최단거리 및 Hann Cosine 감쇠
+    proj_pts = head_arr + np.outer(t_norm, bone_vec)
+    d_perp = np.linalg.norm(world_pts - proj_pts, axis=1)
+
     radius = max(0.02, float(eff_radius))
-    rho_norm = np.clip(rho / radius, 0.0, 1.0)
-    w_radial = 0.5 * (1.0 + np.cos(np.pi * rho_norm))
+    rho_norm = np.clip(d_perp / radius, 0.0, 1.0)
+    w_radial = np.where(d_perp < radius, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
 
-    # 3. 해부학적 합성 가중치 계산
+    # 3. 해부학적 합성 가중치 계산 (반경 밖은 정확히 0.0)
     w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
-    w_arr = np.clip(w_comb, 0.005, 1.0)
+    w_arr = np.where(w_radial > 0.0, np.clip(w_comb, 0.001, 1.0), 0.0)
 
     # 4. UV 심 및 분리 정점 동기화
     if len(world_pts) > 1:
@@ -134,12 +135,15 @@ def eval_bone_weight_at_point(pt, side, bone_info, props=None, falloff_p=1.0, pe
     v = pt - head
     t = v.dot(fwd_u)
     t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
-    w_depth = math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
+    proj_pt = head + bone_vec * t_norm
+    d_perp = (pt - proj_pt).length
 
-    v_perp = v - t * fwd_u
-    rho = v_perp.length
-    rho_norm = max(0.0, min(1.0, rho / radius))
+    if d_perp >= radius:
+        return 0.0
+
+    rho_norm = d_perp / radius
     w_radial = 0.5 * (1.0 + math.cos(math.pi * rho_norm))
+    w_depth = 0.25 + 0.75 * math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
 
     if props:
         b_params = get_bone_params(props, f"Breast.{side}")
@@ -147,7 +151,7 @@ def eval_bone_weight_at_point(pt, side, bone_info, props=None, falloff_p=1.0, pe
         falloff_p = b_params["falloff_power"]
 
     w = peak_w * math.pow(max(0.0, w_depth * w_radial), falloff_p)
-    return max(0.02, min(1.0, w)) if w > 0.0 else 0.0
+    return max(0.001, min(1.0, w))
 
 
 def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w=0.80, exclude_verts_by_obj=None):
@@ -288,17 +292,8 @@ def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_
         has_l = "L" in bone_info
         has_r = "R" in bone_info
 
-        if min_x < -0.004 and max_x > 0.004 and has_l and has_r:
-            span = max(0.02, max_x - min_x)
-            t_l = max(0.0, min(1.0, 0.5 + c_cent.x / span))
-            cluster_wl = _eval_side_weight(c_cent, "L") * t_l
-            cluster_wr = _eval_side_weight(c_cent, "R") * (1.0 - t_l)
-        elif c_cent.x >= 0.0:
-            cluster_wl = _eval_side_weight(c_cent, "L") if has_l else 0.0
-            cluster_wr = 0.0
-        else:
-            cluster_wl = 0.0
-            cluster_wr = _eval_side_weight(c_cent, "R") if has_r else 0.0
+        cluster_wl = _eval_side_weight(c_cent, "L") if has_l else 0.0
+        cluster_wr = _eval_side_weight(c_cent, "R") if has_r else 0.0
 
         for isl in comp:
             obj = isl["obj"]
@@ -538,9 +533,9 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         if vg_rigid:
             group_map[vg_rigid.index] = "rigid"
         arrs = read_vertex_group_arrays(obj, group_map)
-        world = world_vertex_positions(obj)
 
-        rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world), dtype=bool)
+        rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world_vertex_positions(obj)), dtype=bool)
+        world = world_vertex_positions(obj)
 
         n_verts = len(world)
         if vg_rigid and np.any(rigid_mask):
@@ -568,6 +563,8 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             "rigid_mask": rigid_mask,
         }
 
+    updated_obj_count = len(obj_data)
+
     for side, prev_vg_key in (("L", "l"), ("R", "r")):
         if side not in bone_info:
             continue
@@ -592,19 +589,20 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             arrs = odata["arrs"]
             rigid_mask = odata["rigid_mask"]
 
-            prev_weighted = (arrs[prev_vg_key] > 0.0001)
+            prev_l = arrs.get("l", np.zeros(len(world)))
+            prev_r = arrs.get("r", np.zeros(len(world)))
+            is_registered_chest = ((prev_l > 0.0001) | (prev_r > 0.0001))
 
             if side_lock_registered:
-                cand_mask = prev_weighted & ~rigid_mask
+                cand_mask = is_registered_chest & ~rigid_mask
             else:
                 dist = np.linalg.norm(world - cent, axis=1)
                 in_radius = (dist <= eff_radius)
-                side_ok = (world[:, 0] >= -0.01) if side == "L" else (world[:, 0] <= 0.01)
                 dot_fwd = (world - head) @ fwd_u
                 front_ok = (dot_fwd >= -eff_radius * 0.35)
-                cand_mask = (prev_weighted | (in_radius & side_ok & front_ok)) & ~rigid_mask
+                cand_mask = (is_registered_chest | (in_radius & front_ok)) & ~rigid_mask
 
-                non_cand_prev = np.nonzero(prev_weighted & ~cand_mask)[0]
+                non_cand_prev = np.nonzero(is_registered_chest & ~cand_mask)[0]
                 if len(non_cand_prev) > 0:
                     zero_entries.append((vg, non_cand_prev.tolist()))
 
@@ -621,54 +619,18 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             cand_pts, head, tail, eff_radius, side_falloff_p, side_peak_w
         )
 
-        final_weights = baked_w.copy()
-
-        for (obj, vg, vi, _), wi in zip(side_cand, final_weights.tolist()):
-            if side_lock_registered:
+        for (obj, vg, vi, _), wi in zip(side_cand, baked_w.tolist()):
+            if wi > 0.0005:
                 vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                 total_recomputed_verts += 1
             else:
-                if wi <= 0.0001:
-                    vg.remove([vi])
-                else:
-                    vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
-                    total_recomputed_verts += 1
+                vg.remove([vi])
 
         if not side_lock_registered:
             for vg, z_list in zero_entries:
                 vg.remove(z_list)
 
-    # 중앙골 대칭 크로스 블렌딩
-    center_x = 0.0
-    if "L" in bone_info and "R" in bone_info:
-        center_x = (bone_info["L"]["head"][0] + bone_info["R"]["head"][0]) * 0.5
-
-    blend_w = 0.025
-    for obj, odata in obj_data.items():
-        vg_l = odata["vg_l"]
-        vg_r = odata["vg_r"]
-        world = odata["world"]
-        rigid_mask = odata["rigid_mask"]
-
-        arrs = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
-        wl = arrs["l"]
-        wr = arrs["r"]
-
-        in_cleavage = (np.abs(world[:, 0] - center_x) <= blend_w) & ~rigid_mask & ((wl > 0.0001) | (wr > 0.0001))
-        c_idx = np.nonzero(in_cleavage)[0]
-        for vi in c_idx.tolist():
-            x_rel = (world[vi, 0] - center_x) / blend_w
-            t_blend = 0.5 + 0.5 * x_rel
-            t_smooth = 3.0 * (t_blend ** 2) - 2.0 * (t_blend ** 3)
-            sum_w = wl[vi] + wr[vi]
-            new_l = sum_w * t_smooth
-            new_r = sum_w * (1.0 - t_smooth)
-            if new_l > 0.0005: vg_l.add([vi], max(0.0, min(1.0, float(new_l))), 'REPLACE')
-            else: vg_l.remove([vi])
-            if new_r > 0.0005: vg_r.add([vi], max(0.0, min(1.0, float(new_r))), 'REPLACE')
-            else: vg_r.remove([vi])
-
-        updated_obj_count += 1
+    # 각 본별 독립 거리 감쇄 연산이 완료되어 중앙골은 자연스럽게 중첩 블렌딩됨 (인공적인 강제 절단 제거)
 
     # 라플라시안 스무딩
     if smooth_iters > 0:

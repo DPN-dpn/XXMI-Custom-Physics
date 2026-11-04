@@ -71,7 +71,16 @@ def get_rig_bone_info(rig):
         if pb:
             scale_factor = max(abs(pb.scale.x), abs(pb.scale.y), abs(pb.scale.z))
 
-        radius = max(0.03, db.head_radius * scale_factor, (db.envelope_distance / 1.4) * scale_factor, fwd_len * 0.5)
+        r_cands = []
+        if db.head_radius > 0.005:
+            r_cands.append(db.head_radius * scale_factor)
+        if db.envelope_distance > 0.005:
+            r_cands.append(db.envelope_distance * scale_factor)
+        if fwd_len > 0.01:
+            r_cands.append(fwd_len * 0.85)
+
+        radius = max(r_cands) if r_cands else 0.10
+        radius = max(0.03, radius)
 
         bone_info[side] = {
             "bname": bname,
