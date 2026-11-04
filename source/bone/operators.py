@@ -422,15 +422,15 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"2단계 완료: 모핑 본 생성 완료! 뷰포트에서 본의 위치/각도를 확인하고 [3. 본 기준 가중치 자동 계산 & 블렌딩]을 누르세요."
+            "모핑 본 생성 완료! 뷰포트에서 본의 위치/각도를 확인하고 필요시 [2. 강체(액세서리) 설정] 또는 [3. 가중치 계산 & 물리 프리뷰]로 이동하세요."
         )
         return {'FINISHED'}
 
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
     bl_idname = "object.xxmi_rebake_breast_weights"
-    bl_label = "3. 본 기준 가중치 자동 계산 & 블렌딩"
-    bl_description = "모핑 본들을 기준으로 거리 감쇄 가중치를 계산하고 중첩 영역을 자연스럽게 블렌딩합니다"
+    bl_label = "본 & 강체 가중치 자동 계산 & 블렌딩"
+    bl_description = "모핑 본들을 기준으로 거리 감쇄 가중치를 계산하고 강체(액세서리)를 포함하여 자연스럽게 블렌딩합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

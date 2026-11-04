@@ -197,8 +197,8 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
 
 class XXMI_OT_copy_physics_params_to_all(bpy.types.Operator):
     bl_idname = "object.xxmi_copy_physics_params_to_all"
-    bl_label = "모든 본에 현재 파라미터 일괄 복사"
-    bl_description = "현재 선택된 본의 물리 파라미터(흔들림, 탄력, 감쇠, 관성 등)를 모든 본에 동일하게 복사합니다"
+    bl_label = "모든 본에 현재 설정 일괄 복사"
+    bl_description = "현재 선택된 본의 가중치 및 물리 파라미터를 모든 본에 동일하게 복사합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -213,6 +213,12 @@ class XXMI_OT_copy_physics_params_to_all(bpy.types.Operator):
         count = 0
         for i, item in enumerate(props.bone_items):
             if i != props.bone_item_index:
+                # 가중치 설정 복사
+                item.peak_weight = curr.peak_weight
+                item.falloff_power = curr.falloff_power
+                item.smooth_iterations = curr.smooth_iterations
+                item.lock_registered_verts = curr.lock_registered_verts
+                # 물리 파라미터 복사
                 item.strength = curr.strength
                 item.speed = curr.speed
                 item.damping = curr.damping
@@ -220,35 +226,44 @@ class XXMI_OT_copy_physics_params_to_all(bpy.types.Operator):
                 item.idle_motion = curr.idle_motion
                 count += 1
 
-        self.report({'INFO'}, f"본 '{curr.name}'의 물리 파라미터를 {count}개 본에 복사했습니다.")
+        self.report({'INFO'}, f"본 '{curr.name}'의 가중치 및 물리 파라미터를 {count}개 본에 복사했습니다.")
         return {'FINISHED'}
 
 
 class XXMI_OT_reset_physics_params(bpy.types.Operator):
     bl_idname = "object.xxmi_reset_physics_params"
     bl_label = "기본값으로 초기화"
-    bl_description = "물리 파라미터를 권장 기본값으로 되돌립니다"
+    bl_description = "가중치 및 물리 파라미터를 권장 기본값으로 되돌립니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
+        props.peak_weight = 0.40
+        props.falloff_power = 1.0
+        props.smooth_iterations = 2
+        props.lock_registered_verts = True
+
         props.strength = 1.0
         props.speed = 1.1
         props.damping = 0.85
         props.inertia = 1.2
         props.idle_motion = 0.4
-        props.falloff_power = 1.0
 
         if 0 <= props.bone_item_index < len(props.bone_items):
             curr = props.bone_items[props.bone_item_index]
+            curr.peak_weight = 0.40
+            curr.falloff_power = 1.0
+            curr.smooth_iterations = 2
+            curr.lock_registered_verts = True
+
             curr.strength = 1.0
             curr.speed = 1.1
             curr.damping = 0.85
             curr.inertia = 1.2
             curr.idle_motion = 0.4
-            self.report({'INFO'}, f"본 '{curr.name}'의 물리 파라미터가 기본값으로 초기화되었습니다.")
+            self.report({'INFO'}, f"본 '{curr.name}'의 가중치 및 물리 파라미터가 기본값으로 초기화되었습니다.")
         else:
-            self.report({'INFO'}, "물리 파라미터가 기본값으로 초기화되었습니다.")
+            self.report({'INFO'}, "가중치 및 물리 파라미터가 기본값으로 초기화되었습니다.")
         return {'FINISHED'}
 
 

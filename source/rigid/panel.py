@@ -26,7 +26,8 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
                 "• 모핑 파츠(가슴, 의상, 복부 등) 위에 부착된 단추, 무전기, 리본, 브로치 등은 모핑 동작 시 형태를 유지(강체)해야 합니다.\n"
                 "• [+] 버튼으로 강체 슬롯을 추가합니다.\n"
                 "• 에디트 모드에서 부품 정점들을 선택하고 [선택 정점 할당]을 누릅니다. (여러 오브젝트에 걸친 부품도 동시 지원)\n"
-                "• [목표 본]을 지정하면 해당 모핑 본의 움직임과 100% 동일하게 고정되어 따라 움직입니다."
+                "• [목표 본]을 지정하면 해당 모핑 본의 움직임과 100% 동일하게 고정되어 따라 움직입니다.\n"
+                "• 설정 후 바로 [강체 가중치 즉시 갱신]을 누르거나, [3. 가중치 계산 & 프리뷰] 패널로 이동하여 물리 파라미터와 함께 일괄 계산할 수 있습니다."
             ),
         )
 
@@ -59,6 +60,13 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
             row_acts.operator("object.xxmi_rigid_item_remove_verts", text="제외", icon='X')
         else:
             layout.label(text="등록된 강체가 없습니다. [+]를 눌러 추가하세요.", icon='INFO')
+
+        layout.separator()
+
+        # 강체 가중치 즉시 갱신 편의 버튼
+        box_quick = layout.box()
+        col_q = box_quick.column(align=True)
+        col_q.operator("object.xxmi_rebake_breast_weights", text="강체 가중치 즉시 갱신", icon='FILE_REFRESH')
 
         # 3. 레거시 도구 (접이식)
         box_leg = layout.box()
