@@ -65,8 +65,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         # 앵커 본(XXMI_Breast_Rig)이 존재하면 주입 전 웨이트를 본 위치 기준으로 강제 재베이크 동기화
         rig = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Breast_Rig")
         if rig and rig.type == 'ARMATURE':
-            from ..breast.operators import _rebake_mesh_weights_from_rig
-            _rebake_mesh_weights_from_rig(context, rig, props)
+            from ..bone.weighting import rebake_mesh_weights_from_rig
+            rebake_mesh_weights_from_rig(context, rig, props)
 
         # 1. 가슴 웨이트를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
         breast_objs = [
