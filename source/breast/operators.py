@@ -289,8 +289,20 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak
         if not rigid_mask.any():
             continue
 
-        world = world_vertex_positions(obj)
         e0, e1 = mesh_edge_arrays(mesh)
+        # 메쉬 내 독립된 장신구 섬(2500개 이하 정점)에 강체 정점이 일부 포함되어 있다면,
+        # 장신구 메쉬가 찢어지거나 구멍이 뚫리는 현상을 원천 방지하기 위해 해당 섬 전체를 강체로 자동 확장
+        lab_all = label_components(n_verts, e0, e1)
+        uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
+        for lab_id, cnt in zip(uniq_labs, lab_counts):
+            if cnt <= 2500:
+                isl_mask = (lab_all == lab_id)
+                n_rig = np.count_nonzero(rigid_mask & isl_mask)
+                if n_rig >= 5 or (n_rig / cnt) >= 0.15:
+                    rigid_mask[isl_mask] = True
+                    vg_rigid.add(np.nonzero(isl_mask)[0].tolist(), 1.0, 'REPLACE')
+
+        world = world_vertex_positions(obj)
         sub = rigid_mask[e0] & rigid_mask[e1]
         lab = label_components(n_verts, e0[sub], e1[sub])
 
@@ -731,6 +743,26 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
 
         rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world), dtype=bool)
 
+        # 메쉬 내 독립 장신구 섬(2500개 이하 정점)에 강체 정점이 일부 포함된 경우,
+        # 소프트 가중치 계산 및 스무딩에서 완벽히 제외되도록 섬 전체를 강체로 자동 완결
+        n_verts = len(world)
+        if vg_rigid and np.any(rigid_mask):
+            e0, e1 = mesh_edge_arrays(obj.data)
+            lab_all = label_components(n_verts, e0, e1)
+            uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
+            to_add_list = []
+            for lab_id, cnt in zip(uniq_labs, lab_counts):
+                if cnt <= 2500:
+                    isl_mask = (lab_all == lab_id)
+                    n_rig = np.count_nonzero(rigid_mask & isl_mask)
+                    if n_rig >= 5 or (n_rig / cnt) >= 0.15:
+                        diff = np.nonzero(isl_mask & ~rigid_mask)[0]
+                        if len(diff) > 0:
+                            rigid_mask[isl_mask] = True
+                            to_add_list.extend(diff.tolist())
+            if to_add_list:
+                vg_rigid.add(to_add_list, 1.0, 'REPLACE')
+
         obj_data[obj] = {
             "vg_l": vg_l,
             "vg_r": vg_r,
@@ -996,20 +1028,35 @@ class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
 
         total_marked = 0
         for obj in target_objs:
-            n_verts = len(obj.data.vertices)
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
             sel_mask = np.zeros(n_verts, dtype=bool)
-            obj.data.vertices.foreach_get("select", sel_mask)
+            mesh.vertices.foreach_get("select", sel_mask)
             sel_indices = np.nonzero(sel_mask)[0]
             if len(sel_indices) == 0:
                 continue
 
             world = world_vertex_positions(obj)
+            e0, e1 = mesh_edge_arrays(mesh)
+            lab_all = label_components(n_verts, e0, e1)
+            uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
+
+            # 선택된 정점이 포함된 독립 장신구 메쉬 섬(<= 2500 정점)은 안감/뒷면까지 100% 자동 포함
+            for lab_id, cnt in zip(uniq_labs, lab_counts):
+                if cnt <= 2500:
+                    isl_mask = (lab_all == lab_id)
+                    n_sel = np.count_nonzero(sel_mask & isl_mask)
+                    if n_sel > 0 and (n_sel >= 4 or (n_sel / cnt) >= 0.10):
+                        sel_mask[isl_mask] = True
+
+            # UV 심(Seam) 및 분리된 경계 정점 동기화: 선택된 정점과 동일 위치(0.5mm 이내)인 분리 정점 자동 포함
             kd_local = KDTree(n_verts)
             for vi, wpos in enumerate(world):
                 kd_local.insert(Vector(wpos), vi)
             kd_local.balance()
 
-            for si in sel_indices.tolist():
+            cur_sel = np.nonzero(sel_mask)[0].tolist()
+            for si in cur_sel:
                 hits = kd_local.find_range(Vector(world[si]), 0.0005)
                 for _, hi, _ in hits:
                     sel_mask[hi] = True
