@@ -48,11 +48,8 @@ def get_rig_bone_info(rig):
     pose_bones = rig.pose.bones if rig.pose else None
     data_bones = rig.data.bones
 
-    for side, bname in (("L", "Breast.L"), ("R", "Breast.R")):
-        db = data_bones.get(bname)
-        if not db:
-            continue
-
+    for db in data_bones:
+        bname = db.name
         pb = pose_bones.get(bname) if pose_bones else None
         if pb:
             head_w = mw @ pb.head
@@ -82,7 +79,7 @@ def get_rig_bone_info(rig):
         radius = max(r_cands) if r_cands else 0.10
         radius = max(0.03, radius)
 
-        bone_info[side] = {
+        entry = {
             "bname": bname,
             "centroid": cent,
             "tip": tip,
@@ -91,6 +88,13 @@ def get_rig_bone_info(rig):
             "fwd_unit": fwd_unit,
             "radius": radius,
         }
+        bone_info[bname] = entry
+
+        b_lower = bname.lower()
+        if b_lower in ("breast.l", "l"):
+            bone_info["L"] = entry
+        elif b_lower in ("breast.r", "r"):
+            bone_info["R"] = entry
 
     return bone_info
 

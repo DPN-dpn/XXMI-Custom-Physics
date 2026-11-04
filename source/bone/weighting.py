@@ -565,33 +565,43 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
     updated_obj_count = len(obj_data)
 
-    for side, prev_vg_key in (("L", "l"), ("R", "r")):
-        if side not in bone_info:
-            continue
+    unique_bones = {}
+    for k, bentry in bone_info.items():
+        bname = bentry["bname"]
+        if bname not in unique_bones:
+            unique_bones[bname] = bentry
 
-        b_params = get_bone_params(props, f"Breast.{side}")
+    for bname, bentry in unique_bones.items():
+        b_params = get_bone_params(props, bname)
         side_falloff_p = b_params["falloff_power"]
         side_peak_w = b_params["peak_weight"]
         side_lock_registered = b_params["lock_registered_verts"]
 
-        cent = np.array(bone_info[side]["centroid"], dtype=np.float64)
-        head = np.array(bone_info[side]["head"], dtype=np.float64)
-        fwd_u = np.array(bone_info[side]["fwd_unit"], dtype=np.float64)
-        radius = bone_info[side]["radius"]
+        cent = np.array(bentry["centroid"], dtype=np.float64)
+        head = np.array(bentry["head"], dtype=np.float64)
+        tail = np.array(bentry["tail"], dtype=np.float64)
+        fwd_u = np.array(bentry["fwd_unit"], dtype=np.float64)
+        radius = bentry["radius"]
         eff_radius = max(0.02, radius)
+
+        vg_target_name = VG_BREAST_L if bname.lower() in ("breast.l", "l") else (
+            VG_BREAST_R if bname.lower() in ("breast.r", "r") else f"XXMI_{bname}"
+        )
 
         side_cand = []
         zero_entries = []
 
         for obj, odata in obj_data.items():
-            vg = odata["vg_l"] if side == "L" else odata["vg_r"]
+            vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
             world = odata["world"]
             arrs = odata["arrs"]
             rigid_mask = odata["rigid_mask"]
 
             prev_l = arrs.get("l", np.zeros(len(world)))
             prev_r = arrs.get("r", np.zeros(len(world)))
-            is_registered_chest = ((prev_l > 0.0001) | (prev_r > 0.0001))
+            cur_vg = obj.vertex_groups.get(vg_target_name)
+            cur_arr = read_vertex_group_arrays(obj, {cur_vg.index: "cur"})["cur"] if cur_vg else np.zeros(len(world))
+            is_registered_chest = ((prev_l > 0.0001) | (prev_r > 0.0001) | (cur_arr > 0.0001))
 
             if side_lock_registered:
                 cand_mask = is_registered_chest & ~rigid_mask
@@ -614,7 +624,6 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             continue
 
         cand_pts = np.array([c[3] for c in side_cand], dtype=np.float64)
-        tail = np.array(bone_info[side]["tail"], dtype=np.float64)
         baked_w = calculate_anatomical_weights_with_anti_clipping(
             cand_pts, head, tail, eff_radius, side_falloff_p, side_peak_w
         )
@@ -630,7 +639,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             for vg, z_list in zero_entries:
                 vg.remove(z_list)
 
-    # 각 본별 독립 거리 감쇄 연산이 완료되어 중앙골은 자연스럽게 중첩 블렌딩됨 (인공적인 강제 절단 제거)
+    # 각 모핑 본별 독립 거리 감쇄 연산이 완료되어 중첩 영역은 자연스럽게 자동 블렌딩됨
 
     # 라플라시안 스무딩
     if smooth_iters > 0:

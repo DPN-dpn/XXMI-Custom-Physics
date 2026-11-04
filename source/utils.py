@@ -146,6 +146,39 @@ def axis_angle_matrix(axis, angle):
     return Matrix.Rotation(angle, 3, axis)
 
 
+def compute_density_invariant_geometric_center(pts, n_bins=16):
+    """
+    버텍스 밀도 편향(지퍼, 솔기, 세밀한 장신구 등 특정 부위의 정점 밀집)을 배제하고
+    순수한 3D 공간 형태의 기하학적 중심(Bounding Extents & Uniform Voxel Centroid)을 계산합니다.
+    반환값: (geom_center: Vector, bmin: Vector, bmax: Vector)
+    """
+    import numpy as np
+    pts_arr = np.array(pts, dtype=np.float64)
+    if len(pts_arr) == 0:
+        return Vector((0.0, 0.0, 0.0)), Vector((0.0, 0.0, 0.0)), Vector((0.0, 0.0, 0.0))
+
+    # 1. 이상치 제거된 3D Bounding Box (2% ~ 98% 백분위수)
+    p2 = np.percentile(pts_arr, 2, axis=0)
+    p98 = np.percentile(pts_arr, 98, axis=0)
+    bmin = Vector((float(p2[0]), float(p2[1]), float(p2[2])))
+    bmax = Vector((float(p98[0]), float(p98[1]), float(p98[2])))
+
+    # 2. 균일 3D 복셀 그리드 점유도(Occupancy) 계산 -> 정점 수 편향 완전 배제
+    spans = np.maximum(p98 - p2, 1e-4)
+    coords = np.clip(np.floor((pts_arr - p2) / spans * n_bins).astype(np.int32), 0, n_bins - 1)
+    unique_voxels = np.unique(coords, axis=0)
+
+    voxel_centers = p2 + (unique_voxels + 0.5) * (spans / n_bins)
+    geom_center_np = np.mean(voxel_centers, axis=0)
+    box_center_np = (p2 + p98) * 0.5
+
+    # 바운딩 박스 중심과 복셀 중심의 블렌딩 (형태의 전체적인 가운데 지향)
+    final_np = 0.5 * geom_center_np + 0.5 * box_center_np
+    geom_center = Vector((float(final_np[0]), float(final_np[1]), float(final_np[2])))
+
+    return geom_center, bmin, bmax
+
+
 def draw_help_button(layout, text):
     """패널 우측 상단에 공통 도움말(?) 아이콘 버튼을 그립니다."""
     row = layout.row()

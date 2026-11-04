@@ -8,6 +8,7 @@ from ..utils import (
     read_vertex_group_arrays,
     world_vertex_positions,
     get_target_mesh_objects,
+    compute_density_invariant_geometric_center,
 )
 from .rig import (
     BREAST_RIG_NAME,
@@ -34,8 +35,8 @@ _get_or_create_breast_rig = get_or_create_breast_rig
 
 class XXMI_OT_register_breast_selection(bpy.types.Operator):
     bl_idname = "object.xxmi_register_breast_selection"
-    bl_label = "1. 가슴 영역 선택 등록"
-    bl_description = "에디트 모드에서 선택한 정점들을 가슴 영역으로 등록합니다"
+    bl_label = "1. 모핑 영역 선택 등록"
+    bl_description = "에디트 모드에서 선택한 정점들을 모핑 영역으로 등록합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -113,13 +114,15 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
                 total_r += len(sel_list)
                 data_r[obj.name] = sel_list
             else:
-                # 양쪽 가슴 모두에 후보군으로 등록 (거리 기반 자연 감쇄 및 중앙골 블렌딩을 위함)
+                # 양쪽 모두 가중치 평가 후보군으로 등록하되, 각 본의 형태 중심 계산용 정점은 좌/우로 적절히 분류
                 vg_l.add(sel_list, 0.05, 'REPLACE')
                 vg_r.add(sel_list, 0.05, 'REPLACE')
-                total_l += len(sel_list)
-                total_r += len(sel_list)
-                data_l[obj.name] = sel_list
-                data_r[obj.name] = sel_list
+                left_sub = [vi for vi in sel_list if world[vi, 0] >= -0.01]
+                right_sub = [vi for vi in sel_list if world[vi, 0] <= 0.01]
+                total_l += len(left_sub)
+                total_r += len(right_sub)
+                data_l[obj.name] = left_sub
+                data_r[obj.name] = right_sub
 
         synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
 
@@ -148,16 +151,16 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"1단계 완료: 가슴 정점 총 {total_sel}개 등록 완료! "
-            f"이어서 [2. 가슴 물리 본 생성]을 진행하세요."
+            f"1단계 완료: 모핑 정점 총 {total_sel}개 등록 완료! "
+            f"이어서 [2. 모핑 본 자동 생성]을 진행하세요."
         )
         return {'FINISHED'}
 
 
 class XXMI_OT_generate_breast_rig(bpy.types.Operator):
     bl_idname = "object.xxmi_generate_breast_rig"
-    bl_label = "2. 가슴 물리 본 생성"
-    bl_description = "등록된 가슴 정점 형태를 분석하여 알맞은 위치와 방향의 가슴 물리 본(Armature)을 자동 생성합니다"
+    bl_label = "2. 모핑 본 자동 생성"
+    bl_description = "등록된 모핑 정점들의 3D 기하학적 형태 중심을 정밀 분석하여 모핑 본(Armature)을 자동 생성합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -248,102 +251,145 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
         pts_l = pts_arr[pts_arr[:, 0] > (x_mid + 0.005)]
         pts_r = pts_arr[pts_arr[:, 0] < (x_mid - 0.005)]
 
+        # 1. 사용자가 슬롯별로 정점을 지정해 둔 것이 있는지 확인
+        slot_bones_data = []
+        for it in props.bone_items:
+            it_dict = get_bone_data(it)
+            if it_dict and sum(len(v) for v in it_dict.values()) >= 6:
+                it_pts = []
+                for oname, v_indices in it_dict.items():
+                    o = bpy.data.objects.get(oname)
+                    if o and o.type == 'MESH':
+                        w_arr = world_vertex_positions(o)
+                        for vi in v_indices:
+                            if vi < len(w_arr):
+                                it_pts.append(w_arr[vi])
+                if len(it_pts) >= 6:
+                    slot_bones_data.append((it.name, it_pts))
+
         anchor_info = {}
 
-        if len(pts_l) >= 15 and len(pts_r) >= 15:
-            # 양측 대칭(Bilateral Symmetry) 정밀 물리 본 생성
-            ys_sorted = np.sort(pts_arr[:, 1])
-            y_front = float(ys_sorted[0])
-            y_base = float(ys_sorted[int(len(ys_sorted) * 0.85)])
-            depth = max(0.04, y_base - y_front)
+        if slot_bones_data and len(slot_bones_data) >= 2:
+            # 사용자가 슬롯별로 직접 모핑 영역을 지정한 경우: 각 영역의 기하학적 형태 중심에 본 생성
+            for bname, s_pts in slot_bones_data:
+                center, bmin, bmax = compute_density_invariant_geometric_center(s_pts)
+                depth = max(0.04, bmax.y - bmin.y)
+                span_x = bmax.x - bmin.x
+                span_z = bmax.z - bmin.z
+                bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
 
-            # 전방 돌출부(가슴 첨부/꼭지 영역) 정점 추출
-            front_mask = pts_arr[:, 1] <= (y_front + depth * 0.35)
-            front_l = pts_arr[front_mask & (pts_arr[:, 0] > (x_mid + 0.01))]
-            front_r = pts_arr[front_mask & (pts_arr[:, 0] < (x_mid - 0.01))]
+                dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
+                head = Vector((center.x, bmax.y, center.z))
+                tail = Vector((center.x + dx_out, bmin.y, center.z))
+                b_vec = tail - head
+                u = b_vec.normalized() if b_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
 
-            if len(front_l) >= 4:
-                zl = float(np.median(front_l[:, 2]))
-                xl = float(np.median(front_l[:, 0]))
-            else:
-                zl = float(np.median(pts_l[:, 2]))
-                xl = float(np.median(pts_l[:, 0]))
+                anchor_info[bname] = {
+                    "bname": bname,
+                    "centroid": Vector(((head.x + tail.x) * 0.5, (head.y + tail.y) * 0.5, center.z)),
+                    "tip": tail,
+                    "head": head,
+                    "tail": tail,
+                    "fwd_unit": u,
+                    "radius": bone_radius,
+                }
 
-            if len(front_r) >= 4:
-                zr = float(np.median(front_r[:, 2]))
-                xr = float(np.median(front_r[:, 0]))
-            else:
-                zr = float(np.median(pts_r[:, 2]))
-                xr = float(np.median(pts_r[:, 0]))
-
-            # 비대칭 장신구/스트랩에 영향받지 않도록 높이(Z)와 너비(X)의 완전 대칭화
-            z_mid = (zl + zr) * 0.5
-            x_dist = max(0.03, (abs(xl - x_mid) + abs(xr - x_mid)) * 0.5)
-
-            span_l = float(np.ptp(pts_l[:, 0]))
-            span_r = float(np.ptp(pts_r[:, 0]))
-            bone_radius = max(0.06, x_dist * 0.95, depth * 0.80, (span_l + span_r) * 0.25)
-
-            # 좌측 가슴 본 (Breast.L): 가슴벽(Head) -> 정면(Tail), 수평 레벨 유지 및 자연스러운 외측 각도
-            head_l = Vector((x_mid + x_dist, y_base, z_mid))
-            tail_l = Vector((x_mid + 1.05 * x_dist, y_front, z_mid))
-            bone_vec_l = tail_l - head_l
-            u_l = bone_vec_l.normalized() if bone_vec_l.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-            anchor_info["L"] = {
-                "bname": "Breast.L",
-                "centroid": Vector(((head_l.x + tail_l.x) * 0.5, (head_l.y + tail_l.y) * 0.5, z_mid)),
-                "tip": tail_l,
-                "head": head_l,
-                "tail": tail_l,
-                "fwd_unit": u_l,
-                "radius": bone_radius,
-            }
-
-            # 우측 가슴 본 (Breast.R): 완벽 대칭
-            head_r = Vector((x_mid - x_dist, y_base, z_mid))
-            tail_r = Vector((x_mid - 1.05 * x_dist, y_front, z_mid))
-            bone_vec_r = tail_r - head_r
-            u_r = bone_vec_r.normalized() if bone_vec_r.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-            anchor_info["R"] = {
-                "bname": "Breast.R",
-                "centroid": Vector(((head_r.x + tail_r.x) * 0.5, (head_r.y + tail_r.y) * 0.5, z_mid)),
-                "tip": tail_r,
-                "head": head_r,
-                "tail": tail_r,
-                "fwd_unit": u_r,
-                "radius": bone_radius,
-            }
+            # Breast.L과 Breast.R 쌍이 모두 포함되어 있는 경우 신체 대칭성 보정
+            if "Breast.L" in anchor_info and "Breast.R" in anchor_info:
+                al = anchor_info["Breast.L"]
+                ar = anchor_info["Breast.R"]
+                z_mid = (al["head"].z + ar["head"].z) * 0.5
+                x_dist = max(0.03, (abs(al["head"].x) + abs(ar["head"].x)) * 0.5)
+                y_base = max(al["head"].y, ar["head"].y)
+                y_front = min(al["tip"].y, ar["tip"].y)
+                al["head"] = Vector((x_dist, y_base, z_mid))
+                al["tail"] = Vector((x_dist * 1.05, y_front, z_mid))
+                al["fwd_unit"] = (al["tail"] - al["head"]).normalized()
+                ar["head"] = Vector((-x_dist, y_base, z_mid))
+                ar["tail"] = Vector((-x_dist * 1.05, y_front, z_mid))
+                ar["fwd_unit"] = (ar["tail"] - ar["head"]).normalized()
         else:
-            # 단일 측면(한쪽만 선택한 경우)
-            side = "L" if len(pts_l) > len(pts_r) else "R"
-            target_pts = pts_l if side == "L" else pts_r
-            if len(target_pts) < 10:
-                target_pts = pts_arr
-            ys_sorted = np.sort(target_pts[:, 1])
-            y_front = float(ys_sorted[0])
-            y_base = float(ys_sorted[int(len(ys_sorted) * 0.85)])
-            depth = max(0.04, y_base - y_front)
-            x_c = float(np.median(target_pts[:, 0]))
-            z_c = float(np.median(target_pts[:, 2]))
-            bone_radius = max(0.06, depth * 0.80)
+            # 기본 모핑 영역 클러스터링: 정점 밀도 편향을 배제하고 전체적인 형태의 중심을 계산
+            if len(pts_l) >= 15 and len(pts_r) >= 15:
+                # 양측 모핑 본: 각 형태의 기하학적 중심 계산
+                center_l, bmin_l, bmax_l = compute_density_invariant_geometric_center(pts_l)
+                center_r, bmin_r, bmax_r = compute_density_invariant_geometric_center(pts_r)
 
-            dx_out = (0.05 * abs(x_c)) if side == "L" else (-0.05 * abs(x_c))
-            head = Vector((x_c, y_base, z_c))
-            tail = Vector((x_c + dx_out, y_front, z_c))
-            bone_vec = tail - head
-            u = bone_vec.normalized() if bone_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
+                y_front = min(bmin_l.y, bmin_r.y)
+                y_base = max(bmax_l.y, bmax_r.y)
+                depth = max(0.04, y_base - y_front)
 
-            anchor_info[side] = {
-                "bname": f"Breast.{side}",
-                "centroid": Vector(((head.x + tail.x) * 0.5, (head.y + tail.y) * 0.5, z_c)),
-                "tip": tail,
-                "head": head,
-                "tail": tail,
-                "fwd_unit": u,
-                "radius": bone_radius,
-            }
+                # 형태 중심 기반 높이(Z) 및 좌우 거리(X) 정밀 정렬
+                z_mid = (center_l.z + center_r.z) * 0.5
+                x_dist = max(0.03, (abs(center_l.x) + abs(center_r.x)) * 0.5)
+
+                span_l = bmax_l.x - bmin_l.x
+                span_r = bmax_r.x - bmin_r.x
+                bone_radius = max(0.06, x_dist * 0.95, depth * 0.80, (span_l + span_r) * 0.25)
+
+                # 좌측 모핑 본 (Breast.L)
+                head_l = Vector((x_dist, y_base, z_mid))
+                tail_l = Vector((1.05 * x_dist, y_front, z_mid))
+                bone_vec_l = tail_l - head_l
+                u_l = bone_vec_l.normalized() if bone_vec_l.length > 1e-4 else Vector((0.0, -1.0, 0.0))
+
+                anchor_info["L"] = {
+                    "bname": "Breast.L",
+                    "centroid": Vector(((head_l.x + tail_l.x) * 0.5, (head_l.y + tail_l.y) * 0.5, z_mid)),
+                    "tip": tail_l,
+                    "head": head_l,
+                    "tail": tail_l,
+                    "fwd_unit": u_l,
+                    "radius": bone_radius,
+                }
+
+                # 우측 모핑 본 (Breast.R)
+                head_r = Vector((-x_dist, y_base, z_mid))
+                tail_r = Vector((-1.05 * x_dist, y_front, z_mid))
+                bone_vec_r = tail_r - head_r
+                u_r = bone_vec_r.normalized() if bone_vec_r.length > 1e-4 else Vector((0.0, -1.0, 0.0))
+
+                anchor_info["R"] = {
+                    "bname": "Breast.R",
+                    "centroid": Vector(((head_r.x + tail_r.x) * 0.5, (head_r.y + tail_r.y) * 0.5, z_mid)),
+                    "tip": tail_r,
+                    "head": head_r,
+                    "tail": tail_r,
+                    "fwd_unit": u_r,
+                    "radius": bone_radius,
+                }
+            else:
+                # 단일 모핑 영역 (한쪽만 지정한 경우)
+                side = "L" if len(pts_l) > len(pts_r) else "R"
+                target_pts = pts_l if side == "L" else pts_r
+                if len(target_pts) < 10:
+                    target_pts = pts_arr
+
+                center, bmin, bmax = compute_density_invariant_geometric_center(target_pts)
+                depth = max(0.04, bmax.y - bmin.y)
+                span_x = bmax.x - bmin.x
+                span_z = bmax.z - bmin.z
+                bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
+
+                dx_out = (0.05 * abs(center.x)) if side == "L" else (-0.05 * abs(center.x))
+                head = Vector((center.x, bmax.y, center.z))
+                tail = Vector((center.x + dx_out, bmin.y, center.z))
+                bone_vec = tail - head
+                u = bone_vec.normalized() if bone_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
+
+                bname = f"Breast.{side}"
+                if len(props.bone_items) > 0 and 0 <= props.bone_item_index < len(props.bone_items):
+                    bname = props.bone_items[props.bone_item_index].name
+
+                anchor_info[side] = {
+                    "bname": bname,
+                    "centroid": Vector(((head.x + tail.x) * 0.5, (head.y + tail.y) * 0.5, center.z)),
+                    "tip": tail,
+                    "head": head,
+                    "tail": tail,
+                    "fwd_unit": u,
+                    "radius": bone_radius,
+                }
 
         if not anchor_info:
             self.report({'ERROR'}, "충분한 수의 가슴 정점을 찾을 수 없습니다. [1. 가슴 영역 선택 등록]을 다시 진행해주세요.")
@@ -376,15 +422,15 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
 
         self.report(
             {'INFO'},
-            f"2단계 완료: 물리 본 생성 완료! 뷰포트에서 본의 위치/각도를 확인하고 [3. 본 기준 가중치(웨이트) 자동 계산]을 누르세요."
+            f"2단계 완료: 모핑 본 생성 완료! 뷰포트에서 본의 위치/각도를 확인하고 [3. 본 기준 가중치 자동 계산 & 블렌딩]을 누르세요."
         )
         return {'FINISHED'}
 
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
     bl_idname = "object.xxmi_rebake_breast_weights"
-    bl_label = "3. 본 기준 가중치(웨이트) 자동 계산"
-    bl_description = "가슴 물리 본을 기준으로 자연스러운 움직임 가중치를 계산하여 적용합니다"
+    bl_label = "3. 본 기준 가중치 자동 계산 & 블렌딩"
+    bl_description = "모핑 본들을 기준으로 거리 감쇄 가중치를 계산하고 중첩 영역을 자연스럽게 블렌딩합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod

@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
     bl_order = 0
 
     def draw_header(self, context):
-        self.layout.label(text="1. 물리 본 & 웨이트 설정", icon='BONE_DATA')
+        self.layout.label(text="1. 모핑(물리) 본 & 웨이트 설정", icon='BONE_DATA')
 
     def draw(self, context):
         layout = self.layout
@@ -22,16 +22,16 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[1단계: 물리 본 & 웨이트 설정 가이드]\n\n"
-                "• 가슴, 꼬리, 헤어 등 물리 본을 슬롯 목록으로 독립 관리할 수 있습니다.\n"
-                "• 각 본마다 최대 가중치, 감쇠, 스무딩 등 웨이트 값을 완전히 따로따로 설정할 수 있습니다.\n"
-                "• 에디트 모드에서 정점을 선택한 후 [선택 정점 할당] 또는 [1. 가슴 영역 선택 등록]을 누릅니다.\n"
-                "• [2. 가슴 물리 본 생성] 후 [3. 본 기준 가중치 자동 계산]을 누르면 각 본의 설정값대로 개별 베이킹됩니다."
+                "[1단계: 모핑 본 & 웨이트 설정 가이드]\n\n"
+                "• 가슴, 엉덩이, 복부 등 모든 모핑/물리 본을 슬롯 목록으로 독립 관리합니다.\n"
+                "• 좌우 고정 없이 한쪽씩 모핑 본을 지정해도 본들이 알아서 블렌드되어 적용됩니다.\n"
+                "• 특정 부위에 버텍스 밀도가 몰려있어도 전체적인 3D 공간 형태의 중심을 계산하여 본을 배치합니다.\n"
+                "• [3. 본 기준 가중치 자동 계산 & 블렌딩]을 누르면 각 본의 영역별 가중치가 계산되고 겹치는 부위는 자연스럽게 블렌딩됩니다."
             ),
         )
 
-        # 1. 다중 물리 본 슬롯 목록 (UIList)
-        layout.label(text="물리 본 슬롯 목록:", icon='ARMATURE_DATA')
+        # 1. 다중 모핑 본 슬롯 목록 (UIList)
+        layout.label(text="모핑 본 슬롯 목록:", icon='ARMATURE_DATA')
         row = layout.row()
         row.template_list(
             "XXMI_UL_bone_items", "",
@@ -71,22 +71,22 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
                 box_item.separator()
                 box_item.operator("object.xxmi_copy_bone_weights_to_all", text="가중치 설정 다른 본에 복사", icon='COPYDOWN')
         else:
-            layout.label(text="등록된 본이 없습니다. [1. 가슴 영역 선택 등록] 또는 [+]를 누르세요.", icon='INFO')
+            layout.label(text="등록된 본이 없습니다. [1. 모핑 영역 선택 등록] 또는 [+]를 누르세요.", icon='INFO')
 
         layout.separator()
 
         # 3. 메인 작업 흐름 (본 중심 3단계)
-        layout.label(text="물리 본 작업 워크플로우:", icon='MOD_ARMATURE')
+        layout.label(text="모핑 본 작업 워크플로우:", icon='MOD_ARMATURE')
         col_main = layout.column(align=True)
-        col_main.operator("object.xxmi_register_breast_selection", text="1. 가슴 영역 선택 등록", icon='MESH_DATA')
-        col_main.operator("object.xxmi_generate_breast_rig", text="2. 가슴 물리 본 생성", icon='ARMATURE_DATA')
-        col_main.operator("object.xxmi_rebake_breast_weights", text="3. 본 기준 가중치 자동 계산", icon='MOD_VERTEX_WEIGHT')
+        col_main.operator("object.xxmi_register_breast_selection", text="1. 모핑 영역 선택 등록", icon='MESH_DATA')
+        col_main.operator("object.xxmi_generate_breast_rig", text="2. 모핑 본 자동 생성", icon='ARMATURE_DATA')
+        col_main.operator("object.xxmi_rebake_breast_weights", text="3. 본 기준 가중치 자동 계산 & 블렌딩", icon='MOD_VERTEX_WEIGHT')
 
         # 4. 보조 도구 (전체 정점 다시 선택 및 전체 초기화)
         box_tools = layout.box()
         col_t = box_tools.column(align=True)
-        col_t.operator("object.xxmi_select_breast_vertices", text="가슴 정점 전체 다시 선택", icon='RESTRICT_SELECT_OFF')
-        col_t.operator("object.xxmi_clear_breast_physics", text="가슴 물리 전체 초기화", icon='TRASH')
+        col_t.operator("object.xxmi_select_breast_vertices", text="모핑 정점 전체 다시 선택", icon='RESTRICT_SELECT_OFF')
+        col_t.operator("object.xxmi_clear_breast_physics", text="모핑 본 & 물리 전체 초기화", icon='TRASH')
 
 
 classes = (
