@@ -51,6 +51,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
 
             box_item.prop(item, "name", text="부품 이름")
             box_item.prop(item, "target_bone", text="목표 본")
+            box_item.prop(item, "weight_scale", text="움직임 배율")
 
             row_acts = box_item.row(align=True)
             row_acts.operator("object.xxmi_rigid_item_assign", text="선택 정점 할당", icon='PLUS')

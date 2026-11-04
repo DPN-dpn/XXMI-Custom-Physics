@@ -138,6 +138,15 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
         default=0,
         description="이 강체 슬롯에 등록된 총 정점 개수입니다"
     )
+    weight_scale: bpy.props.FloatProperty(
+        name="가중치 배율",
+        default=1.0,
+        min=0.1,
+        max=2.0,
+        step=5,
+        precision=2,
+        description="부착된 가슴 표면 대비 강체의 흔들림 크기 배율입니다 (기본값: 1.0 = 표면과 100% 동일 밀착)"
+    )
 
 
 class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):

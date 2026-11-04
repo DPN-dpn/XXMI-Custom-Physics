@@ -116,6 +116,40 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     return w_arr
 
 
+def eval_bone_weight_at_point(pt, side, bone_info, props=None, falloff_p=1.0, peak_w=0.40):
+    """
+    3D 월드 상의 한 점(강체의 중심점 등)에서 해당 물리 본(Breast.L 또는 Breast.R)에 의한
+    해부학적 가중치를 평가하여 반환합니다.
+    """
+    if side not in bone_info:
+        return 0.0
+
+    head = Vector(bone_info[side]["head"])
+    tail = Vector(bone_info[side]["tail"])
+    bone_vec = tail - head
+    bone_len = bone_vec.length
+    fwd_u = bone_vec.normalized() if bone_len > 1e-4 else Vector((0.0, -1.0, 0.0))
+    radius = max(0.02, bone_info[side]["radius"])
+
+    v = pt - head
+    t = v.dot(fwd_u)
+    t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
+    w_depth = math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
+
+    v_perp = v - t * fwd_u
+    rho = v_perp.length
+    rho_norm = max(0.0, min(1.0, rho / radius))
+    w_radial = 0.5 * (1.0 + math.cos(math.pi * rho_norm))
+
+    if props:
+        b_params = get_bone_params(props, f"Breast.{side}")
+        peak_w = b_params["peak_weight"]
+        falloff_p = b_params["falloff_power"]
+
+    w = peak_w * math.pow(max(0.0, w_depth * w_radial), falloff_p)
+    return max(0.02, min(1.0, w)) if w > 0.0 else 0.0
+
+
 def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w=0.80, exclude_verts_by_obj=None):
     """
     여러 오브젝트에 나뉘어 있는 강체(XXMI_Role_Rigid)들을
@@ -243,28 +277,7 @@ def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_
     for i in range(n_isl):
         clusters.setdefault(_find(i), []).append(islands[i])
 
-    def _eval_side_weight(pt, side):
-        if side not in bone_info:
-            return 0.0
-        head = Vector(bone_info[side]["head"])
-        tail = Vector(bone_info[side]["tail"])
-        bone_vec = tail - head
-        bone_len = bone_vec.length
-        fwd_u = bone_vec.normalized() if bone_len > 1e-4 else Vector((0.0, -1.0, 0.0))
-        radius = max(0.02, bone_info[side]["radius"])
-
-        v = pt - head
-        t = v.dot(fwd_u)
-        t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
-        w_depth = math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
-
-        v_perp = v - t * fwd_u
-        rho = v_perp.length
-        rho_norm = max(0.0, min(1.0, rho / radius))
-        w_radial = 0.5 * (1.0 + math.cos(math.pi * rho_norm))
-
-        w = peak_w * math.pow(max(0.0, w_depth * w_radial), falloff_p)
-        return max(0.05, min(1.0, w)) if w > 0.0 else 0.0
+    _eval_side_weight = lambda pt, side: eval_bone_weight_at_point(pt, side, bone_info, falloff_p=falloff_p, peak_w=peak_w)
 
     for comp in clusters.values():
         all_pts = np.concatenate([isl["pts"] for isl in comp], axis=0)
@@ -681,7 +694,32 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         target_objs, bone_info, falloff_p, peak_w, exclude_verts_by_obj=slot_exclude
     )
 
-    # 다중 강체 슬롯 가중치 100% 동기화 적용
+    # 1. 주변 연질(Soft) 가슴 표면 정점 수집 및 KD-Tree 구성 (강체 표면 밀착 추종용)
+    soft_pts = []
+    soft_w_l = []
+    soft_w_r = []
+    for obj, odata in obj_data.items():
+        world = odata["world"]
+        rigid_mask = odata["rigid_mask"]
+        vg_l = odata["vg_l"]
+        vg_r = odata["vg_r"]
+        cur_arrs = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
+        wl_arr = cur_arrs["l"]
+        wr_arr = cur_arrs["r"]
+        for vi in range(len(world)):
+            if not rigid_mask[vi] and (wl_arr[vi] > 0.001 or wr_arr[vi] > 0.001):
+                soft_pts.append(Vector(world[vi]))
+                soft_w_l.append(float(wl_arr[vi]))
+                soft_w_r.append(float(wr_arr[vi]))
+
+    kd_soft = None
+    if soft_pts:
+        kd_soft = KDTree(len(soft_pts))
+        for k, p in enumerate(soft_pts):
+            kd_soft.insert(p, k)
+        kd_soft.balance()
+
+    # 2. 다중 강체 슬롯 가중치 계산 (표면 밀착 100% 동기화 적용 - 1.0 빨간색 과진동 방지)
     applied_slots = 0
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -695,26 +733,57 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                 r_world = world_vertex_positions(robj)
                 for vi in vis:
                     if vi < len(r_world):
-                        slot_pts.append(r_world[vi])
+                        slot_pts.append(Vector(r_world[vi]))
 
-        c_x = 0.0
-        if slot_pts:
-            c_x = float(np.mean([p[0] for p in slot_pts]))
+        c_cent = Vector(np.mean([p[:] for p in slot_pts], axis=0)) if slot_pts else Vector((0.0, 0.0, 0.0))
+        c_x = c_cent.x
+
+        surf_wl = 0.0
+        surf_wr = 0.0
+        if kd_soft and slot_pts:
+            hits = kd_soft.find_range(c_cent, 0.08)
+            if not hits:
+                hits = [kd_soft.find(c_cent)]
+            valid_hits = [h for h in hits if h is not None and h[0] is not None]
+            if valid_hits:
+                w_ls = [soft_w_l[h[1]] for h in valid_hits if soft_w_l[h[1]] > 0.001]
+                w_rs = [soft_w_r[h[1]] for h in valid_hits if soft_w_r[h[1]] > 0.001]
+                if w_ls: surf_wl = float(np.mean(w_ls))
+                if w_rs: surf_wr = float(np.mean(w_rs))
+
+        anat_wl = eval_bone_weight_at_point(c_cent, "L", bone_info, props)
+        anat_wr = eval_bone_weight_at_point(c_cent, "R", bone_info, props)
+
+        base_wl = surf_wl if surf_wl > 0.01 else anat_wl
+        base_wr = surf_wr if surf_wr > 0.01 else anat_wr
+
+        # 강체 슬롯 배율 반영 (기본값: 1.0)
+        w_scale = getattr(item, "weight_scale", 1.0)
+        base_wl = min(1.0, base_wl * w_scale)
+        base_wr = min(1.0, base_wr * w_scale)
 
         t_bone = item.target_bone
         if t_bone == 'BREAST_L':
-            slot_wl, slot_wr = 1.0, 0.0
+            slot_wl = base_wl if base_wl > 0.01 else anat_wl
+            slot_wr = 0.0
         elif t_bone == 'BREAST_R':
-            slot_wl, slot_wr = 0.0, 1.0
+            slot_wl = 0.0
+            slot_wr = base_wr if base_wr > 0.01 else anat_wr
         elif t_bone == 'CENTER':
-            slot_wl, slot_wr = 1.0, 1.0
+            center_w = max(base_wl, base_wr, anat_wl, anat_wr)
+            slot_wl = center_w * 0.5
+            slot_wr = center_w * 0.5
         else:
             if c_x > 0.012:
-                slot_wl, slot_wr = 1.0, 0.0
+                slot_wl = base_wl if base_wl > 0.01 else anat_wl
+                slot_wr = 0.0
             elif c_x < -0.012:
-                slot_wl, slot_wr = 0.0, 1.0
+                slot_wl = 0.0
+                slot_wr = base_wr if base_wr > 0.01 else anat_wr
             else:
-                slot_wl, slot_wr = 1.0, 1.0
+                center_w = max(base_wl, base_wr, anat_wl, anat_wr)
+                slot_wl = center_w * 0.5
+                slot_wr = center_w * 0.5
 
         for oname, vis in rdata.items():
             robj = bpy.data.objects.get(oname)
@@ -725,12 +794,12 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
 
             vg_rigid.add(vis, 1.0, 'REPLACE')
-            if slot_wl > 0.0:
+            if slot_wl > 0.0001:
                 vg_l.add(vis, slot_wl, 'REPLACE')
             else:
                 vg_l.remove(vis)
 
-            if slot_wr > 0.0:
+            if slot_wr > 0.0001:
                 vg_r.add(vis, slot_wr, 'REPLACE')
             else:
                 vg_r.remove(vis)
