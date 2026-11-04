@@ -1,9 +1,9 @@
-# XXMI Custom Physics (v1.0.0)
+# XXMI Custom Physics (v1.0.1)
 
 <div align="center">
 
 ![Blender](https://img.shields.io/badge/Blender-2.80%2B-orange?logo=blender&logoColor=white)
-![Release](https://img.shields.io/badge/Release-v1.0.0-brightgreen)
+![Release](https://img.shields.io/badge/Release-v1.0.1-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 ![Platform](https://img.shields.io/badge/Game-ZZMI%20%7C%20SRMI-purple)
 
