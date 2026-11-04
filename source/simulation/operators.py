@@ -338,7 +338,12 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
                 continue
             mw = obj.matrix_world
             base_coords = odata["base_coords"]
+            rigid_flags = odata["rigid_flags"]
             for vi in odata["active_indices"]:
+                # 강체는 이미 _unify_rigid_clusters_across_objects로 일체화되었으므로
+                # 소프트 버텍스와의 가중치 혼합에서 제외하여 악세서리 왜곡 및 뚫림 방지!
+                if rigid_flags[vi]:
+                    continue
                 w_co = mw @ base_coords[vi]
                 all_pts_preview.append((w_co, o_idx, vi))
 

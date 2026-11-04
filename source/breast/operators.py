@@ -316,7 +316,7 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak
         return 0
 
     n_isl = len(islands)
-    margin = 0.005
+    margin = 0.025  # 2.5cm 근접 마진 (다중 파츠 장신구 및 케이스/내용물 완전 통합)
     parent = list(range(n_isl))
 
     def _find(x):
@@ -344,14 +344,34 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak
             if _find(i) == _find(j):
                 continue
             b = islands[j]
+            # 1. AABB(바운딩 박스) + margin(2.5cm) 중첩 검사
             if np.any(a["bmin"] - margin > b["bmax"]) or np.any(a["bmax"] + margin < b["bmin"]):
                 continue
-            step = max(1, len(a["pts"]) // 64)
-            kd_b = _get_kd(j)
-            for p in a["pts"][::step].tolist():
-                if kd_b.find(Vector(p))[2] <= margin:
-                    parent[_find(i)] = _find(j)
-                    break
+
+            connected = False
+
+            # 2. 중심점 거리 검사 (중심점 간 거리가 6cm 이내면 동일 악세서리 파츠로 판별)
+            cent_dist = float(np.linalg.norm(a["cent"] - b["cent"]))
+            if cent_dist <= 0.06:
+                connected = True
+
+            # 3. 내부 포함(Containment) 검사 (케이스 안에 내용물이 수납된 경우: AABB가 중심점 포함)
+            if not connected:
+                if (np.all(a["bmin"] - 0.015 <= b["cent"]) and np.all(b["cent"] <= a["bmax"] + 0.015)) or \
+                   (np.all(b["bmin"] - 0.015 <= a["cent"]) and np.all(a["cent"] <= b["bmax"] + 0.015)):
+                    connected = True
+
+            # 4. 정점 간 최근접 거리 검사 (2.5cm 이내 접촉)
+            if not connected:
+                step = max(1, len(a["pts"]) // 40)
+                kd_b = _get_kd(j)
+                for p in a["pts"][::step].tolist():
+                    if kd_b.find(Vector(p))[2] <= margin:
+                        connected = True
+                        break
+
+            if connected:
+                parent[_find(i)] = _find(j)
 
     clusters = {}
     for i in range(n_isl):
@@ -581,7 +601,8 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
         wl = entry["w_l"]
         wr = entry["w_r"]
         rigid = entry["rigid"]
-        active_mask = (wl > 0.0001) | (wr > 0.0001) | rigid
+        # 소프트 메쉬의 분리된 엣지 및 UV 심만 동기화 대상에 포함 (강체는 고유 클러스터 가중치 보존)
+        active_mask = ((wl > 0.0001) | (wr > 0.0001)) & ~rigid
         active_idx = np.nonzero(active_mask)[0]
         world = entry["world"]
         for vi in active_idx.tolist():
@@ -591,7 +612,6 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
                 vi,
                 float(wl[vi]),
                 float(wr[vi]),
-                bool(rigid[vi]),
             ))
 
     if not active_items:
@@ -612,6 +632,10 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
         rigid = entry["rigid"]
 
         for vi in range(len(world)):
+            # 강체 정점은 고유 클러스터 가중치를 유지하므로 소프트 가중치로 덮어쓰지 않음
+            if rigid[vi]:
+                continue
+
             pt = Vector(world[vi])
             hits = kd.find_range(pt, tol)
             if not hits:
@@ -619,16 +643,14 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
 
             max_wl = float(wl[vi])
             max_wr = float(wr[vi])
-            any_rigid = bool(rigid[vi])
 
             for _, hit_idx, _ in hits:
-                _, _, _, hw_l, hw_r, h_rigid = active_items[hit_idx]
+                _, _, _, hw_l, hw_r = active_items[hit_idx]
                 if hw_l > max_wl: max_wl = hw_l
                 if hw_r > max_wr: max_wr = hw_r
-                if h_rigid: any_rigid = True
 
-            if (abs(wl[vi] - max_wl) > 1e-4) or (abs(wr[vi] - max_wr) > 1e-4) or (rigid[vi] != any_rigid):
-                updates_per_obj[o_idx][vi] = (max_wl, max_wr, any_rigid)
+            if (abs(wl[vi] - max_wl) > 1e-4) or (abs(wr[vi] - max_wr) > 1e-4):
+                updates_per_obj[o_idx][vi] = (max_wl, max_wr)
 
     for o_idx, updates in updates_per_obj.items():
         if not updates:
@@ -637,9 +659,8 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
         obj = entry["obj"]
         vg_l = entry["vg_l"] or obj.vertex_groups.new(name=VG_BREAST_L)
         vg_r = entry["vg_r"] or obj.vertex_groups.new(name=VG_BREAST_R)
-        vg_rigid = entry["vg_rigid"] or (obj.vertex_groups.new(name=VG_RIGID) if any(u[2] for u in updates.values()) else None)
 
-        for vi, (new_l, new_r, new_rigid) in updates.items():
+        for vi, (new_l, new_r) in updates.items():
             if new_l > 0.0005:
                 vg_l.add([vi], max(0.0, min(1.0, new_l)), 'REPLACE')
             elif new_l <= 0.0001:
@@ -649,12 +670,6 @@ def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
                 vg_r.add([vi], max(0.0, min(1.0, new_r)), 'REPLACE')
             elif new_r <= 0.0001:
                 vg_r.remove([vi])
-
-            if vg_rigid:
-                if new_rigid:
-                    vg_rigid.add([vi], 1.0, 'REPLACE')
-                else:
-                    vg_rigid.remove([vi])
 
             synced_count += 1
 
@@ -832,13 +847,14 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
                 iters=smooth_iters, lock_registered=lock_registered
             )
 
-    # 6. 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
-    num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w)
-
-    # 7. 동일 위치(1.2mm 이내) 공유 정점 100% 일체화 동기화 (UV 심 및 분리 엣지 틈새 벌어짐 영구 차단)
+    # 6. 동일 위치(1.2mm 이내) 공유 정점 100% 일체화 동기화 (소프트 메쉬 UV 심 및 분리 엣지 틈새 벌어짐 차단)
     num_synced = _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
 
-    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개) 가중치 갱신 완료"
+    # 7. 다중 오브젝트(Body 케이스 + Hair 내용물 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
+    #    (최종 단계에서 수행하여 모든 강체 케이스 및 내용물 정점이 100% 동일한 단일 가중치를 갖도록 완벽 보장)
+    num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w)
+
+    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 통합 강체 {num_clusters}개) 가중치 갱신 완료"
 
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
@@ -1012,9 +1028,22 @@ class XXMI_OT_mark_selection_rigid(bpy.types.Operator):
             self.report({'ERROR'}, "강체로 등록할 정점들을 에디트 모드에서 선택해주세요.")
             return {'CANCELLED'}
 
+        props = context.scene.xxmi_custom_physics_props
+        rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
+        auto_msg = ""
+        if rig and rig.type == 'ARMATURE' and total_marked > 0:
+            if was_edit:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            _, sync_res = _rebake_mesh_weights_from_rig(context, rig, props)
+            auto_msg = f" (가중치 동기화: {sync_res})"
+            if was_edit:
+                for obj in target_objs:
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+
         self.report(
             {'INFO'},
-            f"2단계 완료: 강체 정점 총 {total_marked}개 등록 완료! 이어서 [3. 가슴 물리 본 생성 (강체 제외)]를 누르세요."
+            f"2단계 완료: 강체 정점 총 {total_marked}개 등록 완료!{auto_msg} 이어서 [3. 가슴 물리 본 생성 (강체 제외)]를 누르세요."
         )
         return {'FINISHED'}
 

@@ -221,20 +221,20 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 # ── UV 심(Seam) 및 분리된 경계 정점 찢어짐 방지 (Coincident Vertex Synchronization) ──
                 # 버퍼 내에서 3D 공간 상 동일 위치(0.5mm 이내)를 공유하는 분리 정점들은
                 # 셰이더 상에서 100% 동일하게 움직이도록 가중치를 동기화합니다 (버텍스 개수 변경 없음).
-                active_mask = (wl_out > 0.0001) | (wr_out > 0.0001) | (rig_out > 0.5)
+                active_mask = ((wl_out > 0.0001) | (wr_out > 0.0001)) & (rig_out <= 0.5)
                 active_indices = np.nonzero(active_mask)[0]
                 if len(active_indices) > 0:
                     for ai in active_indices.tolist():
                         p = buf_positions[ai]
                         hits = kd_buf.find_range(p, 0.0005)
                         if len(hits) > 1:
-                            max_l = max(wl_out[h[1]] for h in hits)
-                            max_r = max(wr_out[h[1]] for h in hits)
-                            max_rig = max(rig_out[h[1]] for h in hits)
-                            for _, hi, _ in hits:
-                                wl_out[hi] = max_l
-                                wr_out[hi] = max_r
-                                rig_out[hi] = max_rig
+                            soft_hits = [h[1] for h in hits if rig_out[h[1]] <= 0.5]
+                            if len(soft_hits) > 1:
+                                max_l = max(wl_out[hi] for hi in soft_hits)
+                                max_r = max(wr_out[hi] for hi in soft_hits)
+                                for hi in soft_hits:
+                                    wl_out[hi] = max_l
+                                    wr_out[hi] = max_r
 
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
