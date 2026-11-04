@@ -117,19 +117,20 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
 
     pts_rel = world_pts - head_arr
 
-    # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 Sine 감쇠 (Head=0 -> Tail=1)
-    # Sine 곡선은 앞쪽 돔 영역의 볼륨감을 풍성하게 유지하면서 흉벽 부착부로 갈수록 매끄럽게 0에 수렴합니다.
+    # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 매끄러운 돔 감쇠 (Head=0 -> Tail=1)
+    # 가슴 돔 전체의 풍성한 볼륨감을 살리기 위해 sqrt 변환 후 Sine 곡선을 적용합니다.
     t_proj = pts_rel @ bone_u
     t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
-    w_depth = np.sin(t_norm * (np.pi * 0.5))
+    w_depth = np.sin(np.sqrt(t_norm) * (np.pi * 0.5))
 
-    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 Quadratic Cosine 감쇠 (Axis=1 -> Edge=0)
-    # rho_norm^2 곡선은 가슴 앞쪽 표면 전체를 탄탄하게 받쳐주어 꼭지점에만 웨이트가 좁게 뭉치는 현상을 방지합니다.
+    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 감쇠 (Axis=1 -> Edge=0)
+    # 가슴 앞면 전체가 탄탄하게 형태를 유지하도록 고차 방사형 곡선(rho_norm^3.5)을 적용합니다.
     v_perp = pts_rel - np.outer(t_proj, bone_u)
     rho = np.linalg.norm(v_perp, axis=1)
-    radius = max(1e-4, float(eff_radius))
+    max_rho_cand = float(np.max(rho)) if len(rho) > 0 else 0.0
+    radius = max(1e-4, float(eff_radius), max_rho_cand)
     rho_norm = np.clip(rho / radius, 0.0, 1.0)
-    w_radial = np.cos((rho_norm ** 2) * (np.pi * 0.5))
+    w_radial = np.cos((rho_norm ** 3.5) * (np.pi * 0.5))
 
     # 3. 해부학적 합성 가중치 계산 (falloff_p 반영: 1.0 기본, 낮으면 넓게 퍼짐, 높으면 꼭지점 집중)
     w_comb = np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
@@ -222,6 +223,17 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             is_left = world[sel_indices, 0] >= 0.0
             left_idx = sel_indices[is_left].tolist()
             right_idx = sel_indices[~is_left].tolist()
+
+            # 단일 가슴 선택 시 중앙골(Cleavage) 경계선 살짝 넘친 파편 정점이 반대편 가슴으로 분할 등록되는 것 방지
+            n_l = len(left_idx)
+            n_r = len(right_idx)
+            if n_l > 0 and n_r > 0:
+                if n_l < 25 and n_l < 0.12 * n_r:
+                    right_idx = sel_indices.tolist()
+                    left_idx = []
+                elif n_r < 25 and n_r < 0.12 * n_l:
+                    left_idx = sel_indices.tolist()
+                    right_idx = []
 
             if left_idx:
                 vg_l.add(left_idx, 0.05, 'REPLACE')
@@ -358,12 +370,12 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         v = pt - head
         t = v.dot(fwd_u)
         t_norm = max(0.0, min(1.0, t / max(1e-4, bone_len)))
-        w_depth = math.sin(t_norm * (math.pi * 0.5))
+        w_depth = math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
 
         v_perp = v - t * fwd_u
         rho = v_perp.length
         rho_norm = max(0.0, min(1.0, rho / radius))
-        w_radial = math.cos((rho_norm ** 2) * (math.pi * 0.5))
+        w_radial = math.cos((rho_norm ** 3.5) * (math.pi * 0.5))
 
         w = math.pow(max(0.0, w_depth * w_radial), falloff_p)
         return max(0.05, min(1.0, w)) if w > 0.0 else 0.0
@@ -985,35 +997,81 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
             return {'CANCELLED'}
 
         anchor_info = {}
-        for side, pts, bname in (("L", final_left, "Breast.L"), ("R", final_right, "Breast.R")):
-            if not pts:
-                continue
-            centroid = sum(pts, Vector((0.0, 0.0, 0.0))) / len(pts)
-            # 블렌더 좌표계에서 캐릭터 전방(가슴 돌출 방향)은 -Y 축입니다 (Front View는 +Y를 바라봄)
-            tip_pos = min(pts, key=lambda p: p.y)
-            fwd_dir = (tip_pos - centroid)
-            if fwd_dir.length < 0.01:
-                fwd_dir = Vector((0.0, -0.06, 0.0))
-            else:
-                fwd_dir = fwd_dir.normalized() * max(0.04, (centroid - tip_pos).length)
+        total_registered = len(final_left) + len(final_right)
 
-            head_pos = centroid - fwd_dir * 0.8
-            tail_pos = tip_pos
+        for side, pts, bname in (("L", final_left, "Breast.L"), ("R", final_right, "Breast.R")):
+            n_pts = len(pts)
+            # 최소 정점 수 미달이거나(30개 미만), 반대편 대비 10% 미만인 파편 정점은 단독 본 생성 대상에서 제외
+            if n_pts < 30 or (total_registered > 100 and n_pts < total_registered * 0.10):
+                continue
+
+            pts_arr = np.array([p[:] for p in pts], dtype=np.float64)
+
+            # 1. 2D 전면 중심점 (X, Z) 계산
+            # 어깨끈이나 겨드랑이 등 외곽 돌출 정점에 왜곡되지 않도록 사분위수 절사 평균(Interquartile Mean) 사용
+            xs_sorted = np.sort(pts_arr[:, 0])
+            zs_sorted = np.sort(pts_arr[:, 2])
+            q1, q3 = int(n_pts * 0.20), int(n_pts * 0.80)
+            x_center = float(np.mean(xs_sorted[q1:q3])) if q3 > q1 else float(np.mean(xs_sorted))
+            z_center = float(np.mean(zs_sorted[q1:q3])) if q3 > q1 else float(np.mean(zs_sorted))
+
+            # 2. 전방 깊이(Depth) 및 흉벽(Chest Wall) 베이스 위치 산출
+            # 블렌더 좌표계에서 캐릭터 전방은 -Y 축입니다 (가장 작은 Y가 전방 돌출 꼭짓점)
+            ys_sorted = np.sort(pts_arr[:, 1])
+            y_min = float(ys_sorted[0])
+            y_base = float(ys_sorted[int(n_pts * 0.85)])  # 흉벽 부착부 (상위 85%)
+            depth = max(0.04, y_base - y_min)
+
+            # 가슴 본 베이스(Head): 흉벽 중심
+            head_pos = Vector((x_center, y_base, z_center))
+
+            # 3. 해부학적 자연 전방 벡터 (기본: -Y 전방 중심, 좌/우측 외측 및 하향 미세 편향)
+            outward_sign = 1.0 if side == 'L' else -1.0
+            dx_natural = outward_sign * depth * 0.10
+            dz_natural = -depth * 0.05
+
+            # 앞쪽 25% 돌출 정점들의 중심을 통해 실제 유두 돌출 축 감지
+            front_mask = pts_arr[:, 1] <= (y_min + depth * 0.25)
+            front_pts = pts_arr[front_mask]
+            if len(front_pts) >= 6:
+                fx = float(np.mean(front_pts[:, 0]))
+                fz = float(np.mean(front_pts[:, 2]))
+                dx_apex = fx - x_center
+                dz_apex = fz - z_center
+                # 엉뚱한 대각선 방향으로 휘지 않도록 최대 20도 이내로 편차 클램프
+                max_dev = depth * 0.35
+                dx_apex = max(-max_dev, min(max_dev, dx_apex))
+                dz_apex = max(-max_dev, min(max_dev, dz_apex))
+                dx = 0.6 * dx_apex + 0.4 * dx_natural
+                dz = 0.6 * dz_apex + 0.4 * dz_natural
+            else:
+                dx = dx_natural
+                dz = dz_natural
+
+            tail_pos = Vector((head_pos.x + dx, head_pos.y - depth, head_pos.z + dz))
             bone_vec_v = tail_pos - head_pos
             bone_len_v = bone_vec_v.length
             bone_u_v = bone_vec_v.normalized() if bone_len_v > 1e-4 else Vector((0.0, -1.0, 0.0))
-            max_rho = max(((p - head_pos) - ((p - head_pos).dot(bone_u_v)) * bone_u_v).length for p in pts)
-            radius = max(0.03, max_rho)
 
+            # 가슴 폭을 온전히 커버할 수 있는 반경 산출
+            x_span = float(xs_sorted[-1] - xs_sorted[0])
+            z_span = float(zs_sorted[-1] - zs_sorted[0])
+            radius = max(0.03, x_span * 0.5, z_span * 0.5)
+
+            centroid = Vector((x_center, (y_base + y_min) * 0.5, z_center))
             anchor_info[side] = {
                 "bname": bname,
                 "centroid": centroid,
-                "tip": tip_pos,
+                "tip": tail_pos,
                 "head": head_pos,
                 "tail": tail_pos,
                 "fwd_unit": bone_u_v,
                 "radius": radius,
             }
+
+        if not anchor_info:
+            self.report({'ERROR'}, "충분한 수의 가슴 정점을 찾을 수 없습니다. [1. 선택 영역을 가슴으로 등록]을 다시 진행해주세요.")
+            return {'CANCELLED'}
 
         ref_obj = target_objs[0]
         rig = _get_or_create_breast_rig(context, props, ref_obj)

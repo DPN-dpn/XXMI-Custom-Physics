@@ -47,3 +47,4 @@
 ## 📦 설치 안내
 * 첨부된 `XXMI-Custom-Physics.zip` 파일을 다운로드한 후, 블렌더의 `Preferences > Add-ons > Install` 메뉴에서 설치 및 활성화하여 사용할 수 있습니다.
 * 호환성: Blender 2.80 ~ Blender 4.x 완벽 지원.
+
