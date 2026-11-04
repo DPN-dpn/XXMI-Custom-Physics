@@ -93,6 +93,8 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
             # 1) 가중치 세부 설정
             col_adv.label(text="가중치 세부 설정:", icon='MOD_VERTEX_WEIGHT')
+            col_adv.prop(props, "peak_weight")
+            col_adv.prop(props, "smooth_iterations")
             col_adv.prop(props, "falloff_power")
             col_adv.prop(props, "lock_registered_verts")
 

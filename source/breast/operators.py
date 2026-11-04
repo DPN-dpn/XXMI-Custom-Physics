@@ -86,15 +86,13 @@ def _find_connected_islands(vert_indices, edges_list):
     return islands
 
 
-def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd, eff_radius, falloff_p=1.0):
+def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd, eff_radius, falloff_p=1.0, peak_w=0.80):
     """
-    해부학적 앵커 본 세그먼트[Head -> Tail] 기반 3D 이중 감쇠(전방 깊이 Smoothstep + 방사형 Cosine):
-    1. 전방 깊이 감쇠(Depth Falloff): 흉벽 부착부(Head)에서 0.0 -> 가슴 끝 유두(Tail)에서 1.0으로 매끄럽게 증가 (Hermite Curve)
-       -> 흉벽에 가까운 정점의 가중치가 ~0에 수렴하여 가슴이 움직일 때 몸통/피부와 벌어지는 틈(Tearing/Gap) 완벽 방지
-    2. 방사형 감쇠(Radial Falloff): 본 중심축에서 외곽 둘레(Perimeter)로 갈수록 1.0 -> 0.0으로 완만하게 감소 (Cosine Curve)
-       -> 선택 테두리 부위가 주변 메쉬와 단차 없이 부드럽게 이어짐
-    3. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 보장
-    4. 선택 보존: 최소 가중치 0.005를 보장하여 [적용된 가슴 정점 재선택] 시 선택 영역이 100% 온전히 유지됨
+    해부학적 앵커 본 세그먼트[Head -> Tail] 기반 3D 이중 감쇠(전방 깊이 Smoothstep + 방사형 Hann Cosine):
+    1. 전방 깊이 감쇠: 흉벽(0.0)에서 꼭짓점(1.0)으로 매끄럽게 증가
+    2. 방사형 감쇠: 중심축(0.0)에서 외곽 둘레(1.0)로 매끄럽게 감소하는 Raised Cosine(Hann) 곡선 적용
+       -> 경계선(rho_norm=1.0)에 도달할 때 미분계수가 0이 되어, 옷감 경계가 꺾이거나 접히지 않고 수평으로 완만하게 착지
+    3. 최대 가중치(peak_w): 일체형 의상에서 경계선이 과도하게 꺾이는 것을 방지하기 위해 최대치를 부드럽게 완화
     """
     if len(world_pts) == 0:
         return np.array([], dtype=np.float64)
@@ -118,22 +116,21 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
     pts_rel = world_pts - head_arr
 
     # 1. 전방 깊이 축(Forward Axis) 투영 거리 및 매끄러운 돔 감쇠 (Head=0 -> Tail=1)
-    # 가슴 돔 전체의 풍성한 볼륨감을 살리기 위해 sqrt 변환 후 Sine 곡선을 적용합니다.
     t_proj = pts_rel @ bone_u
     t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
     w_depth = np.sin(np.sqrt(t_norm) * (np.pi * 0.5))
 
-    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 감쇠 (Axis=1 -> Edge=0)
-    # 가슴 앞면 전체가 탄탄하게 형태를 유지하도록 고차 방사형 곡선(rho_norm^3.5)을 적용합니다.
+    # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 C1 연속 Hann Cosine 감쇠 (Axis=1 -> Edge=0)
     v_perp = pts_rel - np.outer(t_proj, bone_u)
     rho = np.linalg.norm(v_perp, axis=1)
     max_rho_cand = float(np.max(rho)) if len(rho) > 0 else 0.0
     radius = max(1e-4, float(eff_radius), max_rho_cand)
     rho_norm = np.clip(rho / radius, 0.0, 1.0)
-    w_radial = np.cos((rho_norm ** 3.5) * (np.pi * 0.5))
+    # 경계선(rho_norm=1.0)에서 미분값이 0이 되는 Hann 창 함수로 바디슈트 접힘 현상 방지
+    w_radial = 0.5 * (1.0 + np.cos(np.pi * rho_norm))
 
-    # 3. 해부학적 합성 가중치 계산 (falloff_p 반영: 1.0 기본, 낮으면 넓게 퍼짐, 높으면 꼭지점 집중)
-    w_comb = np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
+    # 3. 해부학적 합성 가중치 계산 (peak_w로 최대 가중치 조절, falloff_p로 퍼짐 조절)
+    w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
     w_arr = np.clip(w_comb, 0.005, 1.0)
 
     # 4. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
@@ -264,7 +261,7 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
+def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w=0.80):
     """
     여러 오브젝트에 나뉘어 있는 강체(XXMI_Role_Rigid)들을
     3D 월드 공간에서 서로 맞닿아 있는(5mm 이내) 덩어리끼리 하나의 '통합 강체 클러스터'로 묶어
@@ -375,9 +372,9 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p):
         v_perp = v - t * fwd_u
         rho = v_perp.length
         rho_norm = max(0.0, min(1.0, rho / radius))
-        w_radial = math.cos((rho_norm ** 3.5) * (math.pi * 0.5))
+        w_radial = 0.5 * (1.0 + math.cos(math.pi * rho_norm))
 
-        w = math.pow(max(0.0, w_depth * w_radial), falloff_p)
+        w = peak_w * math.pow(max(0.0, w_depth * w_radial), falloff_p)
         return max(0.05, min(1.0, w)) if w > 0.0 else 0.0
 
     for comp in clusters.values():
@@ -477,6 +474,55 @@ def _get_rig_bone_info(rig):
     return bone_info
 
 
+def _smooth_mesh_weights(obj, vg_l, vg_r, rigid_mask, iters=2, alpha=0.45, lock_registered=True):
+    """
+    메쉬 엣지 위상 구조(Topological Edges)를 기반으로 가중치를 라플라시안 스무딩하여,
+    전신 바디슈트 등 일체형 의상에서 경계선이 각지거나 꺾이는 현상(Crease)을 완벽히 방지합니다.
+    """
+    if iters <= 0 or not obj or obj.type != 'MESH':
+        return
+    mesh = obj.data
+    e0, e1 = mesh_edge_arrays(mesh)
+    if len(e0) == 0:
+        return
+    n_verts = len(mesh.vertices)
+    group_map = {}
+    if vg_l: group_map[vg_l.index] = "l"
+    if vg_r: group_map[vg_r.index] = "r"
+    if not group_map:
+        return
+    arrs = read_vertex_group_arrays(obj, group_map)
+
+    for side_key, vg in (("l", vg_l), ("r", vg_r)):
+        if side_key not in arrs or not vg:
+            continue
+        w = arrs[side_key].astype(np.float32)
+        active_initial = (w > 0.0001) & ~rigid_mask
+        if not np.any(active_initial):
+            continue
+
+        for _ in range(iters):
+            n_sum = np.zeros(n_verts, dtype=np.float32)
+            n_cnt = np.zeros(n_verts, dtype=np.int32)
+            np.add.at(n_sum, e0, w[e1])
+            np.add.at(n_sum, e1, w[e0])
+            np.add.at(n_cnt, e0, 1)
+            np.add.at(n_cnt, e1, 1)
+            has_n = n_cnt > 0
+            avg_w = np.where(has_n, n_sum / np.maximum(1, n_cnt), w)
+            w = np.where(rigid_mask, w, (1.0 - alpha) * w + alpha * avg_w)
+            if lock_registered:
+                w[~active_initial & ~rigid_mask] = 0.0
+
+        changed_idx = np.nonzero((w > 0.0001) & ~rigid_mask)[0]
+        for vi in changed_idx.tolist():
+            wi = float(w[vi])
+            if wi > 0.0005:
+                vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
+            else:
+                vg.remove([vi])
+
+
 def _rebake_mesh_weights_from_rig(context, rig, props=None):
     """
     XXMI_Breast_Rig 내의 본 위치(Breast.L / Breast.R)를 기준으로
@@ -510,6 +556,8 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
         return 0, "씬 내에서 대상 메쉬 오브젝트를 찾을 수 없습니다."
 
     falloff_p = props.falloff_power
+    peak_w = getattr(props, "peak_weight", 0.80)
+    smooth_iters = getattr(props, "smooth_iterations", 2)
     lock_registered = getattr(props, "lock_registered_verts", True)
     updated_obj_count = 0
     total_recomputed_verts = 0
@@ -586,7 +634,7 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
         cand_pts = np.array([c[3] for c in side_cand], dtype=np.float64)
         tail = np.array(bone_info[side]["tail"], dtype=np.float64)
         baked_w = _calculate_anatomical_weights_with_anti_clipping(
-            cand_pts, head, tail, eff_radius, falloff_p
+            cand_pts, head, tail, eff_radius, falloff_p, peak_w
         )
 
         final_weights = baked_w.copy()
@@ -638,8 +686,16 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
         total_recomputed_verts += int(np.count_nonzero(odata["rigid_mask"]))
         updated_obj_count += 1
 
-    # 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
-    num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p)
+    # 5. 메쉬 위상 구조 기반 경계 스무딩 (전신 바디슈트/일체형 의상 경계 접힘 방지)
+    if smooth_iters > 0:
+        for obj, odata in obj_data.items():
+            _smooth_mesh_weights(
+                obj, odata["vg_l"], odata["vg_r"], odata["rigid_mask"],
+                iters=smooth_iters, lock_registered=lock_registered
+            )
+
+    # 6. 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
+    num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w)
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 통합 강체 {num_clusters}개) 가중치 갱신 완료"
 

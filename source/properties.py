@@ -18,6 +18,24 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     # ── 2. 가슴 가중치 감쇠 옵션 ──
+    peak_weight: bpy.props.FloatProperty(
+        name="최대 가중치 (끝단 강도)",
+        description="가슴 꼭짓점의 최대 가중치입니다. 일체형 의상이나 전신 슈트는 0.70~0.85로 낮추면 경계선이 꺾이지 않고 옷감이 매끄럽게 늘어납니다 (기본값: 0.80)",
+        default=0.80,
+        min=0.3,
+        max=1.0,
+        step=5,
+        precision=2
+    )
+
+    smooth_iterations: bpy.props.IntProperty(
+        name="경계 부드러움 (스무딩)",
+        description="옷이 가슴 전체를 덮고 있을 때 경계선이 각지거나 접히지 않도록 메쉬 표면을 따라 가중치를 부드럽게 블렌딩합니다 (0이면 스무딩 끔, 기본값: 2)",
+        default=2,
+        min=0,
+        max=8,
+    )
+
     falloff_power: bpy.props.FloatProperty(
         name="가중치 퍼짐 정도",
         description="가슴 가중치가 퍼지는 범위입니다. 기본값 1.0이며, 낮추면 전체로 부드럽게 퍼지고, 높이면 끝쪽으로 집중됩니다",
