@@ -200,7 +200,7 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
             extra_indices = []
             for si in sel_indices.tolist():
-                hits = kd_local.find_range(Vector(world[si]), 0.0005)
+                hits = kd_local.find_range(Vector(world[si]), 0.0012)
                 for _, hi, _ in hits:
                     if not sel_mask[hi]:
                         sel_mask[hi] = True
@@ -238,6 +238,9 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
             if right_idx:
                 vg_r.add(right_idx, 0.05, 'REPLACE')
                 total_r += len(right_idx)
+
+        # 다중 메쉬 간 UV 심/경계면 정점 동기화
+        _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
 
         total_sel = total_l + total_r
         if total_sel < 6:
@@ -523,6 +526,141 @@ def _smooth_mesh_weights(obj, vg_l, vg_r, rigid_mask, iters=2, alpha=0.45, lock_
                 vg.remove([vi])
 
 
+def _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
+    """
+    모든 대상 오브젝트에 걸쳐 3D 공간 상에서 동일한 위치(기본 1.2mm 이내)를 공유하는
+    모든 정점(UV 심, 하드 엣지 분리점, 분리된 메쉬 경계점 등)의 가중치를 100% 동일하게 동기화합니다.
+    이를 통해 프리뷰 및 인게임 모핑 시 분리된 엣지 사이의 틈(Gap/Tearing)이 벌어지는 현상을 영구 차단합니다.
+    """
+    if not target_objs:
+        return 0
+
+    obj_entries = []
+
+    for obj in target_objs:
+        if obj.type != 'MESH':
+            continue
+        mesh = obj.data
+        n_verts = len(mesh.vertices)
+        if n_verts == 0:
+            continue
+
+        vg_l = obj.vertex_groups.get(VG_BREAST_L)
+        vg_r = obj.vertex_groups.get(VG_BREAST_R)
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
+
+        group_map = {}
+        if vg_l: group_map[vg_l.index] = "l"
+        if vg_r: group_map[vg_r.index] = "r"
+        if vg_rigid: group_map[vg_rigid.index] = "rigid"
+
+        arrs = read_vertex_group_arrays(obj, group_map)
+        world = world_vertex_positions(obj)
+
+        zeros = np.zeros(n_verts, dtype=np.float32)
+        wl = arrs.get("l", zeros)
+        wr = arrs.get("r", zeros)
+        rigid = (arrs.get("rigid", zeros) > 0.5)
+
+        obj_entries.append({
+            "obj": obj,
+            "vg_l": vg_l,
+            "vg_r": vg_r,
+            "vg_rigid": vg_rigid,
+            "world": world,
+            "w_l": wl.copy(),
+            "w_r": wr.copy(),
+            "rigid": rigid.copy(),
+        })
+
+    if not obj_entries:
+        return 0
+
+    active_items = []
+    for o_idx, entry in enumerate(obj_entries):
+        wl = entry["w_l"]
+        wr = entry["w_r"]
+        rigid = entry["rigid"]
+        active_mask = (wl > 0.0001) | (wr > 0.0001) | rigid
+        active_idx = np.nonzero(active_mask)[0]
+        world = entry["world"]
+        for vi in active_idx.tolist():
+            active_items.append((
+                Vector(world[vi]),
+                o_idx,
+                vi,
+                float(wl[vi]),
+                float(wr[vi]),
+                bool(rigid[vi]),
+            ))
+
+    if not active_items:
+        return 0
+
+    kd = KDTree(len(active_items))
+    for k, item in enumerate(active_items):
+        kd.insert(item[0], k)
+    kd.balance()
+
+    updates_per_obj = {o_idx: {} for o_idx in range(len(obj_entries))}
+    synced_count = 0
+
+    for o_idx, entry in enumerate(obj_entries):
+        world = entry["world"]
+        wl = entry["w_l"]
+        wr = entry["w_r"]
+        rigid = entry["rigid"]
+
+        for vi in range(len(world)):
+            pt = Vector(world[vi])
+            hits = kd.find_range(pt, tol)
+            if not hits:
+                continue
+
+            max_wl = float(wl[vi])
+            max_wr = float(wr[vi])
+            any_rigid = bool(rigid[vi])
+
+            for _, hit_idx, _ in hits:
+                _, _, _, hw_l, hw_r, h_rigid = active_items[hit_idx]
+                if hw_l > max_wl: max_wl = hw_l
+                if hw_r > max_wr: max_wr = hw_r
+                if h_rigid: any_rigid = True
+
+            if (abs(wl[vi] - max_wl) > 1e-4) or (abs(wr[vi] - max_wr) > 1e-4) or (rigid[vi] != any_rigid):
+                updates_per_obj[o_idx][vi] = (max_wl, max_wr, any_rigid)
+
+    for o_idx, updates in updates_per_obj.items():
+        if not updates:
+            continue
+        entry = obj_entries[o_idx]
+        obj = entry["obj"]
+        vg_l = entry["vg_l"] or obj.vertex_groups.new(name=VG_BREAST_L)
+        vg_r = entry["vg_r"] or obj.vertex_groups.new(name=VG_BREAST_R)
+        vg_rigid = entry["vg_rigid"] or (obj.vertex_groups.new(name=VG_RIGID) if any(u[2] for u in updates.values()) else None)
+
+        for vi, (new_l, new_r, new_rigid) in updates.items():
+            if new_l > 0.0005:
+                vg_l.add([vi], max(0.0, min(1.0, new_l)), 'REPLACE')
+            elif new_l <= 0.0001:
+                vg_l.remove([vi])
+
+            if new_r > 0.0005:
+                vg_r.add([vi], max(0.0, min(1.0, new_r)), 'REPLACE')
+            elif new_r <= 0.0001:
+                vg_r.remove([vi])
+
+            if vg_rigid:
+                if new_rigid:
+                    vg_rigid.add([vi], 1.0, 'REPLACE')
+                else:
+                    vg_rigid.remove([vi])
+
+            synced_count += 1
+
+    return synced_count
+
+
 def _rebake_mesh_weights_from_rig(context, rig, props=None):
     """
     XXMI_Breast_Rig 내의 본 위치(Breast.L / Breast.R)를 기준으로
@@ -697,7 +835,10 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
     # 6. 다중 오브젝트(Body 케이스 + Hair 악세서리 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
     num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w)
 
-    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 통합 강체 {num_clusters}개) 가중치 갱신 완료"
+    # 7. 동일 위치(1.2mm 이내) 공유 정점 100% 일체화 동기화 (UV 심 및 분리 엣지 틈새 벌어짐 영구 차단)
+    num_synced = _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
+
+    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개) 가중치 갱신 완료"
 
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):

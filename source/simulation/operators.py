@@ -330,6 +330,33 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             self.report({'ERROR'}, "가슴 가중치가 계산되지 않았습니다. 먼저 [4. 본 기준 가중치(웨이트) 자동 계산]을 진행해주세요.")
             return {'CANCELLED'}
 
+        # 다중 메쉬 및 UV 심 경계면 동일 위치(1.2mm 이내) 정점 가중치 동기화 (프리뷰 시 틈 벌어짐 영구 차단)
+        all_pts_preview = []
+        for o_idx, odata in enumerate(objects_data):
+            obj = bpy.data.objects.get(odata["obj_name"])
+            if not obj:
+                continue
+            mw = obj.matrix_world
+            base_coords = odata["base_coords"]
+            for vi in odata["active_indices"]:
+                w_co = mw @ base_coords[vi]
+                all_pts_preview.append((w_co, o_idx, vi))
+
+        if len(all_pts_preview) > 1:
+            from mathutils.kdtree import KDTree
+            kd_prev = KDTree(len(all_pts_preview))
+            for k, (w_co, _, _) in enumerate(all_pts_preview):
+                kd_prev.insert(w_co, k)
+            kd_prev.balance()
+
+            for w_co, o_idx, vi in all_pts_preview:
+                hits = kd_prev.find_range(w_co, 0.0012)
+                if len(hits) > 1:
+                    max_wl = max(objects_data[all_pts_preview[h_k][1]]["weights_l"][all_pts_preview[h_k][2]] for _, h_k, _ in hits)
+                    max_wr = max(objects_data[all_pts_preview[h_k][1]]["weights_r"][all_pts_preview[h_k][2]] for _, h_k, _ in hits)
+                    objects_data[o_idx]["weights_l"][vi] = max_wl
+                    objects_data[o_idx]["weights_r"][vi] = max_wr
+
         # 인게임 NORM_FACTOR와 100% 동일하게 전체 대상 메쉬의 최대 가중치로 정규화 배율 산출
         global_peak_w = 0.0
         for odata in objects_data:
