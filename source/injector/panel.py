@@ -8,11 +8,11 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "XXMI Physics"
-    bl_order = 2
+    bl_order = 3
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="3. 모드에 물리 주입", icon='SHADERFX')
+        layout.label(text="4. 모드에 물리 주입", icon='SHADERFX')
 
     def draw(self, context):
         layout = self.layout
@@ -21,7 +21,7 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[3단계: 모드에 물리 주입 & 롤백]\n\n"
+                "[4단계: 모드에 물리 주입 & 롤백]\n\n"
                 "1. [대상 게임]을 선택합니다.\n"
                 "2. 물리를 적용할 [모드 폴더]를 지정합니다.\n"
                 "3. [모드에 물리 주입]을 누르면 인게임에서 동작하는 물리 효과가 모드에 적용됩니다.\n\n"

@@ -1,6 +1,7 @@
 from . import utils
 from . import properties
-from . import breast
+from . import bone
+from . import rigid
 from . import simulation
 from . import injector
 from . import updater
@@ -8,7 +9,8 @@ from . import updater
 modules = [
     utils,
     properties,
-    breast,
+    bone,
+    rigid,
     simulation,
     injector,
     updater,

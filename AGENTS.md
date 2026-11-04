@@ -28,19 +28,23 @@ XXMI-Custom-Physics/
     ├── __init__.py             # 하위 모듈/패널 통합 레지스트리
     ├── utils.py                # 공통 상수, 좌표계/기하학 유틸리티, 공통 도움말 툴팁 오퍼레이터
     ├── properties.py           # UI 입력 및 상태 저장용 PropertyGroup (XXMI_PG_custom_physics_props)
-    ├── breast/                 # [패널 1] 1. 가슴 선택 & 앵커 생성 (bl_order = 0)
+    ├── bone/                   # [패널 1] 1. 물리 본 & 웨이트 설정 (bl_order = 0)
     │   ├── __init__.py
-    │   ├── operators.py        # 에디트 모드 선택 버텍스 분할(L/R), 연결된 메쉬 섬(Island) 기반 장신구(강체) 자동 보호, 앵커 본 배치 및 방사형 가중치 베이크
-    │   └── panel.py            # XXMI_PHYS_PT_breast 패널 UI
-    ├── simulation/             # [패널 2] 2. 가슴 물리 파라미터 & 프리뷰 (bl_order = 1)
+    │   ├── operators.py        # 본 종류별 생성, 해부학적 물리 본 배치, Envelope 기반 가중치 베이크 및 동기화
+    │   └── panel.py            # XXMI_PHYS_PT_bone 패널 UI
+    ├── rigid/                  # [패널 2] 2. 강체(액세서리) 설정 (bl_order = 1)
+    │   ├── __init__.py
+    │   ├── operators.py        # 다중 강체 슬롯 UIList 관리, 다중 메쉬 정점 바인딩 및 목표 본(Target Bone) 지정
+    │   └── panel.py            # XXMI_PHYS_PT_rigid 패널 UI
+    ├── simulation/             # [패널 3] 3. 물리 파라미터 & 프리뷰 (bl_order = 2)
     │   ├── __init__.py
     │   ├── operators.py        # 뷰포트 실시간 바운스/관성/호흡 물리 프리뷰 (Shape Key 및 프레임 핸들러)
     │   └── panel.py            # XXMI_PHYS_PT_simulation 패널 UI
-    ├── injector/               # [패널 3] 3. 모드에 바스트모핑 주입 (bl_order = 2)
+    ├── injector/               # [패널 4] 4. 모드에 물리 주입 (bl_order = 3)
     │   ├── __init__.py
     │   ├── operators.py        # .ini 및 Position.buf KD-Tree 매칭, CustomPhysicsBones/Map.buf 및 2-Pass HLSL 생성, .ini 주입/롤백
     │   └── panel.py            # XXMI_PHYS_PT_injector 패널 UI
-    └── updater/                # [패널 4] 업데이트 (bl_order = 9, DEFAULT_CLOSED)
+    └── updater/                # [패널 5] 업데이트 (bl_order = 9, DEFAULT_CLOSED)
         ├── __init__.py
         ├── operators.py        # GitHub 최신 릴리스 확인, 자동 다운로드/설치, 저장소 열기 오퍼레이터
         └── panel.py            # XXMI_PHYS_PT_updater 패널 UI

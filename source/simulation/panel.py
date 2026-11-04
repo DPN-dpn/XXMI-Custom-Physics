@@ -8,11 +8,11 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "XXMI Physics"
-    bl_order = 1
+    bl_order = 2
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="2. 물리 설정 & 프리뷰", icon='PHYSICS')
+        layout.label(text="3. 물리 파라미터 & 프리뷰", icon='PHYSICS')
 
     def draw(self, context):
         layout = self.layout
@@ -21,9 +21,9 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[2단계: 물리 움직임 설정 & 프리뷰]\n\n"
-                "• 캐릭터가 움직일 때 가슴이 반응하는 흔들림 크기, 튀는 속도, 멈추는 탄성을 조절합니다.\n"
-                "• [뷰포트 실시간 물리 프리뷰 시작]을 누르면 블렌더 화면에서 가슴이 통통 튀는 움직임을 실시간으로 확인할 수 있습니다.\n"
+                "[3단계: 물리 파라미터 & 프리뷰]\n\n"
+                "• 캐릭터가 움직일 때 반응하는 흔들림 크기, 튀는 속도, 멈추는 탄성을 조절합니다.\n"
+                "• [뷰포트 실시간 물리 프리뷰 시작]을 누르면 블렌더 화면에서 통통 튀는 움직임을 실시간으로 확인할 수 있습니다.\n"
                 "• 프리뷰를 켜둔 상태로 슬라이더를 움직여 마음에 드는 움직임으로 맞춰보세요."
             ),
         )

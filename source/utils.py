@@ -33,6 +33,18 @@ def ensure_object_visible(context, obj):
         obj.hide_viewport = False
 
 
+def get_target_mesh_objects(context):
+    """현재 선택되었거나 에디트 모드에 진입해 있는 모든 메쉬 오브젝트 목록을 반환합니다."""
+    objs = []
+    if context.mode == 'EDIT_MESH':
+        objs = [o for o in context.objects_in_mode if o.type == 'MESH']
+    if not objs:
+        objs = [o for o in context.selected_objects if o.type == 'MESH']
+    if not objs and context.active_object and context.active_object.type == 'MESH':
+        objs = [context.active_object]
+    return objs
+
+
 def read_vertex_group_arrays(obj, group_map):
     """
     {그룹 인덱스: 키} 매핑에 해당하는 버텍스 그룹 가중치를 한 번의 순회로 numpy 배열({키: float32[n]})로 읽어옵니다.
