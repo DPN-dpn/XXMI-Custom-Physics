@@ -68,22 +68,37 @@ class XXMI_OT_rigid_item_add(bpy.types.Operator):
         item.name = f"강체 {len(props.rigid_items)}"
         props.rigid_item_index = len(props.rigid_items) - 1
 
-        if context.mode == 'EDIT_MESH':
-            target_objs = get_target_mesh_objects(context)
-            data = {}
+        was_edit = (context.mode == 'EDIT_MESH')
+        target_objs = get_target_mesh_objects(context)
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        data = {}
+        if target_objs:
             for obj in target_objs:
                 mesh = obj.data
-                sel = [v.index for v in mesh.vertices if v.select]
-                if sel:
-                    data[obj.name] = sel
+                n_verts = len(mesh.vertices)
+                if n_verts == 0:
+                    continue
+                sel_mask = np.zeros(n_verts, dtype=bool)
+                mesh.vertices.foreach_get("select", sel_mask)
+                sel_indices = np.nonzero(sel_mask)[0].tolist()
+                if sel_indices:
+                    data[obj.name] = sel_indices
                     vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-                    vg_rigid.add(sel, 1.0, 'REPLACE')
-            if data:
-                set_rigid_data(item, data)
-                self.report({'INFO'}, f"새 강체 슬롯 '{item.name}' 생성 및 선택 정점 {item.vert_count}개 할당 완료!")
-                return {'FINISHED'}
+                    vg_rigid.add(sel_indices, 1.0, 'REPLACE')
 
-        self.report({'INFO'}, f"새 강체 슬롯 '{item.name}'이 추가되었습니다.")
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if data:
+            set_rigid_data(item, data)
+            self.report({'INFO'}, f"새 강체 슬롯 '{item.name}' 생성 및 선택 정점 {item.vert_count}개 할당 완료!")
+        else:
+            self.report({'INFO'}, f"새 강체 슬롯 '{item.name}'이 추가되었습니다.")
+
         return {'FINISHED'}
 
 
@@ -104,12 +119,22 @@ class XXMI_OT_rigid_item_remove(bpy.types.Operator):
         item = props.rigid_items[idx]
         data = get_rigid_data(item)
 
+        was_edit = (context.mode == 'EDIT_MESH')
+        target_objs = get_target_mesh_objects(context)
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
         for obj_name, v_indices in data.items():
             obj = bpy.data.objects.get(obj_name)
             if obj and obj.type == 'MESH':
                 vg_rigid = obj.vertex_groups.get(VG_RIGID)
                 if vg_rigid:
                     vg_rigid.remove(v_indices)
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
 
         name = item.name
         props.rigid_items.remove(idx)

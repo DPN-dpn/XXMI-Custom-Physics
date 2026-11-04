@@ -430,4 +430,7 @@ def unregister():
     if _preview_frame_handler in bpy.app.handlers.frame_change_pre:
         bpy.app.handlers.frame_change_pre.remove(_preview_frame_handler)
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

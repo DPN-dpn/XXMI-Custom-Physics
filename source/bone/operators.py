@@ -1214,6 +1214,9 @@ class XXMI_OT_clear_breast_physics(bpy.types.Operator):
         return props.anchor_obj is not None or bpy.data.objects.get(BREAST_RIG_NAME) is not None
 
     def execute(self, context):
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
         from ..simulation.operators import stop_physics_preview
         props = context.scene.xxmi_custom_physics_props
         if props.is_preview_running:
