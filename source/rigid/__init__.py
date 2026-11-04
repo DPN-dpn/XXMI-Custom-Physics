@@ -1,7 +1,9 @@
+from . import ui_list
 from . import operators
 from . import panel
 
 modules = [
+    ui_list,
     operators,
     panel,
 ]
@@ -17,4 +19,3 @@ def unregister():
     for mod in reversed(modules):
         if hasattr(mod, "unregister"):
             mod.unregister()
-

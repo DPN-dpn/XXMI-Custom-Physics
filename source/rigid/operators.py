@@ -1,4 +1,3 @@
-import json
 import bpy
 import bmesh
 import numpy as np
@@ -12,48 +11,9 @@ from ..utils import (
     get_target_mesh_objects,
     ROLE_RIGID_VG,
 )
+from .data import get_rigid_data, set_rigid_data
 
 VG_RIGID = ROLE_RIGID_VG
-
-
-def get_rigid_data(item):
-    """RigidItem의 JSON 문자열 데이터를 딕셔너리로 파싱합니다."""
-    if not item or not item.data_json:
-        return {}
-    try:
-        return json.loads(item.data_json)
-    except Exception:
-        return {}
-
-
-def set_rigid_data(item, data):
-    """RigidItem의 JSON 문자열 데이터를 갱신하고 정점 수를 동기화합니다."""
-    if not item:
-        return
-    item.data_json = json.dumps(data)
-    item.vert_count = sum(len(v) for v in data.values())
-
-
-class XXMI_UL_rigid_items(bpy.types.UIList):
-    """강체 부품 목록을 그리는 UIList입니다."""
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        if self.layout_type in {'DEFAULT', 'COMPACT'}:
-            row = layout.row(align=True)
-            row.label(text="", icon='PINNED')
-            row.prop(item, "name", text="", emboss=False)
-            bone_label = "자동"
-            if item.target_bone == 'BREAST_L':
-                bone_label = "Breast.L"
-            elif item.target_bone == 'BREAST_R':
-                bone_label = "Breast.R"
-            elif item.target_bone == 'CENTER':
-                bone_label = "중앙(L+R)"
-            sub = row.row()
-            sub.alignment = 'RIGHT'
-            sub.label(text=f"[{bone_label} | {item.vert_count}개]")
-        elif self.layout_type == 'GRID':
-            layout.alignment = 'CENTER'
-            layout.label(text="", icon='PINNED')
 
 
 class XXMI_OT_rigid_item_add(bpy.types.Operator):
@@ -472,7 +432,6 @@ class XXMI_OT_select_rigid_vertices(bpy.types.Operator):
 
 
 classes = (
-    XXMI_UL_rigid_items,
     XXMI_OT_rigid_item_add,
     XXMI_OT_rigid_item_remove,
     XXMI_OT_rigid_item_assign,
@@ -495,4 +454,3 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
-
