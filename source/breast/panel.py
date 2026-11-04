@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="1. 가슴 선택 & 본 생성", icon='SPHERE')
+        layout.label(text="1. 물리 본 & 강체 설정", icon='BONE_DATA')
 
     def draw(self, context):
         layout = self.layout
@@ -21,12 +21,12 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[1단계: 가슴 선택 & 물리 본 생성]\n\n"
+                "[1단계: 물리 본 & 다중 강체 설정]\n\n"
                 "1. 에디트 모드에서 가슴 표면을 선택하고 [1. 선택 영역을 가슴으로 등록]을 누릅니다.\n"
-                "2. 단추, 브로치, 장식 등 모핑 시 일그러지면 안 되는 부위가 있다면 에디트 모드에서 선택 후 [2. 선택 부위를 강체로 등록]을 누릅니다. (강체가 없다면 바로 3단계로 이동)\n"
-                "3. [3. 가슴 물리 본 생성 (강체 제외)]를 누릅니다.\n"
-                "4. 뷰포트에서 생성된 본의 위치나 각도를 확인하고, 필요 시 조정한 뒤 [4. 본 기준 가중치(웨이트) 자동 계산]을 누릅니다.\n"
-                "5. '2. 물리 설정 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 물리 주입'으로 인게임에 적용합니다.\n\n"
+                "2. 단추, 무전기, 리본, 브로치 등 찌그러지면 안 되는 장신구가 있다면 하단 [강체 관리자]에서 [+]로 강체 슬롯을 추가하고 [선택 정점 할당]을 누릅니다. (추종할 본도 지정 가능)\n"
+                "3. [2. 가슴 물리 본 생성]을 누르면 뷰포트에 뼈대가 생성됩니다.\n"
+                "4. 뷰포트에서 본의 위치나 각도를 필요 시 조정한 뒤 [3. 본 기준 가중치(웨이트) 자동 계산]을 누릅니다.\n"
+                "5. '2. 시뮬레이션 & 프리뷰'에서 움직임을 테스트하고 '3. 모드에 물리 주입'으로 인게임에 적용합니다.\n\n"
                 "※ 하단의 [세부 설정 및 관리 도구]를 펼치면 가중치 퍼짐 조절, 정점 다시 선택, 초기화 기능을 사용할 수 있습니다."
             ),
         )
@@ -34,10 +34,13 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
-        # --- 메인 작업 단계 (1 -> 2 -> 3 -> 4) ---
+        # ── 1. 메인 물리 본 작업 단계 ──
         box_main = layout.box()
         b_col = box_main.column(align=True)
-        b_col.label(text="가슴 물리 설정 순서:", icon='SETTINGS')
+        b_col.label(text="물리 본 생성 순서:", icon='SETTINGS')
+        b_col.separator(factor=0.5)
+
+        b_col.prop(props, "bone_type", text="본 종류")
         b_col.separator(factor=0.5)
 
         b_col.operator(
@@ -48,31 +51,78 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
         b_col.separator(factor=0.5)
 
         b_col.operator(
-            "object.xxmi_mark_selection_rigid",
-            text="2. 선택 부위를 강체로 등록",
-            icon='RADIOBUT_ON'
-        )
-        b_col.separator(factor=0.5)
-
-        b_col.operator(
             "object.xxmi_generate_breast_rig",
-            text="3. 가슴 물리 본 생성 (강체 제외)",
+            text="2. 가슴 물리 본 생성",
             icon='BONE_DATA'
         )
         b_col.separator(factor=0.5)
 
         b_col.operator(
             "object.xxmi_rebake_breast_weights",
-            text="4. 본 기준 가중치(웨이트) 자동 계산",
+            text="3. 본 기준 가중치(웨이트) 자동 계산",
             icon='MOD_VERTEX_WEIGHT'
         )
 
-        layout.separator()
+        layout.separator(factor=0.7)
 
-        # --- 통합 접이식 세부 설정 & 관리 도구 (아코디언 UI) ---
+        # ── 2. 다중 강체 관리자 (Multi-Rigid Manager) ──
+        box_rigid = layout.box()
+        r_head = box_rigid.row()
+        r_head.label(text=f"강체 부품 관리자 ({len(props.rigid_items)}개)", icon='SHAPEKEY_DATA')
+
+        # UIList 및 +/- 버튼
+        row_list = box_rigid.row()
+        row_list.template_list(
+            "XXMI_UL_rigid_items",
+            "",
+            props,
+            "rigid_items",
+            props,
+            "rigid_item_index",
+            rows=3
+        )
+        col_btns = row_list.column(align=True)
+        col_btns.operator("object.xxmi_rigid_item_add", text="", icon='ADD')
+        col_btns.operator("object.xxmi_rigid_item_remove", text="", icon='REMOVE')
+
+        # 활성 강체 슬롯 세부 제어
+        if 0 <= props.rigid_item_index < len(props.rigid_items):
+            cur_item = props.rigid_items[props.rigid_item_index]
+            box_detail = box_rigid.box()
+            d_col = box_detail.column(align=True)
+            d_col.use_property_split = True
+            d_col.use_property_decorate = False
+
+            d_col.prop(cur_item, "name", text="부품 이름")
+            d_col.prop(cur_item, "target_bone", text="추종 본")
+            d_col.separator(factor=0.5)
+
+            # 정점 할당 / 선택 버튼 행
+            r_acts = box_detail.row(align=True)
+            r_acts.use_property_split = False
+            r_acts.operator(
+                "object.xxmi_rigid_item_assign",
+                text="선택 정점 할당",
+                icon='CHECKMARK'
+            )
+            r_acts.operator(
+                "object.xxmi_rigid_item_select_verts",
+                text="정점 선택",
+                icon='RESTRICT_SELECT_OFF'
+            )
+            r_acts.operator(
+                "object.xxmi_rigid_item_remove_verts",
+                text="정점 제외",
+                icon='X'
+            )
+        else:
+            box_rigid.label(text="[+] 버튼을 눌러 새 강체 부품(단추, 무전기 등)을 추가하세요", icon='INFO')
+
+        layout.separator(factor=0.7)
+
+        # ── 3. 통합 접이식 세부 설정 & 관리 도구 (아코디언 UI) ──
         box_adv = layout.box()
 
-        # 헤더 토글 버튼: 전체 행 클릭 상호작용 및 라벨 잘림 방지 (use_property_split = False)
         col_toggle = box_adv.column(align=True)
         col_toggle.use_property_split = False
         col_toggle.use_property_decorate = False
@@ -100,25 +150,15 @@ class XXMI_PHYS_PT_breast(bpy.types.Panel):
 
             col_adv.separator()
 
-            # 2) 정점 관리 도구 (버튼들은 풀 너비로 깔끔하게 배치)
+            # 2) 정점 관리 도구
             col_tools = box_adv.column(align=True)
             col_tools.use_property_split = False
             col_tools.use_property_decorate = False
-            col_tools.label(text="정점 관리 도구:", icon='RESTRICT_SELECT_OFF')
+            col_tools.label(text="가슴 정점 관리:", icon='RESTRICT_SELECT_OFF')
             col_tools.operator(
                 "object.xxmi_select_breast_vertices",
                 text="가슴 정점 다시 선택",
                 icon='RESTRICT_SELECT_OFF'
-            )
-            col_tools.operator(
-                "object.xxmi_select_rigid_vertices",
-                text="강체 정점 다시 선택",
-                icon='RESTRICT_SELECT_OFF'
-            )
-            col_tools.operator(
-                "object.xxmi_unmark_selection_rigid",
-                text="선택 부위 강체 해제",
-                icon='X'
             )
 
             col_tools.separator(factor=0.5)

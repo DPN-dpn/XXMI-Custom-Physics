@@ -1,3 +1,4 @@
+import json
 import bpy
 import bmesh
 import math
@@ -123,8 +124,7 @@ def _calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fw
     # 2. 중심축으로부터의 방사형 수직 거리(Perpendicular Radius) 및 C1 연속 Hann Cosine 감쇠 (Axis=1 -> Edge=0)
     v_perp = pts_rel - np.outer(t_proj, bone_u)
     rho = np.linalg.norm(v_perp, axis=1)
-    max_rho_cand = float(np.max(rho)) if len(rho) > 0 else 0.0
-    radius = max(1e-4, float(eff_radius), max_rho_cand)
+    radius = max(0.02, float(eff_radius))
     rho_norm = np.clip(rho / radius, 0.0, 1.0)
     # 경계선(rho_norm=1.0)에서 미분값이 0이 되는 Hann 창 함수로 바디슈트 접힘 현상 방지
     w_radial = 0.5 * (1.0 + np.cos(np.pi * rho_norm))
@@ -264,15 +264,19 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w=0.80):
+def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w=0.80, exclude_verts_by_obj=None):
     """
     여러 오브젝트에 나뉘어 있는 강체(XXMI_Role_Rigid)들을
     3D 월드 공간에서 서로 맞닿아 있는(5mm 이내) 덩어리끼리 하나의 '통합 강체 클러스터'로 묶어
     완벽히 동일한 단일 (w_l, w_r) 가중치를 부여합니다. (메쉬가 뚫고 나오는 현상 방지)
     강체로 지정되지 않은 정점은 일절 건드리지 않습니다.
+    (슬롯으로 명시 관리되는 정점은 exclude_verts_by_obj로 제외되어 보존됩니다)
     """
     if not target_objs or not bone_info:
         return 0
+
+    if exclude_verts_by_obj is None:
+        exclude_verts_by_obj = {}
 
     islands = []  # {"obj", "verts", "pts"(ndarray), "bmin", "bmax", "cent"}
 
@@ -286,6 +290,13 @@ def _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak
         mesh = obj.data
         n_verts = len(mesh.vertices)
         rigid_mask = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"})["rigid"] > 0.5
+
+        ex_verts = exclude_verts_by_obj.get(obj.name)
+        if ex_verts:
+            for ev in ex_verts:
+                if ev < n_verts:
+                    rigid_mask[ev] = False
+
         if not rigid_mask.any():
             continue
 
@@ -882,11 +893,76 @@ def _rebake_mesh_weights_from_rig(context, rig, props=None):
     # 6. 동일 위치(1.2mm 이내) 공유 정점 100% 일체화 동기화 (소프트 메쉬 UV 심 및 분리 엣지 틈새 벌어짐 차단)
     num_synced = _synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
 
-    # 7. 다중 오브젝트(Body 케이스 + Hair 내용물 등) 간 3D 공간 통합 강체 클러스터 가중치 동기화
-    #    (최종 단계에서 수행하여 모든 강체 케이스 및 내용물 정점이 100% 동일한 단일 가중치를 갖도록 완벽 보장)
-    num_clusters = _unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_w)
+    # 7. 레거시 / 슬롯 외 강체 정점 fallback 클러스터 통합 (슬롯 관리 정점은 제외)
+    slot_exclude = {}
+    for item in props.rigid_items:
+        rdata = _get_rigid_data(item)
+        if not rdata:
+            continue
+        for oname, vis in rdata.items():
+            slot_exclude.setdefault(oname, set()).update(vis)
 
-    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 통합 강체 {num_clusters}개) 가중치 갱신 완료"
+    num_clusters = _unify_rigid_clusters_across_objects(
+        target_objs, bone_info, falloff_p, peak_w, exclude_verts_by_obj=slot_exclude
+    )
+
+    # 8. 다중 강체 슬롯(Rigid Slots) 가중치 100% 동기화 적용 (슬롯 지정 정점이 최종 우선순위를 가짐)
+    applied_slots = 0
+    for item in props.rigid_items:
+        rdata = _get_rigid_data(item)
+        if not rdata:
+            continue
+        
+        slot_pts = []
+        for oname, vis in rdata.items():
+            robj = bpy.data.objects.get(oname)
+            if robj and robj.type == 'MESH':
+                r_world = world_vertex_positions(robj)
+                for vi in vis:
+                    if vi < len(r_world):
+                        slot_pts.append(r_world[vi])
+        
+        c_x = 0.0
+        if slot_pts:
+            c_x = float(np.mean([p[0] for p in slot_pts]))
+
+        t_bone = item.target_bone
+        if t_bone == 'BREAST_L':
+            slot_wl, slot_wr = 1.0, 0.0
+        elif t_bone == 'BREAST_R':
+            slot_wl, slot_wr = 0.0, 1.0
+        elif t_bone == 'CENTER':
+            slot_wl, slot_wr = 1.0, 1.0
+        else:
+            if c_x > 0.012:
+                slot_wl, slot_wr = 1.0, 0.0
+            elif c_x < -0.012:
+                slot_wl, slot_wr = 0.0, 1.0
+            else:
+                slot_wl, slot_wr = 1.0, 1.0
+
+        for oname, vis in rdata.items():
+            robj = bpy.data.objects.get(oname)
+            if not robj or robj.type != 'MESH' or not vis:
+                continue
+            vg_l = robj.vertex_groups.get(VG_BREAST_L) or robj.vertex_groups.new(name=VG_BREAST_L)
+            vg_r = robj.vertex_groups.get(VG_BREAST_R) or robj.vertex_groups.new(name=VG_BREAST_R)
+            vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
+
+            vg_rigid.add(vis, 1.0, 'REPLACE')
+            if slot_wl > 0.0:
+                vg_l.add(vis, slot_wl, 'REPLACE')
+            else:
+                vg_l.remove(vis)
+
+            if slot_wr > 0.0:
+                vg_r.add(vis, slot_wr, 'REPLACE')
+            else:
+                vg_r.remove(vis)
+
+        applied_slots += 1
+
+    return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"
 
 
 class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
@@ -1006,6 +1082,269 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
 
         obj_names = ", ".join(o.name for o in target_objs)
         self.report({'INFO'}, f"총 {len(target_objs)}개 오브젝트에서 {total_selected}개 가슴 정점을 다시 선택했습니다.")
+        return {'FINISHED'}
+
+
+
+# ─── 다중 강체 관리자 (Multi-Rigid Manager) 도우미 & 오퍼레이터 ───
+
+def _get_rigid_data(item):
+    try:
+        return json.loads(item.data_json) if item.data_json else {}
+    except Exception:
+        return {}
+
+
+def _set_rigid_data(item, data):
+    item.data_json = json.dumps(data)
+    item.vert_count = sum(len(v) for v in data.values())
+
+
+class XXMI_UL_rigid_items(bpy.types.UIList):
+    """강체 부품 목록을 그리는 UIList입니다."""
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            row.label(text="", icon='SHAPEKEY_DATA')
+            row.prop(item, "name", text="", emboss=False)
+            bone_label = "자동"
+            if item.target_bone == 'BREAST_L':
+                bone_label = "Breast.L"
+            elif item.target_bone == 'BREAST_R':
+                bone_label = "Breast.R"
+            elif item.target_bone == 'CENTER':
+                bone_label = "중앙(L+R)"
+            sub = row.row()
+            sub.alignment = 'RIGHT'
+            sub.label(text=f"[{bone_label} | {item.vert_count}개]")
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="", icon='SHAPEKEY_DATA')
+
+
+class XXMI_OT_rigid_item_add(bpy.types.Operator):
+    bl_idname = "object.xxmi_rigid_item_add"
+    bl_label = "강체 슬롯 추가"
+    bl_description = "새로운 강체 부품(단추, 무전기, 리본 등) 관리 슬롯을 추가합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.rigid_items.add()
+        item.name = f"강체 {len(props.rigid_items)}"
+        props.rigid_item_index = len(props.rigid_items) - 1
+        
+        if context.mode == 'EDIT_MESH':
+            target_objs = _get_target_mesh_objects(context)
+            data = {}
+            for obj in target_objs:
+                mesh = obj.data
+                sel = [v.index for v in mesh.vertices if v.select]
+                if sel:
+                    data[obj.name] = sel
+                    vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
+                    vg_rigid.add(sel, 1.0, 'REPLACE')
+            if data:
+                _set_rigid_data(item, data)
+                self.report({'INFO'}, f"새 강체 슬롯 '{item.name}' 생성 및 선택 정점 {item.vert_count}개 할당 완료!")
+                return {'FINISHED'}
+
+        self.report({'INFO'}, f"새 강체 슬롯 '{item.name}'이 추가되었습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_rigid_item_remove(bpy.types.Operator):
+    bl_idname = "object.xxmi_rigid_item_remove"
+    bl_label = "강체 슬롯 삭제"
+    bl_description = "선택된 강체 슬롯을 목록에서 삭제하고 정점 강체 등록을 해제합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.rigid_item_index < len(props.rigid_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        idx = props.rigid_item_index
+        item = props.rigid_items[idx]
+        data = _get_rigid_data(item)
+
+        for obj_name, v_indices in data.items():
+            obj = bpy.data.objects.get(obj_name)
+            if obj and obj.type == 'MESH':
+                vg_rigid = obj.vertex_groups.get(VG_RIGID)
+                if vg_rigid:
+                    vg_rigid.remove(v_indices)
+
+        name = item.name
+        props.rigid_items.remove(idx)
+        props.rigid_item_index = max(0, min(idx, len(props.rigid_items) - 1))
+        self.report({'INFO'}, f"강체 슬롯 '{name}'을 삭제했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_rigid_item_assign(bpy.types.Operator):
+    bl_idname = "object.xxmi_rigid_item_assign"
+    bl_label = "선택 정점 이 강체에 할당"
+    bl_description = "에디트 모드에서 현재 선택된 정점들을 이 강체 슬롯에 등록합니다 (여러 메쉬 오브젝트 지원)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.rigid_item_index < len(props.rigid_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.rigid_items[props.rigid_item_index]
+        data = _get_rigid_data(item)
+
+        target_objs = _get_target_mesh_objects(context)
+        if not target_objs:
+            self.report({'ERROR'}, "선택된 메쉬 오브젝트가 없습니다.")
+            return {'CANCELLED'}
+
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        assigned_any = False
+        for obj in target_objs:
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = np.nonzero(sel_mask)[0].tolist()
+            if not sel_indices:
+                continue
+
+            existing = set(data.get(obj.name, []))
+            existing.update(sel_indices)
+            data[obj.name] = sorted(list(existing))
+            assigned_any = True
+
+            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
+            vg_rigid.add(sel_indices, 1.0, 'REPLACE')
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if not assigned_any:
+            self.report({'ERROR'}, "에디트 모드에서 강체로 등록할 정점을 먼저 선택해주세요.")
+            return {'CANCELLED'}
+
+        _set_rigid_data(item, data)
+        self.report({'INFO'}, f"'{item.name}' 슬롯에 정점 할당 완료! (현재 총 {item.vert_count}개 정점)")
+        return {'FINISHED'}
+
+
+class XXMI_OT_rigid_item_remove_verts(bpy.types.Operator):
+    bl_idname = "object.xxmi_rigid_item_remove_verts"
+    bl_label = "선택 정점 강체 제외"
+    bl_description = "현재 선택된 정점을 이 강체 슬롯에서 제외합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.rigid_item_index < len(props.rigid_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.rigid_items[props.rigid_item_index]
+        data = _get_rigid_data(item)
+
+        target_objs = _get_target_mesh_objects(context)
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        removed_total = 0
+        for obj in target_objs:
+            if obj.name not in data:
+                continue
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = set(np.nonzero(sel_mask)[0].tolist())
+            if not sel_indices:
+                continue
+
+            current_set = set(data[obj.name])
+            to_remove = current_set.intersection(sel_indices)
+            if to_remove:
+                current_set.difference_update(to_remove)
+                data[obj.name] = sorted(list(current_set))
+                removed_total += len(to_remove)
+                vg_rigid = obj.vertex_groups.get(VG_RIGID)
+                if vg_rigid:
+                    vg_rigid.remove(list(to_remove))
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        _set_rigid_data(item, data)
+        self.report({'INFO'}, f"'{item.name}' 슬롯에서 {removed_total}개 정점을 제외했습니다.")
+        return {'FINISHED'}
+
+
+class XXMI_OT_rigid_item_select_verts(bpy.types.Operator):
+    bl_idname = "object.xxmi_rigid_item_select_verts"
+    bl_label = "강체 정점 선택"
+    bl_description = "이 강체 슬롯에 등록된 정점들을 에디트 모드에서 뷰포트에 선택 표시합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return 0 <= props.rigid_item_index < len(props.rigid_items)
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.rigid_items[props.rigid_item_index]
+        data = _get_rigid_data(item)
+
+        if not data:
+            self.report({'WARNING'}, f"'{item.name}' 슬롯에 등록된 정점이 없습니다.")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        bpy.ops.object.select_all(action='DESELECT')
+        valid_objs = []
+        for obj_name, v_indices in data.items():
+            obj = bpy.data.objects.get(obj_name)
+            if obj and obj.type == 'MESH' and v_indices:
+                ensure_object_visible(context, obj)
+                obj.select_set(True)
+                valid_objs.append(obj)
+
+        if not valid_objs:
+            self.report({'ERROR'}, "등록된 메쉬 오브젝트를 씬에서 찾을 수 없습니다.")
+            return {'CANCELLED'}
+
+        context.view_layer.objects.active = valid_objs[0]
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='VERT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+
+        for obj in valid_objs:
+            v_indices = data.get(obj.name, [])
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            for vi in v_indices:
+                if vi < len(bm.verts):
+                    bm.verts[vi].select_set(True)
+            bmesh.update_edit_mesh(obj.data)
+
+        self.report({'INFO'}, f"'{item.name}' 슬롯의 정점 {item.vert_count}개를 선택했습니다.")
         return {'FINISHED'}
 
 
@@ -1419,6 +1758,12 @@ class XXMI_OT_clear_breast_physics(bpy.types.Operator):
 
 
 classes = (
+    XXMI_UL_rigid_items,
+    XXMI_OT_rigid_item_add,
+    XXMI_OT_rigid_item_remove,
+    XXMI_OT_rigid_item_assign,
+    XXMI_OT_rigid_item_remove_verts,
+    XXMI_OT_rigid_item_select_verts,
     XXMI_OT_register_breast_selection,
     XXMI_OT_mark_selection_rigid,
     XXMI_OT_unmark_selection_rigid,

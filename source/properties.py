@@ -1,6 +1,37 @@
 import bpy
 
 
+class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
+    """개별 강체 부품(단추, 무전기, 리본 등)을 독립 슬롯으로 관리하는 데이터 구조입니다."""
+    name: bpy.props.StringProperty(
+        name="강체 이름",
+        default="새 강체",
+        description="강체 부품의 식별 이름입니다"
+    )
+    target_bone: bpy.props.EnumProperty(
+        name="추종 본",
+        description="이 강체가 100% 일체형으로 따라갈 대상 본입니다",
+        items=[
+            ('AUTO', "자동 (최근접 본)", "3D 위치에 따라 가장 가까운 물리 본을 자동으로 추종합니다"),
+            ('BREAST_L', "좌측 본 (Breast.L)", "좌측 가슴 물리 본에 100% 고정됩니다"),
+            ('BREAST_R', "우측 본 (Breast.R)", "우측 가슴 물리 본에 100% 고정됩니다"),
+            ('CENTER', "중앙 일체화 (L+R)", "좌/우 양쪽 가슴의 움직임을 동시에 100% 공유하여 중앙 매듭 등이 찢어지지 않습니다"),
+        ],
+        default='AUTO'
+    )
+    # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
+    data_json: bpy.props.StringProperty(
+        name="정점 데이터",
+        default="{}",
+        description="오브젝트별 등록된 정점 인덱스 목록(JSON)"
+    )
+    vert_count: bpy.props.IntProperty(
+        name="정점 수",
+        default=0,
+        description="이 강체 슬롯에 등록된 총 정점 개수입니다"
+    )
+
+
 class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     # ── 1. 대상 메쉬 및 물리 본 ──
     target_obj: bpy.props.PointerProperty(
@@ -17,12 +48,32 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         poll=lambda self, obj: obj.type == 'ARMATURE'
     )
 
+    # ── 본 종류 선택 (향후 꼬리, 헤어 등으로 확장) ──
+    bone_type: bpy.props.EnumProperty(
+        name="본 종류",
+        description="생성할 물리 본의 종류입니다",
+        items=[
+            ('BREAST', "가슴 모핑 본 (Breast Pair)", "좌/우 대칭 한 쌍의 가슴 물리 본을 생성합니다"),
+        ],
+        default='BREAST'
+    )
+
+    # ── 다중 강체 목록 ──
+    rigid_items: bpy.props.CollectionProperty(
+        type=XXMI_PG_rigid_item,
+        name="강체 부품 목록"
+    )
+    rigid_item_index: bpy.props.IntProperty(
+        name="활성 강체 인덱스",
+        default=0
+    )
+
     # ── 2. 가슴 가중치 감쇠 옵션 ──
     peak_weight: bpy.props.FloatProperty(
         name="최대 가중치 (끝단 강도)",
-        description="가슴 꼭짓점의 최대 가중치입니다. 일체형 의상이나 전신 슈트는 0.70~0.85로 낮추면 경계선이 꺾이지 않고 옷감이 매끄럽게 늘어납니다 (기본값: 0.80)",
-        default=0.80,
-        min=0.3,
+        description="가슴 꼭짓점의 최대 가중치입니다. 0.35~0.45(초록~파란색)으로 유지하면 노란색/빨간색 없이 부드럽고 유연하게 움직입니다 (기본값: 0.40)",
+        default=0.40,
+        min=0.1,
         max=1.0,
         step=5,
         precision=2
@@ -54,7 +105,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     show_advanced_breast_settings: bpy.props.BoolProperty(
         name="세부 설정 및 관리 도구",
-        description="가중치 퍼짐 조절, 정점 다시 선택 및 강체 관리, 초기화 도구를 펼치거나 접습니다",
+        description="가중치 세부 조절 및 초기화 도구를 펼치거나 접습니다",
         default=False
     )
 
@@ -152,6 +203,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
 
 classes = (
+    XXMI_PG_rigid_item,
     XXMI_PG_custom_physics_props,
 )
 

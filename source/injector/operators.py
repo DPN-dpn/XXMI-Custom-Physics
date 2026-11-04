@@ -92,7 +92,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             w_r = arrs.get("r", zeros)
             is_rigid = (arrs.get("rigid", zeros) > 0.5).astype(np.float32)
 
-            weighted = np.nonzero((w_l > 1e-5) | (w_r > 1e-5))[0]
+            weighted = np.nonzero((w_l > 1e-5) | (w_r > 1e-5) | (is_rigid > 0.5))[0]
             if len(weighted) == 0:
                 continue
 

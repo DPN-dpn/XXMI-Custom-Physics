@@ -224,9 +224,9 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        # 씬 내에 가슴 웨이트 그룹이 존재하는 메쉬가 1개 이상 있으면 활성화
+        # 씬 내에 가슴 웨이트 그룹 또는 강체 그룹이 존재하는 메쉬가 1개 이상 있으면 활성화
         return any(
-            o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R"))
+            o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R") or o.vertex_groups.get("XXMI_Role_Rigid"))
             for o in bpy.data.objects
         )
 
@@ -241,10 +241,10 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        # 가슴 웨이트가 있는 모든 메쉬 수집
+        # 가슴 웨이트 또는 강체 그룹이 있는 모든 메쉬 수집
         breast_objs = [
             o for o in bpy.data.objects
-            if o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R"))
+            if o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R") or o.vertex_groups.get("XXMI_Role_Rigid"))
         ]
 
         if not breast_objs:
@@ -290,6 +290,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
                             has_weights = True
                     elif g.group == vg_rigid_idx and g.weight > 0.5:
                         rigid_flags[v.index] = True
+                        has_weights = True
 
             if not has_weights:
                 continue
@@ -310,7 +311,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             sk = obj.shape_key_add(name=PREVIEW_SK_NAME, from_mix=False)
             sk.value = 1.0
 
-            active_indices = [i for i in range(n_verts) if w_l[i] > 1e-5 or w_r[i] > 1e-5]
+            active_indices = [i for i in range(n_verts) if w_l[i] > 1e-5 or w_r[i] > 1e-5 or rigid_flags[i]]
 
             objects_data.append({
                 "obj_name": obj.name,
