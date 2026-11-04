@@ -5,6 +5,7 @@ from .common import (
     _clean_injected_lines,
     _parse_ini_sections,
     _extract_res_name,
+    backup_ini_file,
 )
 
 
@@ -185,6 +186,7 @@ def inject_physics_hsr(ini_path, matched_buffers, props, master_idx):
     """
     [4B단계: 붕괴: 스타레일 실시간 뼈대 애니메이션 관성 & 스프링 통합 인젝터]
     """
+    backup_ini_file(ini_path)
     with open(ini_path, 'r', encoding='utf-8') as f:
         raw_lines = f.readlines()
 

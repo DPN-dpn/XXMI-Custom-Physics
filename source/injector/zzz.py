@@ -6,6 +6,7 @@ from .common import (
     _parse_ini_sections,
     _extract_res_name,
     _find_motion_insert_index,
+    backup_ini_file,
 )
 
 
@@ -200,6 +201,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
 
 
 def inject_physics_zzz(ini_path, matched_buffers, props, master_idx=None):
+    backup_ini_file(ini_path)
     with open(ini_path, 'r', encoding='utf-8') as f:
         raw_lines = f.readlines()
 

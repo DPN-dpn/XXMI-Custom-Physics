@@ -18,6 +18,7 @@ from .common import (
     _export_physics_state_buf,
     _export_physics_config_json,
     _load_physics_from_mod,
+    backup_ini_file,
 )
 
 from .zzz import (
@@ -285,6 +286,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 else:
                     master_idx = 0
 
+                # .ini 파일 원본 백업본(.bak) 생성 (주입 전 안전 보존)
+                backup_ini_file(ini_path)
+
                 if target_game == 'HSR':
                     inject_physics_hsr(ini_path, matched_in_ini, props, master_idx)
                 else:
@@ -295,7 +299,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         if total_injected_buffers > 0:
             names_str = ", ".join(matched_obj_names)
             game_label = "붕괴: 스타레일" if target_game == 'HSR' else "젠레스 존 제로"
-            self.report({'INFO'}, f"물리 주입 완료! [{game_label}] {total_injected_buffers}개 메쉬에 물리 효과가 적용되었습니다.")
+            self.report({'INFO'}, f"물리 주입 완료! [{game_label}] {total_injected_buffers}개 메쉬에 물리 효과가 적용되었습니다. (원본 ini 백업 생성 완료)")
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "모드 폴더 내에서 일치하는 메쉬 데이터를 찾지 못했습니다. 올바른 캐릭터 모드 폴더인지 확인해주세요.")
@@ -332,6 +336,8 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
 
         for ini_path in ini_files:
             mod_folder = os.path.dirname(ini_path)
+            bak_path = ini_path + ".bak"
+
             with open(ini_path, 'r', encoding='utf-8') as f:
                 raw_lines = f.readlines()
 
@@ -340,6 +346,20 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
                 with open(ini_path, 'w', encoding='utf-8') as f:
                     f.writelines(clean_lines)
                 cleaned_count += 1
+            elif os.path.exists(bak_path):
+                try:
+                    shutil.copy2(bak_path, ini_path)
+                    cleaned_count += 1
+                except Exception:
+                    pass
+
+            # 백업 파일(.bak) 정리
+            if os.path.exists(bak_path):
+                try:
+                    os.remove(bak_path)
+                    removed_files += 1
+                except Exception:
+                    pass
 
             # 1. CustomPhysics 서브폴더 삭제
             custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")

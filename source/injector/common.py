@@ -76,6 +76,31 @@ def _clean_injected_lines(lines):
     return out_lines, modified
 
 
+def backup_ini_file(ini_path):
+    """
+    물리 주입 전 원본 .ini 파일의 백업본(.bak)을 생성합니다.
+    이미 백업본이 존재하면 최초 원본 보존을 위해 덮어쓰지 않습니다.
+    단, 현재 .ini 파일이 이미 주입된 상태이고 .bak이 없는 경우라면
+    클린업한 원본 구문으로 백업본을 안전하게 생성합니다.
+    """
+    if not ini_path or not os.path.exists(ini_path):
+        return None
+    bak_path = ini_path + ".bak"
+    if os.path.exists(bak_path):
+        return bak_path
+
+    try:
+        with open(ini_path, 'r', encoding='utf-8') as f:
+            raw_lines = f.readlines()
+        clean_lines, modified = _clean_injected_lines(raw_lines)
+        with open(bak_path, 'w', encoding='utf-8') as f:
+            f.writelines(clean_lines if modified else raw_lines)
+        return bak_path
+    except Exception as e:
+        print(f"[XXMI] INI 백업 생성 실패 ({ini_path}): {e}")
+        return None
+
+
 def _parse_ini_sections(lines):
     sections = {}
     current_sec = None
