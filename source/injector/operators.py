@@ -213,7 +213,14 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     hits = kd_w.find_range(buf_positions[i], tol)
                     if not hits:
                         continue
-                    k = max((h[1] for h in hits), key=lambda kk: all_wl[kk] + all_wr[kk])
+                    # 1순위: 가장 가까운 3D 정점(최소 거리) 선택
+                    # 2순위: 0.1mm 이내 동일 위치 정점 간에는 가중치 및 강체 우선순위 적용
+                    # (근접한 피부/가슴 정점이 장신구/파우치 정점을 덮어쓰지 않도록 엄격 분리)
+                    best_h = min(hits, key=lambda h: (
+                        round(h[2], 4),
+                        -(all_wl[h[1]] + all_wr[h[1]] + (10.0 if all_rig[h[1]] > 0.5 else 0.0))
+                    ))
+                    k = best_h[1]
                     wl_out[i] = all_wl[k]
                     wr_out[i] = all_wr[k]
                     rig_out[i] = all_rig[k]
