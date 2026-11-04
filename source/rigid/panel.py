@@ -1,4 +1,5 @@
 import bpy
+from ..utils import draw_help_button
 
 
 class XXMI_PHYS_PT_rigid(bpy.types.Panel):
@@ -18,18 +19,15 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
         props = context.scene.xxmi_custom_physics_props
 
         # 도움말 툴팁 버튼
-        row_top = layout.row(align=True)
-        sub_r = row_top.row()
-        sub_r.alignment = 'RIGHT'
-        op_h = sub_r.operator("object.xxmi_phys_help_tooltip", text="", icon='QUESTION')
-        op_h.tooltip_title = "강체(액세서리) 설정 가이드"
-        op_h.tooltip_message = (
-            "가슴이나 옷 위에 부착된 단추, 무전기, 리본, 브로치, 벨트 등은 물리 움직임 시 "
-            "고무처럼 늘어나거나 휘지 않고 본래의 형태를 유지(강체)해야 합니다.\n\n"
-            "1. [+] 버튼으로 강체 슬롯을 추가합니다.\n"
-            "2. 에디트 모드에서 해당 부품 정점들을 선택하고 [선택 정점 할당]을 누릅니다.\n"
-            "   (헤어의 안테나와 바디의 파우치처럼 여러 오브젝트에 걸친 부품도 함께 할당 가능합니다)\n"
-            "3. [목표 본]을 지정하면 해당 본의 움직임과 100% 동일하게 고정되어 따라 움직입니다."
+        draw_help_button(
+            layout,
+            (
+                "[2단계: 강체(액세서리) 설정 가이드]\n\n"
+                "• 가슴이나 옷 위에 부착된 단추, 무전기, 리본, 브로치 등은 물리 동작 시 형태를 유지(강체)해야 합니다.\n"
+                "• [+] 버튼으로 강체 슬롯을 추가합니다.\n"
+                "• 에디트 모드에서 부품 정점들을 선택하고 [선택 정점 할당]을 누릅니다. (여러 오브젝트에 걸친 부품도 동시 지원)\n"
+                "• [목표 본]을 지정하면 해당 본의 움직임과 100% 동일하게 고정되어 따라 움직입니다."
+            ),
         )
 
         # 1. 다중 강체 슬롯 목록 (UIList)

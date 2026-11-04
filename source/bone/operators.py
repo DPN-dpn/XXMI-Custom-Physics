@@ -1260,3 +1260,4 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
+

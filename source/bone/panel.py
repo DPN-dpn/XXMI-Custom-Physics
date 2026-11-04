@@ -1,4 +1,5 @@
 import bpy
+from ..utils import draw_help_button
 
 
 class XXMI_PHYS_PT_bone(bpy.types.Panel):
@@ -18,18 +19,15 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         props = context.scene.xxmi_custom_physics_props
 
         # 도움말 툴팁 버튼
-        row_top = layout.row(align=True)
-        sub_r = row_top.row()
-        sub_r.alignment = 'RIGHT'
-        op_h = sub_r.operator("object.xxmi_phys_help_tooltip", text="", icon='QUESTION')
-        op_h.tooltip_title = "물리 본 & 웨이트 설정 가이드"
-        op_h.tooltip_message = (
-            "캐릭터에 물리 본을 추가하고 웨이트를 자동 생성하는 단계입니다.\n\n"
-            "1. 원하는 [본 종류](가슴, 향후 꼬리/머리카락 등)를 선택합니다.\n"
-            "2. 에디트 모드에서 물리 본을 적용할 표면 정점들을 선택하고 [1. 가슴 영역 선택 등록]을 누릅니다.\n"
-            "3. [2. 가슴 물리 본 생성]을 누르면 해부학적 위치에 알맞은 물리 본(Armature)이 자동 배치됩니다.\n"
-            "4. 뷰포트에서 본의 위치/각도/반경을 자유롭게 다듬은 후 [3. 본 기준 가중치(웨이트) 자동 계산]을 누르면 "
-            "매끄러운 LBS 가중치가 메쉬에 베이킹됩니다."
+        draw_help_button(
+            layout,
+            (
+                "[1단계: 물리 본 & 웨이트 설정 가이드]\n\n"
+                "• 원하는 본 종류(가슴 등)를 선택합니다.\n"
+                "• 에디트 모드에서 물리 본을 적용할 표면 정점을 선택하고 [1. 가슴 영역 선택 등록]을 누릅니다.\n"
+                "• [2. 가슴 물리 본 생성]을 누르면 해부학적 위치에 알맞은 물리 본이 자동 배치됩니다.\n"
+                "• 뷰포트에서 본의 위치/각도를 조정한 후 [3. 본 기준 가중치 자동 계산]을 누르면 가중치가 베이킹됩니다."
+            ),
         )
 
         # 0. 본 종류 선택
