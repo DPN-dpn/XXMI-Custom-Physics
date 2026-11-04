@@ -421,14 +421,6 @@ class XXMI_OT_physics_dir_picker(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
         props.target_mod_dir = self.directory
-        if os.path.exists(self.directory):
-            cfg_p = os.path.join(self.directory, "XXMI_Physics_Config.json")
-            has_hlsl = any(f.lower().startswith("customphysics") for f in os.listdir(self.directory))
-            if os.path.exists(cfg_p) or has_hlsl:
-                success, msg = _load_physics_from_mod(self.directory, context, props)
-                if success:
-                    self.report({'INFO'}, f"폴더 선택 완료 (물리 설정 동기화: {msg})")
-                    return {'FINISHED'}
         return {'FINISHED'}
 
     def invoke(self, context, event):
