@@ -96,5 +96,15 @@ def get_rig_bone_info(rig):
         elif b_lower in ("breast.r", "r"):
             bone_info["R"] = entry
 
+    # "L"/"R" 명칭이 아니더라도 X 좌표에 따라 1/2채널 자동 매핑
+    if "L" not in bone_info and "R" not in bone_info:
+        named_entries = [e for k, e in bone_info.items() if k not in ("L", "R")]
+        if len(named_entries) >= 2:
+            sorted_by_x = sorted(named_entries, key=lambda e: e["head"].x, reverse=True)
+            bone_info["L"] = sorted_by_x[0]
+            bone_info["R"] = sorted_by_x[1]
+        elif len(named_entries) == 1:
+            bone_info["L"] = named_entries[0]
+
     return bone_info
 

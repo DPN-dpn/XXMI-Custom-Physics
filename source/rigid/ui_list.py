@@ -9,11 +9,7 @@ class XXMI_UL_rigid_items(bpy.types.UIList):
             row.label(text="", icon='PINNED')
             row.prop(item, "name", text="", emboss=False)
             bone_label = "자동"
-            if item.target_bone == 'BREAST_L':
-                bone_label = "Breast.L"
-            elif item.target_bone == 'BREAST_R':
-                bone_label = "Breast.R"
-            elif item.target_bone == 'CENTER':
+            if item.target_bone == 'CENTER':
                 bone_label = "중앙일체화"
             elif item.target_bone != 'AUTO':
                 bone_label = item.target_bone

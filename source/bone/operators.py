@@ -128,12 +128,12 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
         props = context.scene.xxmi_custom_physics_props
         ensure_default_breast_bone_items(props)
-        item_l = get_bone_item(props, "Breast.L")
-        item_r = get_bone_item(props, "Breast.R")
-        if item_l:
-            set_bone_data(item_l, data_l)
-        if item_r:
-            set_bone_data(item_r, data_r)
+        item_1 = props.bone_items[0] if len(props.bone_items) > 0 else None
+        item_2 = props.bone_items[1] if len(props.bone_items) > 1 else None
+        if item_1:
+            set_bone_data(item_1, data_l)
+        if item_2:
+            set_bone_data(item_2, data_r)
 
         total_sel = max(total_l, total_r)
         if total_sel < 6:
@@ -294,10 +294,13 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
                     "radius": bone_radius,
                 }
 
-            # Breast.L과 Breast.R 쌍이 모두 포함되어 있는 경우 신체 대칭성 보정
-            if "Breast.L" in anchor_info and "Breast.R" in anchor_info:
-                al = anchor_info["Breast.L"]
-                ar = anchor_info["Breast.R"]
+            # 모핑 본 2개가 좌우 대칭으로 배치된 경우 신체 대칭성 보정
+            if len(anchor_info) == 2:
+                _items = list(anchor_info.values())
+                al = _items[0]
+                ar = _items[1]
+                if al["head"].x < ar["head"].x:
+                    al, ar = ar, al
                 z_mid = (al["head"].z + ar["head"].z) * 0.5
                 x_dist = max(0.03, (abs(al["head"].x) + abs(ar["head"].x)) * 0.5)
                 y_base = max(al["head"].y, ar["head"].y)
@@ -333,8 +336,11 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
                 bone_vec_l = tail_l - head_l
                 u_l = bone_vec_l.normalized() if bone_vec_l.length > 1e-4 else Vector((0.0, -1.0, 0.0))
 
+                bname_l = props.bone_items[0].name if len(props.bone_items) > 0 else "모핑 본 1"
+                bname_r = props.bone_items[1].name if len(props.bone_items) > 1 else "모핑 본 2"
+
                 anchor_info["L"] = {
-                    "bname": "Breast.L",
+                    "bname": bname_l,
                     "centroid": Vector(((head_l.x + tail_l.x) * 0.5, (head_l.y + tail_l.y) * 0.5, z_mid)),
                     "tip": tail_l,
                     "head": head_l,
@@ -343,14 +349,14 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
                     "radius": bone_radius,
                 }
 
-                # 우측 모핑 본 (Breast.R)
+                # 우측 모핑 본
                 head_r = Vector((-x_dist, y_base, z_mid))
                 tail_r = Vector((-1.05 * x_dist, y_front, z_mid))
                 bone_vec_r = tail_r - head_r
                 u_r = bone_vec_r.normalized() if bone_vec_r.length > 1e-4 else Vector((0.0, -1.0, 0.0))
 
                 anchor_info["R"] = {
-                    "bname": "Breast.R",
+                    "bname": bname_r,
                     "centroid": Vector(((head_r.x + tail_r.x) * 0.5, (head_r.y + tail_r.y) * 0.5, z_mid)),
                     "tip": tail_r,
                     "head": head_r,
@@ -377,7 +383,7 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
                 bone_vec = tail - head
                 u = bone_vec.normalized() if bone_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
 
-                bname = f"Breast.{side}"
+                bname = f"모핑 본 {props.bone_item_index + 1}"
                 if len(props.bone_items) > 0 and 0 <= props.bone_item_index < len(props.bone_items):
                     bname = props.bone_items[props.bone_item_index].name
 
@@ -542,20 +548,10 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         props = context.scene.xxmi_custom_physics_props
         item = props.bone_items.add()
 
-        # 이름 및 종류 자동 설정
+        # 이름 및 종류 설정
         n_items = len(props.bone_items)
-        has_l = any(it.bone_type == 'BREAST_L' or it.name == 'Breast.L' for it in props.bone_items[:-1])
-        has_r = any(it.bone_type == 'BREAST_R' or it.name == 'Breast.R' for it in props.bone_items[:-1])
-
-        if not has_l:
-            item.name = "Breast.L"
-            item.bone_type = 'BREAST_L'
-        elif not has_r:
-            item.name = "Breast.R"
-            item.bone_type = 'BREAST_R'
-        else:
-            item.name = f"Bone_{n_items}"
-            item.bone_type = 'CUSTOM'
+        item.name = f"모핑 본 {n_items}"
+        item.bone_type = 'MORPH' 
 
         item.peak_weight = getattr(props, "peak_weight", 0.40)
         item.falloff_power = getattr(props, "falloff_power", 1.0)
@@ -576,7 +572,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         data = {}
-        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
         if target_objs:
             for obj in target_objs:
                 mesh = obj.data
@@ -654,7 +650,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         assigned_any = False
-        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
 
         for obj in target_objs:
             mesh = obj.data
@@ -773,7 +769,7 @@ class XXMI_OT_bone_item_remove_verts(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         removed_any = False
-        vg_target_name = VG_BREAST_L if item.bone_type == 'BREAST_L' else (VG_BREAST_R if item.bone_type == 'BREAST_R' else f"XXMI_{item.name}")
+        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
 
         for obj in target_objs:
             if obj.name not in data:

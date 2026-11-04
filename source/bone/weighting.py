@@ -584,8 +584,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         radius = bentry["radius"]
         eff_radius = max(0.02, radius)
 
-        vg_target_name = VG_BREAST_L if bname.lower() in ("breast.l", "l") else (
-            VG_BREAST_R if bname.lower() in ("breast.r", "r") else f"XXMI_{bname}"
+        is_first_ch = (bname.lower() in ("breast.l", "l") or (bone_info.get("L") and bone_info["L"]["bname"] == bname))
+        is_second_ch = (bname.lower() in ("breast.r", "r") or (bone_info.get("R") and bone_info["R"]["bname"] == bname))
+
+        vg_target_name = VG_BREAST_L if is_first_ch else (
+            VG_BREAST_R if is_second_ch else f"XXMI_{bname}"
         )
 
         side_cand = []
@@ -775,8 +778,10 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
             vg_rigid.add(vis, 1.0, 'REPLACE')
             if custom_target_bone:
-                vg_target_name = VG_BREAST_L if custom_target_bone.lower() in ('breast.l', 'l') else (
-                    VG_BREAST_R if custom_target_bone.lower() in ('breast.r', 'r') else f"XXMI_{custom_target_bone}"
+                is_l = (custom_target_bone.lower() in ('breast.l', 'l') or (bone_info.get("L") and bone_info["L"]["bname"] == custom_target_bone))
+                is_r = (custom_target_bone.lower() in ('breast.r', 'r') or (bone_info.get("R") and bone_info["R"]["bname"] == custom_target_bone))
+                vg_target_name = VG_BREAST_L if is_l else (
+                    VG_BREAST_R if is_r else f"XXMI_{custom_target_bone}"
                 )
                 vg_c = robj.vertex_groups.get(vg_target_name) or robj.vertex_groups.new(name=vg_target_name)
                 vg_c.add(vis, custom_bone_w, 'REPLACE')

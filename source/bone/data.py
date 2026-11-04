@@ -21,7 +21,7 @@ def set_bone_data(item, data):
 
 
 def get_bone_item(props, bname):
-    """본 이름 또는 접미사(Breast.L, L, Breast.R, R 등)에 해당하는 슬롯을 반환합니다."""
+    """본 이름 또는 인덱스에 해당하는 슬롯을 반환합니다."""
     if not props or not hasattr(props, "bone_items"):
         return None
 
@@ -29,10 +29,12 @@ def get_bone_item(props, bname):
     for item in props.bone_items:
         if item.name.lower() == b_lower:
             return item
-        if b_lower in ("breast.l", "l") and item.bone_type == 'BREAST_L':
-            return item
-        if b_lower in ("breast.r", "r") and item.bone_type == 'BREAST_R':
-            return item
+
+    # 하위 호환용 (L/Breast.L -> 0번째 본, R/Breast.R -> 1번째 본)
+    if b_lower in ("breast.l", "l") and len(props.bone_items) > 0:
+        return props.bone_items[0]
+    if b_lower in ("breast.r", "r") and len(props.bone_items) > 1:
+        return props.bone_items[1]
 
     return None
 
@@ -73,38 +75,34 @@ def get_bone_params(props, bname):
 
 def ensure_default_breast_bone_items(props):
     """
-    props.bone_items에 가슴 본 쌍(Breast.L, Breast.R)이 없으면 기본 슬롯을 생성합니다.
+    props.bone_items가 비어있으면 기본 모핑 본 슬롯 쌍을 생성합니다.
     """
     if not props or not hasattr(props, "bone_items"):
         return
 
-    has_l = any(it.bone_type == 'BREAST_L' or it.name.lower() == 'breast.l' for it in props.bone_items)
-    has_r = any(it.bone_type == 'BREAST_R' or it.name.lower() == 'breast.r' for it in props.bone_items)
+    if len(props.bone_items) == 0:
+        item_1 = props.bone_items.add()
+        item_1.name = "모핑 본 1"
+        item_1.bone_type = 'MORPH'
+        item_1.peak_weight = getattr(props, "peak_weight", 0.40)
+        item_1.falloff_power = getattr(props, "falloff_power", 1.0)
+        item_1.smooth_iterations = getattr(props, "smooth_iterations", 2)
+        item_1.lock_registered_verts = getattr(props, "lock_registered_verts", True)
+        item_1.strength = getattr(props, "strength", 1.0)
+        item_1.speed = getattr(props, "speed", 1.1)
+        item_1.damping = getattr(props, "damping", 0.85)
+        item_1.inertia = getattr(props, "inertia", 1.2)
+        item_1.idle_motion = getattr(props, "idle_motion", 0.4)
 
-    if not has_l:
-        item_l = props.bone_items.add()
-        item_l.name = "Breast.L"
-        item_l.bone_type = 'BREAST_L'
-        item_l.peak_weight = getattr(props, "peak_weight", 0.40)
-        item_l.falloff_power = getattr(props, "falloff_power", 1.0)
-        item_l.smooth_iterations = getattr(props, "smooth_iterations", 2)
-        item_l.lock_registered_verts = getattr(props, "lock_registered_verts", True)
-        item_l.strength = getattr(props, "strength", 1.0)
-        item_l.speed = getattr(props, "speed", 1.1)
-        item_l.damping = getattr(props, "damping", 0.85)
-        item_l.inertia = getattr(props, "inertia", 1.2)
-        item_l.idle_motion = getattr(props, "idle_motion", 0.4)
-
-    if not has_r:
-        item_r = props.bone_items.add()
-        item_r.name = "Breast.R"
-        item_r.bone_type = 'BREAST_R'
-        item_r.peak_weight = getattr(props, "peak_weight", 0.40)
-        item_r.falloff_power = getattr(props, "falloff_power", 1.0)
-        item_r.smooth_iterations = getattr(props, "smooth_iterations", 2)
-        item_r.lock_registered_verts = getattr(props, "lock_registered_verts", True)
-        item_r.strength = getattr(props, "strength", 1.0)
-        item_r.speed = getattr(props, "speed", 1.1)
-        item_r.damping = getattr(props, "damping", 0.85)
-        item_r.inertia = getattr(props, "inertia", 1.2)
-        item_r.idle_motion = getattr(props, "idle_motion", 0.4)
+        item_2 = props.bone_items.add()
+        item_2.name = "모핑 본 2"
+        item_2.bone_type = 'MORPH'
+        item_2.peak_weight = getattr(props, "peak_weight", 0.40)
+        item_2.falloff_power = getattr(props, "falloff_power", 1.0)
+        item_2.smooth_iterations = getattr(props, "smooth_iterations", 2)
+        item_2.lock_registered_verts = getattr(props, "lock_registered_verts", True)
+        item_2.strength = getattr(props, "strength", 1.0)
+        item_2.speed = getattr(props, "speed", 1.1)
+        item_2.damping = getattr(props, "damping", 0.85)
+        item_2.inertia = getattr(props, "inertia", 1.2)
+        item_2.idle_motion = getattr(props, "idle_motion", 0.4)

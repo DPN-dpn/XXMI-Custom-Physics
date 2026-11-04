@@ -11,10 +11,7 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
         items=[
-            ('MORPH', "모핑 본 (Morph)", "일반 모핑 물리 본"),
-            ('BREAST_L', "좌측 모핑 본 (Breast.L)", "좌측 모핑 물리 본"),
-            ('BREAST_R', "우측 모핑 본 (Breast.R)", "우측 모핑 물리 본"),
-            ('CUSTOM', "커스텀 모핑 본", "사용자 정의 모핑 본"),
+            ('MORPH', "모핑 본", "3D 형태를 추종하여 부드럽게 변형되는 모핑 물리 본"),
         ],
         default='MORPH'
     )
@@ -135,14 +132,6 @@ def get_target_bone_enum_items(self, context):
             if b.name not in seen_ids:
                 seen_ids.add(b.name)
                 items.append((b.name, f"{b.name} (모핑 본)", f"스켈레톤 내 '{b.name}' 본에 100% 고정됩니다"))
-
-    # 3. 호환용 표준 모핑 본 ID
-    if 'BREAST_L' not in seen_ids:
-        seen_ids.add('BREAST_L')
-        items.append(('BREAST_L', "좌측 모핑 본 (Breast.L)", "좌측 모핑 본에 100% 고정됩니다"))
-    if 'BREAST_R' not in seen_ids:
-        seen_ids.add('BREAST_R')
-        items.append(('BREAST_R', "우측 모핑 본 (Breast.R)", "우측 모핑 본에 100% 고정됩니다"))
 
     if 'CENTER' not in seen_ids:
         items.append(('CENTER', "중앙 일체화 (모핑 본 중첩)", "양쪽 모핑 본의 움직임을 균일하게 공유하여 매듭/버클이 찢어지지 않습니다"))
