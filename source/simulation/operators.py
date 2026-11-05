@@ -5,6 +5,7 @@ from ..utils import (
     PREVIEW_SK_NAME,
     PREVIEW_BASIS_TAG,
     ensure_object_visible,
+    ensure_all_objects_in_object_mode,
     get_local_axes,
 )
 from .engine import (
@@ -37,8 +38,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             self.report({'INFO'}, "물리 프리뷰가 중지되었으며 메쉬들이 원상 복구되었습니다.")
             return {'FINISHED'}
 
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+        ensure_all_objects_in_object_mode(context)
 
         # 1. 활성 본 슬롯 목록 추출
         active_bones = []

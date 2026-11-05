@@ -33,6 +33,30 @@ def ensure_object_visible(context, obj):
         obj.hide_viewport = False
 
 
+def ensure_all_objects_in_object_mode(context=None):
+    """
+    씬 내의 모든 오브젝트(메쉬, 아마추어 등)의 편집 모드를 안전하게 해제하여
+    완벽히 OBJECT 모드로 전환합니다. (멀티 오브젝트 편집 모드로 인한 VertexGroup 런타임 오류 방지)
+    """
+    if context is None:
+        context = bpy.context
+
+    if context.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+    for obj in bpy.data.objects:
+        if obj.mode != 'OBJECT':
+            try:
+                ensure_object_visible(context, obj)
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+
 def get_target_mesh_objects(context):
     """현재 선택되었거나 에디트 모드에 진입해 있는 모든 메쉬 오브젝트 목록을 반환합니다."""
     objs = []

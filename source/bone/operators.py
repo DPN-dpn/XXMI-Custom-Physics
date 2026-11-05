@@ -5,6 +5,7 @@ from mathutils import Vector
 from mathutils.kdtree import KDTree
 from ..utils import (
     ensure_object_visible,
+    ensure_all_objects_in_object_mode,
     read_vertex_group_arrays,
     world_vertex_positions,
     get_target_mesh_objects,
@@ -52,7 +53,7 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         for obj in target_objs:
             ensure_object_visible(context, obj)
@@ -224,8 +225,7 @@ class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
 
         was_mode = context.mode
         active_obj = context.view_layer.objects.active
-        if was_mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+        ensure_all_objects_in_object_mode(context)
 
         context.view_layer.update()
 
@@ -233,11 +233,15 @@ class XXMI_OT_rebake_breast_weights(bpy.types.Operator):
 
         context.view_layer.update()
 
-        if was_mode in ('EDIT_ARMATURE', 'POSE') and active_obj:
+        if active_obj and active_obj.name in bpy.data.objects:
             try:
+                ensure_object_visible(context, active_obj)
                 context.view_layer.objects.active = active_obj
-                target_mode = 'EDIT' if was_mode == 'EDIT_ARMATURE' else 'POSE'
-                bpy.ops.object.mode_set(mode=target_mode)
+                if was_mode in ('EDIT_ARMATURE', 'POSE'):
+                    target_mode = 'EDIT' if was_mode == 'EDIT_ARMATURE' else 'POSE'
+                    bpy.ops.object.mode_set(mode=target_mode)
+                elif was_mode == 'EDIT_MESH':
+                    bpy.ops.object.mode_set(mode='EDIT')
             except Exception:
                 pass
 
@@ -509,7 +513,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         was_edit = (context.mode == 'EDIT_MESH')
         target_objs = get_target_mesh_objects(context)
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         data = {}
         vg_target_name = f"XXMI_{item.name}"
@@ -600,7 +604,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         assigned_any = False
         vg_target_name = f"XXMI_{item.name}"
@@ -659,7 +663,7 @@ class XXMI_OT_bone_item_subtract_rigid_verts(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         subtracted, kept = subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=True)
 
@@ -700,7 +704,7 @@ class XXMI_OT_subtract_rigid_from_all_bones(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         total_sub = 0
         total_kept = 0
@@ -803,7 +807,7 @@ class XXMI_OT_bone_item_remove_verts(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         removed_any = False
         vg_target_name = f"XXMI_{item.name}"

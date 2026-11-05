@@ -6,6 +6,7 @@ from mathutils import Vector
 from mathutils.kdtree import KDTree
 from ..utils import (
     ensure_object_visible,
+    ensure_all_objects_in_object_mode,
     read_vertex_group_arrays,
     world_vertex_positions,
     mesh_edge_arrays,
@@ -486,6 +487,8 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     """
     if props is None:
         props = context.scene.xxmi_custom_physics_props
+
+    ensure_all_objects_in_object_mode(context)
 
     bone_info = get_rig_bone_info(rig)
     if not bone_info:

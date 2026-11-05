@@ -6,7 +6,7 @@ import os
 import math
 from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
-from ..utils import ensure_object_visible, read_vertex_group_arrays
+from ..utils import ensure_object_visible, ensure_all_objects_in_object_mode, read_vertex_group_arrays
 from ..simulation.operators import stop_physics_preview
 
 from .ini_parser import (
@@ -57,6 +57,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         if props.is_preview_running:
             stop_physics_preview(context)
+
+        ensure_all_objects_in_object_mode(context)
 
         if not target_mod_input or not os.path.exists(target_mod_input):
             self.report({'ERROR'}, "모드 폴더 경로를 먼저 지정해주세요.")

@@ -3,6 +3,7 @@ import bmesh
 import numpy as np
 from ..utils import (
     ensure_object_visible,
+    ensure_all_objects_in_object_mode,
     get_target_mesh_objects,
     ROLE_RIGID_VG,
 )
@@ -24,9 +25,8 @@ class XXMI_OT_rigid_item_add(bpy.types.Operator):
         props.rigid_item_index = len(props.rigid_items) - 1
 
         was_edit = (context.mode == 'EDIT_MESH')
-        target_objs = get_target_mesh_objects(context)
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         data = {}
         if target_objs:
@@ -75,9 +75,8 @@ class XXMI_OT_rigid_item_remove(bpy.types.Operator):
         data = get_rigid_data(item)
 
         was_edit = (context.mode == 'EDIT_MESH')
-        target_objs = get_target_mesh_objects(context)
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         for obj_name, v_indices in data.items():
             obj = bpy.data.objects.get(obj_name)
@@ -121,7 +120,7 @@ class XXMI_OT_rigid_item_assign(bpy.types.Operator):
 
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         assigned_any = False
         for obj in target_objs:
@@ -174,7 +173,7 @@ class XXMI_OT_rigid_item_remove_verts(bpy.types.Operator):
         target_objs = get_target_mesh_objects(context)
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+            ensure_all_objects_in_object_mode(context)
 
         removed_total = 0
         for obj in target_objs:
