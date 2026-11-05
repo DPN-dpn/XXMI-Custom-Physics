@@ -309,6 +309,36 @@ class XXMI_OT_bone_item_select_verts(bpy.types.Operator):
         item = props.bone_items[props.bone_item_index]
         data = get_bone_data(item)
 
+        # 1. data_json이 비어있거나 불완전한 경우, 씬 내 메쉬의 버텍스 그룹으로부터 자동 복구 시도
+        if not data:
+            cand_vg_names = [f"XXMI_{item.name}"]
+            if "왼" in item.name or ".L" in item.name.upper() or "_L" in item.name.upper():
+                cand_vg_names.extend(["XXMI_Breast_L", "XXMI_Breast.L"])
+            elif "오" in item.name or ".R" in item.name.upper() or "_R" in item.name.upper():
+                cand_vg_names.extend(["XXMI_Breast_R", "XXMI_Breast.R"])
+
+            recovered = {}
+            for obj in bpy.data.objects:
+                if obj.type == 'MESH':
+                    vg = None
+                    for vgn in cand_vg_names:
+                        vg = obj.vertex_groups.get(vgn)
+                        if vg:
+                            break
+                    if vg:
+                        vis = []
+                        for vi in range(len(obj.data.vertices)):
+                            try:
+                                if vg.weight(vi) > 0.0001:
+                                    vis.append(vi)
+                            except Exception:
+                                pass
+                        if vis:
+                            recovered[obj.name] = vis
+            if recovered:
+                data = recovered
+                set_bone_data(item, data)
+
         if not data:
             self.report({'WARNING'}, f"본 '{item.name}'에 등록된 정점이 없습니다.")
             return {'CANCELLED'}
@@ -319,9 +349,21 @@ class XXMI_OT_bone_item_select_verts(bpy.types.Operator):
         bpy.ops.object.select_all(action='DESELECT')
         first_obj = None
 
+        # 이름 불일치 대비 메쉬 매핑 준비
+        resolved_mesh_map = {}
         for obj_name, v_indices in data.items():
             obj = bpy.data.objects.get(obj_name)
+            if not obj or obj.type != 'MESH':
+                # 오브젝트 이름이 바뀌었거나 다른 씬일 경우 대체 탐색
+                for o in bpy.data.objects:
+                    if o.type == 'MESH' and (o.vertex_groups.get(f"XXMI_{item.name}") or o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R")):
+                        obj = o
+                        break
+                if not obj and context.active_object and context.active_object.type == 'MESH':
+                    obj = context.active_object
+
             if obj and obj.type == 'MESH':
+                resolved_mesh_map[obj] = v_indices
                 ensure_object_visible(context, obj)
                 obj.select_set(True)
                 if not first_obj:
@@ -337,17 +379,15 @@ class XXMI_OT_bone_item_select_verts(bpy.types.Operator):
         bpy.ops.mesh.select_all(action='DESELECT')
 
         total_selected = 0
-        for obj_name, v_indices in data.items():
-            obj = bpy.data.objects.get(obj_name)
-            if obj and obj.type == 'MESH':
-                bm = bmesh.from_edit_mesh(obj.data)
-                bm.verts.ensure_lookup_table()
-                v_set = set(v_indices)
-                for vi in v_set:
-                    if vi < len(bm.verts):
-                        bm.verts[vi].select_set(True)
-                        total_selected += 1
-                bmesh.update_edit_mesh(obj.data)
+        for obj, v_indices in resolved_mesh_map.items():
+            bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
+            v_set = set(v_indices)
+            for vi in v_set:
+                if vi < len(bm.verts):
+                    bm.verts[vi].select_set(True)
+                    total_selected += 1
+            bmesh.update_edit_mesh(obj.data)
 
         self.report({'INFO'}, f"본 '{item.name}'의 정점 {total_selected}개를 선택했습니다.")
         return {'FINISHED'}

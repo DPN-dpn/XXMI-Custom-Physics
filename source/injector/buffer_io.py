@@ -119,6 +119,7 @@ def _export_physics_config_json(export_dir, props, context):
 
     bone_items_list = []
     if hasattr(props, "bone_items"):
+        from ..bone.data import get_bone_data
         for it in props.bone_items:
             bone_items_list.append({
                 "name": it.name,
@@ -136,6 +137,18 @@ def _export_physics_config_json(export_dir, props, context):
                 "inertia": round(float(it.inertia), 4),
                 "idle_motion": round(float(it.idle_motion), 4),
                 "vert_count": int(it.vert_count),
+                "data": get_bone_data(it),
+            })
+
+    rigid_items_list = []
+    if hasattr(props, "rigid_items"):
+        from ..rigid.data import get_rigid_data
+        for rit in props.rigid_items:
+            rigid_items_list.append({
+                "name": rit.name,
+                "weight_scale": round(float(rit.weight_scale), 4),
+                "vert_count": int(rit.vert_count),
+                "data": get_rigid_data(rit),
             })
 
     cfg = {
@@ -151,6 +164,7 @@ def _export_physics_config_json(export_dir, props, context):
         "debug_toggle_key": str(props.debug_toggle_key),
         "bones": bones_dict,
         "bone_items": bone_items_list,
+        "rigid_items": rigid_items_list,
     }
 
     out_path = os.path.join(export_dir, "XXMI_Physics_Config.json")

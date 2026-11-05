@@ -223,6 +223,26 @@ class XXMI_OT_rigid_item_select_verts(bpy.types.Operator):
         item = props.rigid_items[props.rigid_item_index]
         data = get_rigid_data(item)
 
+        # 1. data_json이 비어있는 경우 XXMI_Role_Rigid 그룹으로부터 자동 복구 시도
+        if not data:
+            recovered_rigid = {}
+            for obj in bpy.data.objects:
+                if obj.type == 'MESH':
+                    vg = obj.vertex_groups.get(VG_RIGID)
+                    if vg:
+                        vis = []
+                        for vi in range(len(obj.data.vertices)):
+                            try:
+                                if vg.weight(vi) > 0.5:
+                                    vis.append(vi)
+                            except Exception:
+                                pass
+                        if vis:
+                            recovered_rigid[obj.name] = vis
+            if recovered_rigid:
+                data = recovered_rigid
+                set_rigid_data(item, data)
+
         if not data:
             self.report({'WARNING'}, f"'{item.name}' 슬롯에 등록된 정점이 없습니다.")
             return {'CANCELLED'}
@@ -231,33 +251,44 @@ class XXMI_OT_rigid_item_select_verts(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         bpy.ops.object.select_all(action='DESELECT')
-        valid_objs = []
+        resolved_objs = []
         for obj_name, v_indices in data.items():
             obj = bpy.data.objects.get(obj_name)
+            if not obj or obj.type != 'MESH':
+                for o in bpy.data.objects:
+                    if o.type == 'MESH' and o.vertex_groups.get(VG_RIGID):
+                        obj = o
+                        break
+                if not obj and context.active_object and context.active_object.type == 'MESH':
+                    obj = context.active_object
+
             if obj and obj.type == 'MESH' and v_indices:
                 ensure_object_visible(context, obj)
                 obj.select_set(True)
-                valid_objs.append(obj)
+                if obj not in resolved_objs:
+                    resolved_objs.append((obj, v_indices))
 
-        if not valid_objs:
+        if not resolved_objs:
             self.report({'ERROR'}, "등록된 메쉬 오브젝트를 씬에서 찾을 수 없습니다.")
             return {'CANCELLED'}
 
-        context.view_layer.objects.active = valid_objs[0]
+        first_obj = resolved_objs[0][0]
+        context.view_layer.objects.active = first_obj
         bpy.ops.object.mode_set(mode='EDIT')
         bpy.ops.mesh.select_mode(type='VERT')
         bpy.ops.mesh.select_all(action='DESELECT')
 
-        for obj in valid_objs:
-            v_indices = data.get(obj.name, [])
+        total_sel = 0
+        for obj, v_indices in resolved_objs:
             bm = bmesh.from_edit_mesh(obj.data)
             bm.verts.ensure_lookup_table()
             for vi in v_indices:
                 if vi < len(bm.verts):
                     bm.verts[vi].select_set(True)
+                    total_sel += 1
             bmesh.update_edit_mesh(obj.data)
 
-        self.report({'INFO'}, f"'{item.name}' 슬롯의 정점 {item.vert_count}개를 선택했습니다.")
+        self.report({'INFO'}, f"'{item.name}' 슬롯의 정점 {total_sel}개를 선택했습니다.")
         return {'FINISHED'}
 
 

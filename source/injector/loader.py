@@ -45,6 +45,7 @@ def _load_physics_from_mod(mod_folder, context, props):
             bone_items_data = cfg.get("bone_items", [])
             if bone_items_data and hasattr(props, "bone_items"):
                 props.bone_items.clear()
+                from ..bone.data import set_bone_data
                 for bd in bone_items_data:
                     it = props.bone_items.add()
                     it.name = str(bd.get("name", "모핑 본"))
@@ -62,6 +63,21 @@ def _load_physics_from_mod(mod_folder, context, props):
                     it.inertia = float(bd.get("inertia", getattr(props, "inertia", 1.2)))
                     it.idle_motion = float(bd.get("idle_motion", getattr(props, "idle_motion", 0.4)))
                     it.vert_count = int(bd.get("vert_count", 0))
+                    if "data" in bd and isinstance(bd["data"], dict) and bd["data"]:
+                        set_bone_data(it, bd["data"])
+
+            rigid_items_data = cfg.get("rigid_items", [])
+            if hasattr(props, "rigid_items"):
+                props.rigid_items.clear()
+                if rigid_items_data:
+                    from ..rigid.data import set_rigid_data
+                    for rd in rigid_items_data:
+                        rit = props.rigid_items.add()
+                        rit.name = str(rd.get("name", "강체 부품"))
+                        rit.weight_scale = float(rd.get("weight_scale", 1.0))
+                        rit.vert_count = int(rd.get("vert_count", 0))
+                        if "data" in rd and isinstance(rd["data"], dict) and rd["data"]:
+                            set_rigid_data(rit, rd["data"])
             loaded_source = "XXMI_Physics_Config.json"
         except Exception as e:
             loaded_source = f"JSON 읽기 오류 ({e})"
@@ -219,10 +235,13 @@ def _load_physics_from_mod(mod_folder, context, props):
         props.anchor_obj = rig
         restored_rig = True
 
-    # 4. KD-Tree 3D 정합 기반으로 블렌더 메쉬에 가슴 및 강체(XXMI_Role_Rigid) 정점 그룹 복원
+    # 4. KD-Tree 3D 정합 기반으로 블렌더 메쉬에 물리 본 및 강체(XXMI_Role_Rigid) 정점 그룹 복원
     restored_mesh_names = []
     if pairs:
         pair_caches = []
+        all_b0_verts = {}
+        all_b1_verts = {}
+        all_rigid_verts = {}
         for mp, pp, n in pairs:
             with open(mp, 'rb') as f:
                 map_data = f.read()
@@ -271,12 +290,20 @@ def _load_physics_from_mod(mod_folder, context, props):
             map_data = best_pcache["map_data"]
             kd = best_pcache["kd"]
 
-            vg_l = obj.vertex_groups.get("XXMI_Breast_L") or obj.vertex_groups.new(name="XXMI_Breast_L")
-            vg_r = obj.vertex_groups.get("XXMI_Breast_R") or obj.vertex_groups.new(name="XXMI_Breast_R")
+            b0 = props.bone_items[0] if len(props.bone_items) > 0 else None
+            b1 = props.bone_items[1] if len(props.bone_items) > 1 else None
+            vg_l_name = f"XXMI_{b0.name}" if b0 else "XXMI_Breast_L"
+            vg_r_name = f"XXMI_{b1.name}" if b1 else "XXMI_Breast_R"
+
+            vg_l = obj.vertex_groups.get(vg_l_name) or obj.vertex_groups.new(name=vg_l_name)
+            vg_r = obj.vertex_groups.get(vg_r_name) or obj.vertex_groups.new(name=vg_r_name)
             vg_rigid = obj.vertex_groups.get("XXMI_Role_Rigid") or obj.vertex_groups.new(name="XXMI_Role_Rigid")
 
             non_zero_breast = 0
             rigid_count = 0
+            b0_vis = []
+            b1_vis = []
+            rigid_vis = []
 
             for vi, v in enumerate(mesh.vertices):
                 p_w = mw @ v.co
@@ -285,16 +312,90 @@ def _load_physics_from_mod(mod_folder, context, props):
                     wl, wr, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
                     if wl > 0.0001:
                         vg_l.add([vi], wl, 'REPLACE')
+                        b0_vis.append(vi)
                         non_zero_breast += 1
                     if wr > 0.0001:
                         vg_r.add([vi], wr, 'REPLACE')
+                        b1_vis.append(vi)
                         non_zero_breast += 1
                     if vrigid > 0.5:
                         vg_rigid.add([vi], 1.0, 'REPLACE')
+                        rigid_vis.append(vi)
                         rigid_count += 1
 
+            if b0 and b0_vis:
+                all_b0_verts[obj.name] = b0_vis
+            if b1 and b1_vis:
+                all_b1_verts[obj.name] = b1_vis
+            if rigid_vis:
+                all_rigid_verts[obj.name] = rigid_vis
+
             if non_zero_breast > 0 or rigid_count > 0:
-                restored_mesh_names.append(f"{obj.name} (가슴: {non_zero_breast}개, 강체: {rigid_count}개)")
+                restored_mesh_names.append(f"{obj.name} (물리본: {non_zero_breast}개, 강체: {rigid_count}개)")
+
+        if b0 and all_b0_verts and (not b0.data_json or b0.data_json == "{}"):
+            from ..bone.data import set_bone_data
+            set_bone_data(b0, all_b0_verts)
+        if b1 and all_b1_verts and (not b1.data_json or b1.data_json == "{}"):
+            from ..bone.data import set_bone_data
+            set_bone_data(b1, all_b1_verts)
+        if all_rigid_verts:
+            from ..rigid.data import set_rigid_data
+            r_item = props.rigid_items[0] if len(props.rigid_items) > 0 else props.rigid_items.add()
+            r_item.name = "복원된 강체"
+            set_rigid_data(r_item, all_rigid_verts)
+
+    # 4.5. 메쉬 오브젝트에 이미 존재하는 버텍스 그룹을 기반으로 본 슬롯 정점 데이터(data_json) 자동 동기화
+    from ..bone.data import get_bone_data, set_bone_data
+    for it in props.bone_items:
+        if not get_bone_data(it):
+            cand_vgs = [f"XXMI_{it.name}"]
+            if "왼" in it.name or ".L" in it.name.upper() or "_L" in it.name.upper():
+                cand_vgs.extend(["XXMI_Breast_L", "XXMI_Breast.L"])
+            elif "오" in it.name or ".R" in it.name.upper() or "_R" in it.name.upper():
+                cand_vgs.extend(["XXMI_Breast_R", "XXMI_Breast.R"])
+
+            recovered = {}
+            for obj in bpy.data.objects:
+                if obj.type == 'MESH':
+                    vg = None
+                    for vgn in cand_vgs:
+                        vg = obj.vertex_groups.get(vgn)
+                        if vg:
+                            break
+                    if vg:
+                        vis = []
+                        for vi in range(len(obj.data.vertices)):
+                            try:
+                                if vg.weight(vi) > 0.0001:
+                                    vis.append(vi)
+                            except Exception:
+                                pass
+                        if vis:
+                            recovered[obj.name] = vis
+            if recovered:
+                set_bone_data(it, recovered)
+
+    # 강체 슬롯도 마찬가지로 정점 데이터 동기화
+    from ..rigid.data import get_rigid_data, set_rigid_data
+    for rit in props.rigid_items:
+        if not get_rigid_data(rit):
+            recovered_rigid = {}
+            for obj in bpy.data.objects:
+                if obj.type == 'MESH':
+                    vg = obj.vertex_groups.get("XXMI_Role_Rigid")
+                    if vg:
+                        vis = []
+                        for vi in range(len(obj.data.vertices)):
+                            try:
+                                if vg.weight(vi) > 0.5:
+                                    vis.append(vi)
+                            except Exception:
+                                pass
+                        if vis:
+                            recovered_rigid[obj.name] = vis
+            if recovered_rigid:
+                set_rigid_data(rit, recovered_rigid)
 
     # 5. 복원 완료 후 본 위치 기반 가중치 재계산 동기화
     if restored_rig and rig:
