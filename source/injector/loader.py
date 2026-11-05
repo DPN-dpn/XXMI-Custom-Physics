@@ -65,6 +65,19 @@ def _load_physics_from_mod(mod_folder, context, props):
                     it.vert_count = int(bd.get("vert_count", 0))
                     if "data" in bd and isinstance(bd["data"], dict) and bd["data"]:
                         set_bone_data(it, bd["data"])
+                        vg_name = f"XXMI_{it.name}"
+                        for oname, vis in bd["data"].items():
+                            obj = bpy.data.objects.get(oname)
+                            if not obj or obj.type != 'MESH':
+                                if context.active_object and context.active_object.type == 'MESH':
+                                    obj = context.active_object
+                            if obj and obj.type == 'MESH' and vis:
+                                vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.new(name=vg_name)
+                                valid_vis = [v for v in vis if v < len(obj.data.vertices)]
+                                if valid_vis:
+                                    vg.add(valid_vis, it.peak_weight, 'REPLACE')
+                                if not props.target_obj:
+                                    props.target_obj = obj
 
             rigid_items_data = cfg.get("rigid_items", [])
             if hasattr(props, "rigid_items"):
@@ -78,6 +91,16 @@ def _load_physics_from_mod(mod_folder, context, props):
                         rit.vert_count = int(rd.get("vert_count", 0))
                         if "data" in rd and isinstance(rd["data"], dict) and rd["data"]:
                             set_rigid_data(rit, rd["data"])
+                            for oname, vis in rd["data"].items():
+                                obj = bpy.data.objects.get(oname)
+                                if not obj or obj.type != 'MESH':
+                                    if context.active_object and context.active_object.type == 'MESH':
+                                        obj = context.active_object
+                                if obj and obj.type == 'MESH' and vis:
+                                    vg = obj.vertex_groups.get("XXMI_Role_Rigid") or obj.vertex_groups.new(name="XXMI_Role_Rigid")
+                                    valid_vis = [v for v in vis if v < len(obj.data.vertices)]
+                                    if valid_vis:
+                                        vg.add(valid_vis, 1.0, 'REPLACE')
             loaded_source = "XXMI_Physics_Config.json"
         except Exception as e:
             loaded_source = f"JSON 읽기 오류 ({e})"
@@ -228,8 +251,9 @@ def _load_physics_from_mod(mod_folder, context, props):
             eb.head_radius = radius
             eb.tail_radius = radius * 0.7
             eb.envelope_distance = radius * 1.4
-            eb["xxmi_bone_type"] = "BREAST"
-            eb["xxmi_side"] = "L" if ".L" in bname else "R"
+            b_item = next((it for it in props.bone_items if it.name == bname), None)
+            eb["xxmi_bone_type"] = b_item.bone_type if b_item else "MORPH"
+            eb["xxmi_side"] = "L" if (".L" in bname or "왼" in bname) else "R"
 
         bpy.ops.object.mode_set(mode='OBJECT')
         props.anchor_obj = rig
@@ -339,9 +363,9 @@ def _load_physics_from_mod(mod_folder, context, props):
         if b1 and all_b1_verts and (not b1.data_json or b1.data_json == "{}"):
             from ..bone.data import set_bone_data
             set_bone_data(b1, all_b1_verts)
-        if all_rigid_verts:
+        if all_rigid_verts and len(props.rigid_items) == 0:
             from ..rigid.data import set_rigid_data
-            r_item = props.rigid_items[0] if len(props.rigid_items) > 0 else props.rigid_items.add()
+            r_item = props.rigid_items.add()
             r_item.name = "복원된 강체"
             set_rigid_data(r_item, all_rigid_verts)
 
