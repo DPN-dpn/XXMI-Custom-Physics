@@ -42,6 +42,16 @@ def _read_buf_positions_np(buf_path):
     return data[:n * 10].reshape(n, 10)[:, :3].astype(np.float64)
 
 
+def _read_buf_positions_and_normals_np(buf_path):
+    """Position.buf (stride 40)의 위치(xyz)와 법선(normal)을 각각 (n, 3) float64 numpy 배열로 읽습니다."""
+    data = np.fromfile(buf_path, dtype='<f4')
+    n = len(data) // 10
+    reshaped = data[:n * 10].reshape(n, 10)
+    pos = reshaped[:, :3].astype(np.float64)
+    norm = reshaped[:, 3:6].astype(np.float64)
+    return pos, norm
+
+
 def _read_buf_positions(buf_path):
     return [Vector(p) for p in _read_buf_positions_np(buf_path).tolist()]
 

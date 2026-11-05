@@ -437,19 +437,18 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             rigid = (arrs.get("rigid", np.zeros(len(world), dtype=np.float32)) > 0.5)
 
             active = (w_arr > 0.0001) & ~rigid
+            mat3 = obj.matrix_world.to_3x3()
+            mesh_verts = obj.data.vertices
             for vi in np.nonzero(active)[0].tolist():
                 pt = world[vi]
-                rel = pt - head
-                t_proj = float(rel @ bone_u)
-                v_perp = Vector(rel) - Vector(bone_u) * t_proj
+                norm = (mat3 @ mesh_verts[vi].normal).normalized()
                 items.append({
                     "obj": obj,
                     "vg": vg,
                     "vi": vi,
                     "pt": Vector(pt),
+                    "norm": norm,
                     "w": float(w_arr[vi]),
-                    "t": t_proj,
-                    "v_perp": v_perp,
                 })
 
         if len(items) < 2:
@@ -461,20 +460,18 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             kd.insert(it["pt"], k)
         kd.balance()
 
-        # 3. 안쪽(t_proj 작은 곳)에서 바깥쪽(t_proj 큰 곳)으로 순차 전파
+        # 3. 표면 법선(Normal) 기반 다층 레이어 안티 클리핑
         # 연쇄 증폭(Cascade Explosion) 방지: 원본 가중치 기준으로 단 1회 8% 안전 에어갭 부여
-        sort_order = sorted(range(len(items)), key=lambda k: items[k]["t"])
         orig_weights = [items[k]["w"] for k in range(len(items))]
         updates = {}
 
-        for idx in sort_order:
+        for idx in range(len(items)):
             it = items[idx]
             cur_w = orig_weights[idx]
             if cur_w <= 0.005:
                 continue
             cur_pt = it["pt"]
-            cur_t = it["t"]
-            cur_v_perp = it["v_perp"]
+            cur_n = it["norm"]
 
             hits = kd.find_range(cur_pt, tol)
             if not hits:
@@ -484,17 +481,27 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 if h_idx == idx:
                     continue
                 hit_it = items[h_idx]
+                hit_pt = hit_it["pt"]
+                hit_n = hit_it["norm"]
 
-                # [수평 번짐 방지 / 진정한 수직 레이어 정합]:
-                # 1. 본 축 수직 단면 위치 차이가 7.0mm 이내인 동일 단면 상의 수직 레이어 매칭 (삼각망 폴리곤 간격 수용)
-                diff_perp = (hit_it["v_perp"] - cur_v_perp).length
-                if diff_perp > 0.0070:
+                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 > 0.5)
+                dot_n = cur_n.dot(hit_n)
+                if dot_n < 0.5:
                     continue
 
-                # 2. 전방 깊이(t)가 최소 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
-                diff_t = hit_it["t"] - cur_t
+                # 2. 노멀 방향(법선 벡터)으로의 거리: cur에서 hit로 향하는 거리
+                delta = hit_pt - cur_pt
+                d_norm = delta.dot(cur_n)
+
+                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 7.5mm 이내 (삼각망 폴리곤 간격 수용)
+                d_perp_sq = max(0.0, delta.length_squared - d_norm * d_norm)
+                if d_perp_sq > (0.0075 * 0.0075):
+                    continue
+
+                # 4. 진정한 바깥쪽 레이어(겉옷) 판정: 법선(Normal) 방향으로 0.3mm 이상 외부에 위치
+                # (아랫가슴(Underboob)이나 가슴골처럼 곡면이 경사진 부위에서도 노멀은 항상 인체 바깥쪽을 향함)
                 target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 겉옷이 살보다 항상 1~2mm 더 전방 확장되어 바닐라 스키닝 비틀림 오차 흡수
-                if diff_t >= 0.0003 and hit_it["w"] < target_w:
+                if d_norm >= 0.0003 and hit_it["w"] < target_w:
                     hit_it["w"] = target_w
                     key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
                     updates[key] = target_w

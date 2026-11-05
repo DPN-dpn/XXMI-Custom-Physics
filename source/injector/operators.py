@@ -16,6 +16,7 @@ from .ini_parser import (
 )
 from .buffer_io import (
     _read_buf_positions_np,
+    _read_buf_positions_and_normals_np,
     _read_buf_positions,
     _find_best_transform_for_object,
     _export_physics_state_buf,
@@ -189,7 +190,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 if not os.path.exists(buf_path):
                     continue
 
-                buf_np = _read_buf_positions_np(buf_path)
+                buf_np, buf_norm = _read_buf_positions_and_normals_np(buf_path)
                 n_buf = len(buf_np)
                 if n_buf == 0:
                     continue
@@ -279,17 +280,17 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         if len(sub_indices) < 2:
                             continue
 
-                        # D3D 버퍼는 Z가 전방(+Z 방향으로 겉옷 돌출)
-                        # 연쇄 증폭(Cascade Explosion) 방지: 원본 가중치 기준으로 단 1회 8% 안전 에어갭 부여
+                        # 표면 법선(Normal) 기반 다층 레이어 Anti-Clipping 후처리
+                        # 아랫가슴(Underboob), 윗가슴, 가슴골 등 곡면 경사 방향에 무관하게 항상 인체 외측을 정확히 판별
                         orig_w_arr = np.copy(w_arr)
-                        sort_sub = sorted(sub_indices, key=lambda k: buf_np[phys_indices[k]][2])
 
-                        for k in sort_sub:
+                        for k in sub_indices:
                             bi = phys_indices[k]
                             cur_w = float(orig_w_arr[bi])
                             if cur_w <= 0.005:
                                 continue
                             cur_p = buf_np[bi]
+                            cur_n = buf_norm[bi]
 
                             hits = kd_phys.find_range(Vector(cur_p), 0.020)
                             if not hits:
@@ -300,17 +301,26 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                     continue
                                 hit_bi = phys_indices[hit_k]
                                 hit_p = buf_np[hit_bi]
+                                hit_n = buf_norm[hit_bi]
 
-                                # 수평(XY 가슴 단면) 거리 오차 7.5mm 이내 (삼각망 폴리곤 간격 수용)
-                                dx = hit_p[0] - cur_p[0]
-                                dy = hit_p[1] - cur_p[1]
-                                if (dx * dx + dy * dy) > (0.0075 * 0.0075):
+                                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 > 0.5)
+                                dot_n = float(cur_n[0]*hit_n[0] + cur_n[1]*hit_n[1] + cur_n[2]*hit_n[2])
+                                if dot_n < 0.5:
                                     continue
 
-                                # 깊이(Z): 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
-                                dz = hit_p[2] - cur_p[2]
+                                # 2. 노멀 방향(법선 벡터)으로의 거리: cur에서 hit로 향하는 거리
+                                delta = hit_p - cur_p
+                                d_norm = float(delta[0]*cur_n[0] + delta[1]*cur_n[1] + delta[2]*cur_n[2])
+
+                                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 7.5mm 이내 (삼각망 폴리곤 간격 수용)
+                                d2 = float(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2])
+                                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
+                                if d_perp_sq > (0.0075 * 0.0075):
+                                    continue
+
+                                # 4. 진정한 바깥쪽 레이어(겉옷) 판정: 법선(Normal) 방향으로 0.3mm 이상 외부에 위치
                                 target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 바닐라 스키닝 비틀림 오차를 흡수하는 에어갭 보장
-                                if dz >= 0.0003 and w_arr[hit_bi] < target_w:
+                                if d_norm >= 0.0003 and w_arr[hit_bi] < target_w:
                                     w_arr[hit_bi] = target_w
 
                 max_wl = float(wl_out.max())
