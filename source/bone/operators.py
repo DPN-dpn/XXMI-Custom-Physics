@@ -105,10 +105,129 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def find_and_remove_bones_from_rigs(context, props, item, idx):
+    """
+    지정된 물리 본 슬롯(item)에 대응하는 블렌더 리그(Armature) 내의 본들을 찾아 삭제합니다.
+    이름 불일치(모핑 본 1 <-> Breast.L 등), 하위 체인 본(.001 등), 대소문자,
+    접두사 차이, 슬롯 인덱스 매칭을 모두 지원합니다.
+    """
+    name = item.name.strip()
+    prev_name = getattr(item, "prev_name", "").strip()
+
+    # 1. 씬 내의 모든 물리 리그 후보 검색
+    rig_candidates = []
+    if getattr(props, "anchor_obj", None):
+        rig_candidates.append(props.anchor_obj)
+    for r_name in (PHYSICS_RIG_NAME, "XXMI_Breast_Rig"):
+        r_obj = bpy.data.objects.get(r_name)
+        if r_obj and r_obj not in rig_candidates:
+            rig_candidates.append(r_obj)
+    for obj in bpy.data.objects:
+        if obj.type == 'ARMATURE' and obj not in rig_candidates:
+            oname_l = obj.name.lower()
+            if "xxmi" in oname_l or "physics" in oname_l or "breast" in oname_l:
+                rig_candidates.append(obj)
+
+    # 2. 본 이름 매칭 후보 목록 생성
+    cand_names = set()
+    if name:
+        cand_names.add(name)
+        cand_names.add(name.lower())
+        cand_names.add(name.replace(".", "_"))
+        cand_names.add(name.replace("_", "."))
+    if prev_name:
+        cand_names.add(prev_name)
+        cand_names.add(prev_name.lower())
+        cand_names.add(prev_name.replace(".", "_"))
+        cand_names.add(prev_name.replace("_", "."))
+
+    # 왼쪽/오른쪽 패턴 및 번호 매칭
+    is_left = ("왼" in name) or (".l" in name.lower()) or ("_l" in name.lower()) or (idx == 0 and "1" in name)
+    is_right = ("오" in name) or (".r" in name.lower()) or ("_r" in name.lower()) or (idx == 1 and "2" in name)
+    if is_left:
+        for ln in ("Breast.L", "Breast_L", "Breast.Left", "Left", "BreastL"):
+            cand_names.add(ln)
+            cand_names.add(ln.lower())
+    if is_right:
+        for rn in ("Breast.R", "Breast_R", "Breast.Right", "Right", "BreastR"):
+            cand_names.add(rn)
+            cand_names.add(rn.lower())
+
+    was_mode = context.mode
+    orig_active = context.view_layer.objects.active
+    orig_active_name = orig_active.name if orig_active else None
+    total_removed_bones = []
+
+    for rig in rig_candidates:
+        if not rig or rig.type != 'ARMATURE':
+            continue
+
+        ensure_object_visible(context, rig)
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        try:
+            context.view_layer.objects.active = rig
+            bpy.ops.object.mode_set(mode='EDIT')
+        except Exception:
+            continue
+
+        ebones = rig.data.edit_bones
+        to_remove = set()
+
+        # 2.1 이름 기반 매칭 (정확 일치, 대소문자 무시, 접두사/체인 일치)
+        for eb in ebones:
+            eb_l = eb.name.lower()
+            for cn in cand_names:
+                cn_l = cn.lower()
+                if eb_l == cn_l or eb_l.startswith(f"{cn_l}.") or eb_l.startswith(f"{cn_l}_"):
+                    to_remove.add(eb)
+                    break
+
+        # 2.2 이름으로 못 찾았고 슬롯 인덱스 idx가 유효한 경우 인덱스 매칭 fallback
+        if not to_remove and 0 <= idx < len(ebones):
+            eb_list = list(ebones)
+            to_remove.add(eb_list[idx])
+
+        # 본 삭제 실행
+        for eb in list(to_remove):
+            total_removed_bones.append(eb.name)
+            ebones.remove(eb)
+
+        remaining_count = len(ebones)
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+        # 만약 리그의 모든 본이 삭제되었다면 빈 리그 오브젝트 제거
+        if remaining_count == 0:
+            if getattr(props, "anchor_obj", None) == rig:
+                props.anchor_obj = None
+            bpy.data.objects.remove(rig, do_unlink=True)
+
+    # 원래 모드 복원
+    if orig_active_name and orig_active_name in bpy.data.objects:
+        try:
+            o_act = bpy.data.objects[orig_active_name]
+            if o_act.type == 'MESH':
+                ensure_object_visible(context, o_act)
+                context.view_layer.objects.active = o_act
+                if was_mode == 'EDIT_MESH':
+                    bpy.ops.object.mode_set(mode='EDIT')
+        except Exception:
+            pass
+
+    return total_removed_bones, cand_names
+
+
 class XXMI_OT_bone_item_remove(bpy.types.Operator):
     bl_idname = "object.xxmi_bone_item_remove"
     bl_label = "물리 본 슬롯 삭제"
-    bl_description = "선택된 물리 본 슬롯을 목록에서 삭제합니다"
+    bl_description = "선택된 물리 본 슬롯을 목록에서 삭제하고, 실제 블렌더 리그 상의 본과 버텍스 그룹도 함께 삭제합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -122,31 +241,37 @@ class XXMI_OT_bone_item_remove(bpy.types.Operator):
         item = props.bone_items[idx]
         name = item.name
 
-        # 리그에서 해당 본 삭제
-        rig = getattr(props, "anchor_obj", None) or bpy.data.objects.get(PHYSICS_RIG_NAME)
-        if rig and rig.type == 'ARMATURE':
-            was_mode = context.mode
-            if was_mode != 'OBJECT':
-                bpy.ops.object.mode_set(mode='OBJECT')
-            context.view_layer.objects.active = rig
-            bpy.ops.object.mode_set(mode='EDIT')
-            # 기본 본 및 하위 체인 본들(.001 등) 모두 제거
-            to_remove = [eb for eb in rig.data.edit_bones if eb.name == name or eb.name.startswith(f"{name}.")]
-            for eb in to_remove:
-                rig.data.edit_bones.remove(eb)
-            bpy.ops.object.mode_set(mode='OBJECT')
+        # 1. 리그에서 해당 본 및 하위 체인 본 삭제
+        removed_bones, cand_names = find_and_remove_bones_from_rigs(context, props, item, idx)
 
-        # 관련 메쉬 오브젝트의 버텍스 그룹 제거
-        vg_target = f"XXMI_{name}"
+        # 2. 관련 메쉬 오브젝트의 버텍스 그룹 완전 제거
+        vg_targets = {f"XXMI_{name}", name}
+        for cn in cand_names:
+            vg_targets.add(f"XXMI_{cn}")
+            vg_targets.add(cn)
+
+        cleared_vg_objs = 0
         for obj in bpy.data.objects:
             if obj.type == 'MESH':
-                vg = obj.vertex_groups.get(vg_target)
-                if vg:
-                    obj.vertex_groups.remove(vg)
+                removed_any = False
+                for vgn in vg_targets:
+                    vg = obj.vertex_groups.get(vgn)
+                    if vg:
+                        obj.vertex_groups.remove(vg)
+                        removed_any = True
+                if removed_any:
+                    cleared_vg_objs += 1
 
+        # 3. 슬롯 목록에서 항목 삭제
         props.bone_items.remove(idx)
         props.bone_item_index = max(0, min(idx, len(props.bone_items) - 1))
-        self.report({'INFO'}, f"물리 본 슬롯 '{name}'을 삭제했습니다.")
+
+        if removed_bones:
+            bones_str = ", ".join(removed_bones)
+            self.report({'INFO'}, f"물리 본 슬롯 '{name}' 및 리그 본 [{bones_str}] 삭제 완료.")
+        else:
+            self.report({'INFO'}, f"물리 본 슬롯 '{name}'을 삭제했습니다.")
+
         return {'FINISHED'}
 
 

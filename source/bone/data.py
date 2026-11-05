@@ -51,8 +51,10 @@ def handle_bone_item_rename(item, context=None):
         rig = bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
 
     if rig and rig.type == 'ARMATURE':
+        from ..utils import ensure_object_visible
         was_mode = bpy.context.mode
         orig_active = bpy.context.view_layer.objects.active
+        ensure_object_visible(bpy.context, rig)
         if was_mode != 'OBJECT':
             try:
                 bpy.ops.object.mode_set(mode='OBJECT')
@@ -62,14 +64,22 @@ def handle_bone_item_rename(item, context=None):
         try:
             bpy.context.view_layer.objects.active = rig
             bpy.ops.object.mode_set(mode='EDIT')
-            if prev_name in rig.data.edit_bones:
-                rig.data.edit_bones[prev_name].name = new_name
+            target_eb = rig.data.edit_bones.get(prev_name)
+            if not target_eb:
+                p_low = prev_name.lower()
+                for eb in rig.data.edit_bones:
+                    if eb.name.lower() == p_low:
+                        target_eb = eb
+                        break
+            if target_eb:
+                target_eb.name = new_name
             bpy.ops.object.mode_set(mode='OBJECT')
         except Exception:
             pass
 
         if orig_active and orig_active.name in bpy.data.objects:
             try:
+                ensure_object_visible(bpy.context, orig_active)
                 bpy.context.view_layer.objects.active = orig_active
                 if was_mode == 'EDIT_MESH':
                     bpy.ops.object.mode_set(mode='EDIT')
