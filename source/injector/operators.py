@@ -73,19 +73,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         # 1. 물리 가중치를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
         active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-
-        # 좌우 본 식별 (이름 또는 뼈대 위치 기준 자동 분류)
-        def _classify_side(bname):
-            b_lower = bname.lower()
-            if any(k in b_lower for k in ("_l", ".l", "left", "왼")):
-                return "l"
-            if any(k in b_lower for k in ("_r", ".r", "right", "오른")):
-                return "r"
-            if rig and rig.type == 'ARMATURE':
-                eb = rig.data.bones.get(bname)
-                if eb:
-                    return "l" if eb.head_local.x > 0 else "r"
-            return "l"
+        b0_name = active_bones[0] if len(active_bones) > 0 else None
+        b1_name = active_bones[1] if len(active_bones) > 1 else None
 
         all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
         target_vgs = all_bone_vgs | {"XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
@@ -107,21 +96,28 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 continue
 
             group_map = {}
-            for bn in active_bones:
-                vg = obj.vertex_groups.get(f"XXMI_{bn}")
-                if vg:
-                    group_map[vg.index] = _classify_side(bn)
-            for gname, key in (("XXMI_Breast_L", "l"), ("XXMI_Breast_R", "r"), ("XXMI_Role_Rigid", "rigid")):
+            if b0_name:
+                vg0 = obj.vertex_groups.get(f"XXMI_{b0_name}")
+                if vg0:
+                    group_map[vg0.index] = "slot0"
+            if b1_name:
+                vg1 = obj.vertex_groups.get(f"XXMI_{b1_name}")
+                if vg1:
+                    group_map[vg1.index] = "slot1"
+
+            # 레거시 버텍스 그룹 호환
+            for gname, key in (("XXMI_Breast_L", "slot0"), ("XXMI_Breast_R", "slot1"), ("XXMI_Role_Rigid", "rigid")):
                 vg = obj.vertex_groups.get(gname)
                 if vg and vg.index not in group_map:
                     group_map[vg.index] = key
+
             arrs = read_vertex_group_arrays(obj, group_map)
             zeros = np.zeros(n_verts, dtype=np.float32)
-            w_l = arrs.get("l", zeros)
-            w_r = arrs.get("r", zeros)
+            w_0 = arrs.get("slot0", zeros)
+            w_1 = arrs.get("slot1", zeros)
             is_rigid = (arrs.get("rigid", zeros) > 0.5).astype(np.float32)
 
-            weighted = np.nonzero((w_l > 1e-5) | (w_r > 1e-5) | (is_rigid > 0.5))[0]
+            weighted = np.nonzero((w_0 > 1e-5) | (w_1 > 1e-5) | (is_rigid > 0.5))[0]
             if len(weighted) == 0:
                 continue
 
@@ -137,8 +133,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             mesh_caches.append({
                 "obj": obj,
                 "wco": wco,
-                "w_l": w_l[weighted],
-                "w_r": w_r[weighted],
+                "w_l": w_0[weighted],
+                "w_r": w_1[weighted],
                 "rigid": is_rigid[weighted],
                 "sample_obj": sample_obj,
             })

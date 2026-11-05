@@ -316,14 +316,14 @@ def _load_physics_from_mod(mod_folder, context, props):
 
             b0 = props.bone_items[0] if len(props.bone_items) > 0 else None
             b1 = props.bone_items[1] if len(props.bone_items) > 1 else None
-            vg_l_name = f"XXMI_{b0.name}" if b0 else "XXMI_Breast_L"
-            vg_r_name = f"XXMI_{b1.name}" if b1 else "XXMI_Breast_R"
+            vg_0_name = f"XXMI_{b0.name}" if b0 else "XXMI_Bone_0"
+            vg_1_name = f"XXMI_{b1.name}" if b1 else "XXMI_Bone_1"
 
-            vg_l = obj.vertex_groups.get(vg_l_name) or obj.vertex_groups.new(name=vg_l_name)
-            vg_r = obj.vertex_groups.get(vg_r_name) or obj.vertex_groups.new(name=vg_r_name)
+            vg_0 = obj.vertex_groups.get(vg_0_name) or obj.vertex_groups.new(name=vg_0_name)
+            vg_1 = obj.vertex_groups.get(vg_1_name) or obj.vertex_groups.new(name=vg_1_name)
             vg_rigid = obj.vertex_groups.get("XXMI_Role_Rigid") or obj.vertex_groups.new(name="XXMI_Role_Rigid")
 
-            non_zero_breast = 0
+            non_zero_phys = 0
             rigid_count = 0
             b0_vis = []
             b1_vis = []
@@ -333,15 +333,15 @@ def _load_physics_from_mod(mod_folder, context, props):
                 p_w = mw @ v.co
                 _, b_idx, dist = kd.find(p_w)
                 if dist < 0.02:
-                    wl, wr, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
-                    if wl > 0.0001:
-                        vg_l.add([vi], wl, 'REPLACE')
+                    w0, w1, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
+                    if w0 > 0.0001:
+                        vg_0.add([vi], w0, 'REPLACE')
                         b0_vis.append(vi)
-                        non_zero_breast += 1
-                    if wr > 0.0001:
-                        vg_r.add([vi], wr, 'REPLACE')
+                        non_zero_phys += 1
+                    if w1 > 0.0001:
+                        vg_1.add([vi], w1, 'REPLACE')
                         b1_vis.append(vi)
-                        non_zero_breast += 1
+                        non_zero_phys += 1
                     if vrigid > 0.5:
                         vg_rigid.add([vi], 1.0, 'REPLACE')
                         rigid_vis.append(vi)

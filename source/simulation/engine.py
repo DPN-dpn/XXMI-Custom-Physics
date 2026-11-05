@@ -77,22 +77,17 @@ def _step_preview_ode(t, props, active_bones):
         stiff = omega * omega
         damp = 2.0 * omega * (damping * 0.50)
 
-        # 본의 좌/우 위상 (인덱스나 명칭에 따라 자연스러운 대칭 반전 적용)
-        is_right = (idx % 2 == 1) or ("right" in bn.lower() or bn.lower().endswith(".r"))
-        phase_offset = 0.35 if is_right else 0.0
-        sign_x = -0.9 if is_right else 1.0
-
+        # 정직한 뉴턴 관성력 (F = -m * a): 모든 본은 동일한 물리 법칙에 따라 정직하게 관성 수신
         ext_force = Vector((
-            -anim_vel.x * sign_x * 12.0 * inertia,
+            -anim_vel.x * 12.0 * inertia,
             -anim_vel.y * 12.0 * inertia,
             -anim_vel.z * 12.0 * inertia,
         ))
 
         if idle > 0.001:
-            breath_phase = t * 2.5 + phase_offset
+            breath_phase = t * 2.5
             ext_force.z += math.sin(breath_phase) * 1.5 * idle
             ext_force.y += math.cos(breath_phase) * 1.1 * idle
-            ext_force.x += math.sin(breath_phase * 0.5) * (0.6 * sign_x) * idle
 
         disp = b_st["disp"]
         vel = b_st["vel"]
