@@ -84,8 +84,8 @@ void main() {{
 
     if (length(curr_root) < 1e-4) {{
         float breath_t = time * 2.5;
-        float3 fb_l = float3(sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_L;
-        float3 fb_r = float3(-sin(breath_t) * 0.005, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_R;
+        float3 fb_l = float3(0.0, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_L;
+        float3 fb_r = float3(0.0, sin(breath_t) * 0.010, cos(breath_t) * 0.007) * IDLE_SCALE_R;
         PhysState[0] = float4(fb_l, 0.5);
         PhysState[1] = float4(fb_r, 0.5);
         return;
