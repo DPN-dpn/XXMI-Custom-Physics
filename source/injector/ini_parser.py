@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime
 
 
 def _extract_res_name(rhs):
@@ -69,21 +70,37 @@ def _clean_injected_lines(lines):
 
 def backup_ini_file(ini_path):
     """
-    물리 주입 전 원본 .ini 파일의 백업본(.bak)을 생성합니다.
+    물리 주입 전 원본 .ini 파일의 백업본을 생성합니다.
+    1. 최초 1회: 순수 바닐라 원본 보존용 'filename.ini.bak' 영구 생성 (있으면 유지)
+    2. 매 주입 시: 변경 이력 보존용 'filename.ini.YYYYMMDD_HHMMSS.bak' 타임스탬프 백업 계속 누적 생성
     """
     if not ini_path or not os.path.exists(ini_path):
         return None
-    bak_path = ini_path + ".bak"
-    if os.path.exists(bak_path):
-        return bak_path
 
     try:
         with open(ini_path, 'r', encoding='utf-8') as f:
             raw_lines = f.readlines()
         clean_lines, modified = _clean_injected_lines(raw_lines)
-        with open(bak_path, 'w', encoding='utf-8') as f:
-            f.writelines(clean_lines if modified else raw_lines)
-        return bak_path
+        base_lines = clean_lines if modified else raw_lines
+
+        # 1. 영구 원본 백업 (.bak)이 없으면 최초 생성
+        pristine_bak = ini_path + ".bak"
+        if not os.path.exists(pristine_bak):
+            with open(pristine_bak, 'w', encoding='utf-8') as f:
+                f.writelines(base_lines)
+
+        # 2. 매 주입 시점의 타임스탬프 백업 생성 (.YYYYMMDD_HHMMSS.bak)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts_bak = f"{ini_path}.{timestamp}.bak"
+        counter = 1
+        while os.path.exists(ts_bak):
+            ts_bak = f"{ini_path}.{timestamp}_{counter}.bak"
+            counter += 1
+
+        with open(ts_bak, 'w', encoding='utf-8') as f:
+            f.writelines(raw_lines)
+
+        return ts_bak
     except Exception as e:
         print(f"[XXMI] INI 백업 생성 실패 ({ini_path}): {e}")
         return None

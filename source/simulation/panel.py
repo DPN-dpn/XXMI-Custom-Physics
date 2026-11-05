@@ -74,6 +74,11 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
             p_col.prop(target_item, "damping")
             p_col.prop(target_item, "inertia")
             p_col.prop(target_item, "idle_motion")
+            if target_item.bone_type in {'TAIL', 'HAIR', 'SKIRT', 'WING'}:
+                p_col.separator()
+                p_col.label(text=f"'{target_item.name}' 체인 관절 파라미터:", icon='CONSTRAINT_BONE')
+                p_col.prop(target_item, "gravity_factor")
+                p_col.prop(target_item, "stiffness")
             if len(props.bone_items) > 1:
                 p_col.separator()
                 p_col.operator("object.xxmi_copy_physics_params_to_all", text="모든 본에 현재 설정 일괄 복사", icon='COPYDOWN')

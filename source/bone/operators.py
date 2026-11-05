@@ -364,18 +364,43 @@ def sync_slot_bone_to_rig(context, item):
     bpy.ops.object.mode_set(mode='EDIT')
 
     ebones = rig.data.edit_bones
-    eb = ebones.get(item.name)
-    if not eb:
-        eb = ebones.new(item.name)
+    btype = getattr(item, "bone_type", 'MORPH')
 
-    eb.head = head
-    eb.tail = tail
-    eb.head_radius = bone_radius
-    eb.tail_radius = bone_radius * 0.7
-    eb.envelope_distance = bone_radius * 1.4
-    eb["xxmi_bone_type"] = "MORPH"
+    if btype in {'TAIL', 'HAIR'}:
+        # 다관절 체인 (순차 연결 FK 본) 생성
+        n_segs = max(1, getattr(item, "chain_segments", 4))
+        vec_delta = (tail - head) / n_segs
+        prev_bone = None
+        for si in range(n_segs):
+            s_name = item.name if si == 0 else f"{item.name}.{si:03d}"
+            eb = ebones.get(s_name) or ebones.new(s_name)
+            s_head = head + vec_delta * si
+            s_tail = head + vec_delta * (si + 1)
+            eb.head = s_head
+            eb.tail = s_tail
+            seg_radius = bone_radius * (1.0 - 0.4 * (si / max(1, n_segs)))
+            eb.head_radius = seg_radius
+            eb.tail_radius = seg_radius * 0.8
+            eb.envelope_distance = seg_radius * 1.3
+            eb["xxmi_bone_type"] = btype
+            if prev_bone:
+                eb.parent = prev_bone
+                eb.use_connect = True
+            prev_bone = eb
+        bone_out_name = item.name
+    else:
+        eb = ebones.get(item.name)
+        if not eb:
+            eb = ebones.new(item.name)
 
-    bone_out_name = eb.name
+        eb.head = head
+        eb.tail = tail
+        eb.head_radius = bone_radius
+        eb.tail_radius = bone_radius * 0.7
+        eb.envelope_distance = bone_radius * 1.4
+        eb["xxmi_bone_type"] = btype
+
+        bone_out_name = eb.name
 
     bpy.ops.object.mode_set(mode='OBJECT')
     rig.show_in_front = True
@@ -494,8 +519,18 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
 
         # 이름 및 종류 설정
         n_items = len(props.bone_items)
-        item.name = f"모핑 본 {n_items}"
-        item.bone_type = 'MORPH' 
+        selected_type = getattr(props, "bone_type", 'MORPH')
+        item.bone_type = selected_type
+
+        type_names = {
+            'MORPH': "모핑 본",
+            'TAIL': "꼬리 본",
+            'HAIR': "헤어 본",
+            'SKIRT': "스커트 본",
+            'WING': "날개 본",
+        }
+        type_prefix = type_names.get(selected_type, "물리 본")
+        item.name = f"{type_prefix} {n_items}"
 
         item.peak_weight = getattr(props, "peak_weight", 0.40)
         item.falloff_power = getattr(props, "falloff_power", 1.0)

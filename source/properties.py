@@ -1,6 +1,15 @@
 import bpy
 
 
+BONE_TYPE_ITEMS = [
+    ('MORPH', "모핑 본 (단일 앵커)", "단일 앵커 중심으로 부드럽게 변형되는 모핑 물리 본 (가슴, 복부 등)", 'SHAPEKEY_DATA', 0),
+    ('TAIL', "꼬리 본 (다관절 체인)", "순차적으로 연결된 다관절 FK 체인 물리 본 (꼬리 등)", 'BONE_DATA', 1),
+    ('HAIR', "헤어 본 (다관절 체인)", "중력과 관성을 따르는 헤어/포니테일 체인 물리 본", 'STRANDS', 2),
+    ('SKIRT', "스커트 본 (방사형 체인)", "원형/방사형으로 배치되는 의상/스커트 물리 본", 'MESH_GRID', 3),
+    ('WING', "날개 본 (관절 플랩)", "좌우 관절 회전 및 펄럭임 날개 물리 본", 'OUTLINER_OB_ARMATURE', 4),
+]
+
+
 def on_bone_item_name_update(self, context):
     try:
         from .bone.data import handle_bone_item_rename
@@ -23,9 +32,7 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     )
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
-        items=[
-            ('MORPH', "모핑 본", "3D 형태를 추종하여 부드럽게 변형되는 모핑 물리 본"),
-        ],
+        items=BONE_TYPE_ITEMS,
         default='MORPH'
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
@@ -38,6 +45,33 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
         name="정점 수",
         default=0,
         description="이 본 슬롯에 등록된 총 정점 개수입니다"
+    )
+
+    # ── 다관절 체인(꼬리/헤어/스커트/날개) 전용 파라미터 ──
+    chain_segments: bpy.props.IntProperty(
+        name="체인 관절 개수",
+        description="꼬리나 헤어 본 체인의 마디(관절) 개수입니다 (기본값: 4)",
+        default=4,
+        min=1,
+        max=16
+    )
+    gravity_factor: bpy.props.FloatProperty(
+        name="중력 영향력",
+        description="체인이 아래로 처지는 중력의 영향도입니다 (기본값: 1.0)",
+        default=1.0,
+        min=0.0,
+        max=2.0,
+        step=5,
+        precision=2
+    )
+    stiffness: bpy.props.FloatProperty(
+        name="관절 뻣뻣함 (강성)",
+        description="체인 관절 간의 굽힘 저항력입니다 (기본값: 0.5)",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        step=5,
+        precision=2
     )
 
     # ── 개별 본 가중치(웨이트) 설정 ──
@@ -205,10 +239,8 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     # ── 본 종류 선택 ──
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
-        description="생성할 물리 본의 종류입니다",
-        items=[
-            ('MORPH', "모핑 본 (Morph Bone)", "자연스럽게 블렌딩되는 물리 모핑 본입니다"),
-        ],
+        description="새로 생성할 물리 본의 종류입니다",
+        items=BONE_TYPE_ITEMS,
         default='MORPH'
     )
 

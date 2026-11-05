@@ -34,8 +34,15 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
-        # 1. 다중 모핑 본 슬롯 목록 (UIList)
-        layout.label(text="모핑 본 슬롯 목록:", icon='ARMATURE_DATA')
+        # 1. 새 본 생성 옵션
+        row_new = layout.row(align=True)
+        row_new.prop(props, "bone_type", text="본 종류 선택")
+        row_new.operator("object.xxmi_bone_item_add", text="새 본 슬롯 추가", icon='ADD')
+
+        layout.separator()
+
+        # 2. 다중 물리 본 슬롯 목록 (UIList)
+        layout.label(text="물리 본 슬롯 목록:", icon='ARMATURE_DATA')
         row = layout.row()
         row.template_list(
             "XXMI_UL_bone_items", "",
@@ -47,7 +54,7 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         col_btns.operator("object.xxmi_bone_item_add", text="", icon='ADD')
         col_btns.operator("object.xxmi_bone_item_remove", text="", icon='REMOVE')
 
-        # 2. 선택된 본 슬롯 상세 설정
+        # 3. 선택된 본 슬롯 상세 설정
         if 0 <= props.bone_item_index < len(props.bone_items):
             item = props.bone_items[props.bone_item_index]
             box_item = layout.box()
@@ -55,6 +62,14 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
             box_item.use_property_decorate = False
 
             box_item.prop(item, "name", text="본 이름")
+            box_item.prop(item, "bone_type", text="본 종류")
+
+            if item.bone_type in {'TAIL', 'HAIR', 'SKIRT', 'WING'}:
+                box_chain = box_item.box()
+                box_chain.label(text="다관절 체인(FK) 구조 설정:", icon='CONSTRAINT_BONE')
+                box_chain.prop(item, "chain_segments", text="마디(관절) 수")
+                box_chain.prop(item, "gravity_factor", text="중력 영향력")
+                box_chain.prop(item, "stiffness", text="관절 뻣뻣함")
 
             row_acts = box_item.row(align=True)
             row_acts.operator("object.xxmi_bone_item_assign", text="선택 정점 할당", icon='PLUS')
@@ -73,11 +88,11 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
 
         layout.separator()
 
-        # 3. 보조 도구 (전체 본 재배치 및 전체 초기화)
+        # 4. 보조 도구 (전체 본 재배치 및 전체 초기화)
         box_tools = layout.box()
         col_t = box_tools.column(align=True)
-        col_t.operator("object.xxmi_generate_breast_rig", text="모든 모핑 본 위치/크기 일괄 재배치", icon='ARMATURE_DATA')
-        col_t.operator("object.xxmi_clear_breast_physics", text="모핑 본 & 물리 전체 초기화", icon='TRASH')
+        col_t.operator("object.xxmi_generate_breast_rig", text="모든 물리 본 위치/크기 일괄 재배치", icon='ARMATURE_DATA')
+        col_t.operator("object.xxmi_clear_breast_physics", text="물리 본 & 가중치 전체 초기화", icon='TRASH')
 
 
 classes = (

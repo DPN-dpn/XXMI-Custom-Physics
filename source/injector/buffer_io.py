@@ -6,6 +6,35 @@ import bpy
 from mathutils import Vector, Matrix
 
 
+def _get_addon_version():
+    try:
+        import sys
+        # 1. XXMI-Custom-Physics 네임스페이스 모듈에서 bl_info 확인
+        for name, m in sys.modules.items():
+            if "XXMI-Custom-Physics" in name or "xxmi_custom_physics" in name.lower():
+                if hasattr(m, "bl_info") and isinstance(m.bl_info, dict) and "version" in m.bl_info:
+                    return ".".join(map(str, m.bl_info["version"]))
+
+        # 2. 루트 __init__.py 파일 직접 파싱
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        init_file = os.path.join(root_dir, "__init__.py")
+        if os.path.exists(init_file):
+            with open(init_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            import re
+            m = re.search(r'"version"\s*:\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', content)
+            if m:
+                return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+
+        # 3. 상대 import 시도
+        from ... import bl_info
+        if "version" in bl_info:
+            return ".".join(map(str, bl_info["version"]))
+    except Exception:
+        pass
+    return "1.0.1"
+
+
 def _read_buf_positions_np(buf_path):
     """Position.buf (stride 40)의 위치(xyz)만 (n, 3) float64 numpy 배열로 빠르게 읽습니다."""
     data = np.fromfile(buf_path, dtype='<f4')
@@ -94,6 +123,9 @@ def _export_physics_config_json(export_dir, props, context):
             bone_items_list.append({
                 "name": it.name,
                 "bone_type": it.bone_type,
+                "chain_segments": int(getattr(it, "chain_segments", 4)),
+                "gravity_factor": round(float(getattr(it, "gravity_factor", 1.0)), 4),
+                "stiffness": round(float(getattr(it, "stiffness", 0.5)), 4),
                 "peak_weight": round(float(it.peak_weight), 4),
                 "falloff_power": round(float(it.falloff_power), 4),
                 "smooth_iterations": int(it.smooth_iterations),
@@ -107,7 +139,7 @@ def _export_physics_config_json(export_dir, props, context):
             })
 
     cfg = {
-        "version": "1.0",
+        "version": _get_addon_version(),
         "target_game": getattr(props, "target_game", "ZZZ"),
         "strength": round(float(props.strength), 4),
         "speed": round(float(props.speed), 4),
