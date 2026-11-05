@@ -375,51 +375,191 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
                 vg.remove([vi])
 
 
-def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.015):
+def calc_barycentric_coords(p, a, b, c):
+    """3D 삼각형 (a, b, c) 평면 상의 점 p에 대한 무게중심 좌표 (u, v, w)를 안정적으로 계산합니다."""
+    v0 = b - a
+    v1 = c - a
+    v2 = p - a
+    d00 = v0.dot(v0)
+    d01 = v0.dot(v1)
+    d11 = v1.dot(v1)
+    d20 = v2.dot(v0)
+    d21 = v2.dot(v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-10:
+        return 0.333333, 0.333333, 0.333333
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    u = max(0.0, min(1.0, u))
+    v = max(0.0, min(1.0, v))
+    w = max(0.0, min(1.0, w))
+    s = u + v + w
+    if s > 1e-6:
+        u /= s
+        v /= s
+        w /= s
+    return u, v, w
+
+
+def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_distance=0.015, min_dot=0.60):
     """
-    다중 레이어(피부 vs 겉옷/자켓/속옷 등) 3D 기하 침투 방지(Anti-Clipping) 필터:
-    - 3D 공간 상에서 안쪽 살(피부) 바로 위에 얹힌 바깥쪽 레이어(겉옷)의 가중치가
-      스무딩이나 옷깃 절단으로 인해 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지합니다.
-    - [그라데이션 보존 원칙]: 방사형 위치(d_perp)가 동일 단면(4mm 이내)에 위치한 수직 레이어만 매칭하여,
-      가슴 외곽으로 갈수록 부드럽게 감쇠되는 Hann Cosine 그라데이션을 100% 손상 없이 온전히 보존합니다.
+    기하학적 페이스 노멀 레이캐스트 & 반공간 비침투 배리어 (Face-Barrier Anti-Penetration):
+    - 정점 대 정점 매칭의 한계(메쉬 밀도 불일치, 페이스 내부 정점 누락)를 완전히 극복하기 위해,
+      Blender의 실제 메쉬 삼각망(Face Triangles) 기반 글로벌 BVHTree를 구축합니다.
+    - 안쪽 살(피부) 정점에서 표면 외향 법선(+Normal) 방향으로 광선을 투사하여
+      0.3mm ~ 15mm 이내에서 마주보는 바깥쪽 겉옷 페이스를 정밀 탐지합니다.
+    - 2-Pass 기하 배리어 알고리즘:
+      1) Conformal Pass: 겉옷 페이스의 정점 가중치를 안쪽 가슴 가중치 이상으로 상향 일치시켜
+         옷이 가슴 볼륨 팽창을 온전히 감싸며 함께 움직이도록 보장 (w_cloth >= w_skin).
+      2) Strict Barrier Pass: 겉옷 페이스의 무게중심 보간 표면 가중치(w_face)를 절대적 상한선으로 설정하여,
+         안쪽 살의 가중치가 바깥쪽 페이스 평면을 초과할 수 없도록 엄격 제한 (w_skin <= w_face).
+    - 결과: 물리 바운스 시 안쪽 살이 바깥쪽 옷 페이스 평면을 넘어가는 현상을 기하학적으로 원천 방지합니다.
     """
-    if not target_objs or not bone_info:
+    from mathutils.bvhtree import BVHTree
+
+    valid_objs = [o for o in target_objs if o and o.type == 'MESH' and len(o.data.vertices) > 0]
+    if not valid_objs:
         return 0
 
     if active_bones is None:
-        active_bones = [k for k in bone_info.keys() if k not in ("L", "R")]
-        if not active_bones:
-            active_bones = list(bone_info.keys())
+        active_bones = []
 
-    total_promoted = 0
+    # 1. 모든 대상 오브젝트의 전역 월드 좌표, 법선, 삼각형 페이스 수집
+    global_positions = []
+    global_normals = []
+    global_faces = []
+    # (obj, local_vi) <-> global_vi 매핑
+    vert_map_to_global = {}
+    global_to_vert = []
 
+    for obj in valid_objs:
+        mesh = obj.data
+        mesh.calc_loop_triangles()
+        mat4 = obj.matrix_world
+        mat3 = mat4.to_3x3()
+
+        world_pts = world_vertex_positions(obj)
+        mesh_verts = mesh.vertices
+
+        base_g_idx = len(global_positions)
+        for vi in range(len(world_pts)):
+            pt = Vector(world_pts[vi])
+            norm = (mat3 @ mesh_verts[vi].normal).normalized()
+            global_positions.append(pt)
+            global_normals.append(norm)
+            vert_map_to_global[(obj, vi)] = base_g_idx + vi
+            global_to_vert.append((obj, vi))
+
+        for ltri in mesh.loop_triangles:
+            v0 = base_g_idx + ltri.vertices[0]
+            v1 = base_g_idx + ltri.vertices[1]
+            v2 = base_g_idx + ltri.vertices[2]
+            global_faces.append((v0, v1, v2))
+
+    if not global_faces or not global_positions:
+        return 0
+
+    # 2. 전역 메쉬 BVHTree 구축
+    bvh = BVHTree.FromPolygons(global_positions, global_faces)
+
+    total_clamped_and_promoted = 0
+
+    # 3. 각 모핑 본별 독립 페이스 배리어 처리
     for bname in active_bones:
-        bentry = bone_info.get(bname)
-        if not bentry:
-            b_low = bname.lower()
-            for k, e in bone_info.items():
-                if k.lower() == b_low or e.get("bname", "").lower() == b_low:
-                    bentry = e
-                    break
-        if not bentry:
-            continue
-
-        head = np.array(bentry["head"], dtype=np.float64)
-        tail = np.array(bentry["tail"], dtype=np.float64)
-        bone_vec = tail - head
-        bone_len = float(np.linalg.norm(bone_vec))
-        if bone_len < 1e-6:
-            bone_u = np.array([0.0, -1.0, 0.0], dtype=np.float64)
-        else:
-            bone_u = bone_vec / bone_len
-
         vg_target_name = f"XXMI_{bname}"
 
-        # 1. 모든 대상 오브젝트에서 해당 본의 소프트 가중치 정점 수집
-        items = []
-        for obj in target_objs:
-            if obj.type != 'MESH':
+        # 전역 가중치 및 강체 마스크 로드
+        g_weights = np.zeros(len(global_positions), dtype=np.float32)
+        g_rigid = np.zeros(len(global_positions), dtype=bool)
+
+        for obj in valid_objs:
+            vg = obj.vertex_groups.get(vg_target_name)
+            if not vg:
+                if bname in ("L", "Breast.L"):
+                    vg = obj.vertex_groups.get(VG_BREAST_L)
+                elif bname in ("R", "Breast.R"):
+                    vg = obj.vertex_groups.get(VG_BREAST_R)
+
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+
+            gmap = {}
+            if vg: gmap[vg.index] = "w"
+            if vg_rigid: gmap[vg_rigid.index] = "rigid"
+
+            arrs = read_vertex_group_arrays(obj, gmap)
+            n_v = len(obj.data.vertices)
+            w_arr = arrs.get("w", np.zeros(n_v, dtype=np.float32))
+            r_arr = arrs.get("rigid", np.zeros(n_v, dtype=np.float32))
+
+            for vi in range(n_v):
+                g_idx = vert_map_to_global[(obj, vi)]
+                g_weights[g_idx] = float(w_arr[vi])
+                g_rigid[g_idx] = (r_arr[vi] > 0.5)
+
+        # 활성 정점 필터링
+        active_indices = np.nonzero((g_weights > 0.001) & ~g_rigid)[0].tolist()
+        if not active_indices:
+            continue
+
+        # --- 기하 배리어 2-Pass 실행 ---
+        # Pass 1: Conformal Clothing Pass (옷 페이스 가중치를 안쪽 살 가중치 이상으로 상향 일치)
+        cloth_promotions = {}
+        for g_vi in active_indices:
+            p = global_positions[g_vi]
+            n = global_normals[g_vi]
+            if n.length < 0.5:
                 continue
+            n_u = n.normalized()
+
+            # 표면 외향 법선 방향 광선 투사 (0.3mm ~ max_distance)
+            ray_start = p + n_u * 0.0003
+            hit_loc, hit_norm, hit_idx, hit_dist = bvh.ray_cast(ray_start, n_u, max_distance)
+
+            if hit_loc is not None and hit_norm is not None:
+                dot_n = n_u.dot(hit_norm)
+                if dot_n >= min_dot:
+                    v0, v1, v2 = global_faces[hit_idx]
+                    w_skin = float(g_weights[g_vi])
+
+                    # 마주보는 바깥쪽 옷 페이스 정점들 가중치 상향 동기화
+                    for vt in (v0, v1, v2):
+                        if not g_rigid[vt]:
+                            if w_skin > cloth_promotions.get(vt, float(g_weights[vt])):
+                                cloth_promotions[vt] = w_skin
+
+        for vt, promoted_w in cloth_promotions.items():
+            if promoted_w > g_weights[vt]:
+                g_weights[vt] = promoted_w
+                total_clamped_and_promoted += 1
+
+        # Pass 2: Strict Face Barrier Clamp (안쪽 살 가중치가 바깥쪽 페이스 보간 가중치를 초과할 수 없음, 2회 반복 수렴)
+        for _ in range(2):
+            for g_vi in active_indices:
+                p = global_positions[g_vi]
+                n = global_normals[g_vi]
+                if n.length < 0.5:
+                    continue
+                n_u = n.normalized()
+
+                ray_start = p + n_u * 0.0003
+                hit_loc, hit_norm, hit_idx, hit_dist = bvh.ray_cast(ray_start, n_u, max_distance)
+
+                if hit_loc is not None and hit_norm is not None:
+                    dot_n = n_u.dot(hit_norm)
+                    if dot_n >= min_dot:
+                        v0, v1, v2 = global_faces[hit_idx]
+                        u, v, w = calc_barycentric_coords(
+                            hit_loc, global_positions[v0], global_positions[v1], global_positions[v2]
+                        )
+                        w_face = u * float(g_weights[v0]) + v * float(g_weights[v1]) + w * float(g_weights[v2])
+
+                        if g_weights[g_vi] > w_face:
+                            g_weights[g_vi] = w_face
+                            total_clamped_and_promoted += 1
+
+        # 4. 버텍스 그룹에 반영
+        for obj in valid_objs:
             vg = obj.vertex_groups.get(vg_target_name)
             if not vg:
                 if bname in ("L", "Breast.L"):
@@ -429,100 +569,32 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             if not vg:
                 continue
 
-            vg_rigid = obj.vertex_groups.get(VG_RIGID)
-            group_map = {vg.index: "w"}
-            if vg_rigid:
-                group_map[vg_rigid.index] = "rigid"
-            arrs = read_vertex_group_arrays(obj, group_map)
-            world = world_vertex_positions(obj)
-
-            w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
-            rigid = (arrs.get("rigid", np.zeros(len(world), dtype=np.float32)) > 0.5)
-
-            active = (w_arr > 0.0001) & ~rigid
-            mat3 = obj.matrix_world.to_3x3()
-            mesh_verts = obj.data.vertices
-            for vi in np.nonzero(active)[0].tolist():
-                pt = world[vi]
-                norm = (mat3 @ mesh_verts[vi].normal).normalized()
-                items.append({
-                    "obj": obj,
-                    "vg": vg,
-                    "vi": vi,
-                    "pt": Vector(pt),
-                    "norm": norm,
-                    "w": float(w_arr[vi]),
-                })
-
-        if len(items) < 2:
-            continue
-
-        # 2. 3D KD-Tree 구축
-        kd = KDTree(len(items))
-        for k, it in enumerate(items):
-            kd.insert(it["pt"], k)
-        kd.balance()
-
-        # 3. 표면 법선(Normal) 기반 다층 레이어 1:1 완벽 가중치 동기화
-        # 주의: 동일 표면 상의 인접 버텍스끼리 연쇄 감염(Cascade Flood-Fill)되어 그라데이션이 파괴되는 것을 원천 차단!
-        # - 반드시 법선 방향 깊이 분리 거리(|d_norm| >= 0.8mm)가 있는 서로 다른 레이어끼리만 매칭
-        # - 원본 가중치(orig_weights)를 읽기 전용으로 참조하여 비연쇄적 독립 갱신 수행
-        orig_weights = [float(it["w"]) for it in items]
-        updates = {}
-
-        for idx in range(len(items)):
-            it = items[idx]
-            cur_w = orig_weights[idx]
-            if cur_w <= 0.005:
-                continue
-            cur_pt = it["pt"]
-            cur_n = it["norm"]
-
-            hits = kd.find_range(cur_pt, tol)
-            if not hits:
-                continue
-
-            for _, h_idx, _ in hits:
-                if h_idx == idx:
+            n_v = len(obj.data.vertices)
+            add_list = []
+            rem_list = []
+            for vi in range(n_v):
+                g_idx = vert_map_to_global[(obj, vi)]
+                if g_rigid[g_idx]:
                     continue
-                hit_it = items[h_idx]
-                hit_pt = hit_it["pt"]
-                hit_n = hit_it["norm"]
+                w_val = float(g_weights[g_idx])
+                if w_val > 0.0005:
+                    add_list.append((vi, max(0.0, min(1.0, w_val))))
+                else:
+                    rem_list.append(vi)
 
-                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.60)
-                dot_n = cur_n.dot(hit_n)
-                if dot_n < 0.60:
-                    continue
+            for vi, w_val in add_list:
+                vg.add([vi], w_val, 'REPLACE')
+            if rem_list:
+                vg.remove(rem_list)
 
-                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
-                delta = hit_pt - cur_pt
-                d_norm = delta.dot(cur_n)
-                abs_d_norm = abs(d_norm)
-                if abs_d_norm < 0.0008 or abs_d_norm > 0.015:
-                    continue
+    return total_clamped_and_promoted
 
-                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 5.0mm 이내 (삼각망 폴리곤 간격 수용)
-                d2 = delta.length_squared
-                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
-                if d_perp_sq > (0.0050 * 0.0050):
-                    continue
 
-                # 4. 1:1 일치화 (비연쇄적 독립 매칭: 둘 중 최대값으로 통일)
-                hit_w = orig_weights[h_idx]
-                unified = max(cur_w, hit_w)
-                k_cur = (it["obj"], it["vg"], it["vi"])
-                k_hit = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
-                if unified > updates.get(k_cur, 0.0):
-                    updates[k_cur] = unified
-                if unified > updates.get(k_hit, 0.0):
-                    updates[k_hit] = unified
-                total_promoted += 1
-
-        # 4. 갱신된 가중치를 버텍스 그룹에 적용
-        for (obj, vg, vi), new_w in updates.items():
-            vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
-
-    return total_promoted
+def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.015):
+    """
+    [하위 호환성 래퍼]: 기하학적 메쉬 삼각망 BVH 페이스 배리어(apply_face_barrier_anti_penetration)를 호출합니다.
+    """
+    return apply_face_barrier_anti_penetration(target_objs, active_bones=active_bones, max_distance=0.030)
 
 
 def normalize_overlapping_bone_weights(target_objs, active_bones, max_total_weight=0.80):
@@ -885,10 +957,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                         iters=s_iters, alpha=0.45, lock_registered=lock_registered
                     )
 
-    # 5. 다중 레이어 3D 침투 방지(Anti-Clipping) 필터:
-    # 스무딩이나 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지 (w_outer >= w_inner 보장)
-    num_promoted = apply_multi_layer_anti_clipping(
-        target_objs, bone_info, active_bones=active_bones, tol=0.015
+    # 5. 다중 레이어 3D 메쉬 페이스 비침투 배리어(Face-Barrier Anti-Penetration):
+    # 정점 매칭의 한계를 넘어 실제 삼각형 페이스 BVH 및 법선 레이캐스트를 통해
+    # 겉옷의 수동적 가슴 추종(Conformal)과 안쪽 살의 페이스 평면 관통 방지(Strict Boundary Cap)를 동시 달성
+    num_promoted = apply_face_barrier_anti_penetration(
+        target_objs, active_bones=active_bones, max_distance=0.015, min_dot=0.60
     )
 
     # 5.5. 가슴 좌우 본 중복 영역 가중치 정규화 & 크로스 블렌딩:
@@ -901,6 +974,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     # 6. 동일 위치 공유 정점 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
         target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
+    )
+
+    # 6.5. 최종 페이스 배리어 검증 및 미세 정렬 (정규화/동기화 후 무결성 확정)
+    apply_face_barrier_anti_penetration(
+        target_objs, active_bones=active_bones, max_distance=0.015, min_dot=0.60
     )
 
     # 7. 강체(액세서리) 표면 밀착 가중치 동기화
