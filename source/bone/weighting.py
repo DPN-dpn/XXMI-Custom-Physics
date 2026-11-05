@@ -100,20 +100,51 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
     w_arr = np.where(w_radial > 0.0, np.clip(w_comb, 0.001, 1.0), 0.0)
 
-    # 4. UV 심 및 분리 정점 동기화
+    # 4. 다중 레이어 Anti-Clipping 필터:
+    # 겹쳐 있는 다중 레이어(피부 vs 겉옷/자켓)에서 바깥쪽(전방 깊이 t 및 흉벽/본 중심거리 d) 정점이
+    # 안쪽 정점보다 가중치가 작지 않도록 보장하여, 모핑 시 속살이 겉옷을 뚫고 나오는 현상을 원천 방지
     if len(world_pts) > 1:
         kd = KDTree(len(world_pts))
         for k, pt in enumerate(world_pts.tolist()):
             kd.insert(Vector(pt), k)
         kd.balance()
 
+        dist_from_head = np.linalg.norm(pts_rel, axis=1)
+        sort_order = np.argsort(t_proj)
+        w_filtered = w_arr.copy()
+        tol = 0.025  # 2.5cm 반경 내 이웃 레이어 검사
+
+        for idx in sort_order:
+            cur_w = w_filtered[idx]
+            if cur_w <= 0.005:
+                continue
+            cur_pt = Vector(world_pts[idx])
+            cur_t = t_proj[idx]
+            cur_d = dist_from_head[idx]
+
+            hits = kd.find_range(cur_pt, tol)
+            if not hits:
+                continue
+
+            for _, h_idx, _ in hits:
+                if h_idx == idx:
+                    continue
+                h_t = t_proj[h_idx]
+                h_d = dist_from_head[h_idx]
+                is_outer = (h_t >= cur_t - 0.002) and (h_d >= cur_d - 0.002)
+                if is_outer and w_filtered[h_idx] < cur_w:
+                    w_filtered[h_idx] = cur_w
+
+        # 5. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
         for idx in range(len(world_pts)):
             co = Vector(world_pts[idx])
             hits = kd.find_range(co, 0.0005)
             if len(hits) > 1:
-                max_w = max(w_arr[h_idx] for _, h_idx, _ in hits)
+                max_w = max(w_filtered[h_idx] for _, h_idx, _ in hits)
                 for _, h_idx, _ in hits:
-                    w_arr[h_idx] = max_w
+                    w_filtered[h_idx] = max_w
+
+        w_arr = w_filtered
 
     return w_arr
 
@@ -369,6 +400,128 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
                 vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
             else:
                 vg.remove([vi])
+
+
+def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.025):
+    """
+    다중 레이어(피부 vs 겉옷/자켓/속옷 등) 3D 기하 침투 방지(Anti-Clipping) 필터:
+    단일 메쉬든 분리된 다중 오브젝트든 3D 월드 공간 상에서 안쪽 살(피부) 위에 얹힌
+    모든 바깥쪽 레이어(겉옷)의 가중치가 안쪽 정점보다 작아지지 않도록 w_outer >= w_inner를 보장합니다.
+    (스무딩 또는 개방형 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상 원천 차단)
+    """
+    if not target_objs or not bone_info:
+        return 0
+
+    if active_bones is None:
+        active_bones = [k for k in bone_info.keys() if k not in ("L", "R")]
+        if not active_bones:
+            active_bones = list(bone_info.keys())
+
+    total_promoted = 0
+
+    for bname in active_bones:
+        bentry = bone_info.get(bname)
+        if not bentry:
+            b_low = bname.lower()
+            for k, e in bone_info.items():
+                if k.lower() == b_low or e.get("bname", "").lower() == b_low:
+                    bentry = e
+                    break
+        if not bentry:
+            continue
+
+        head = np.array(bentry["head"], dtype=np.float64)
+        tail = np.array(bentry["tail"], dtype=np.float64)
+        bone_vec = tail - head
+        bone_len = float(np.linalg.norm(bone_vec))
+        if bone_len < 1e-6:
+            bone_u = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        else:
+            bone_u = bone_vec / bone_len
+
+        vg_target_name = f"XXMI_{bname}"
+
+        # 1. 모든 대상 오브젝트에서 해당 본의 소프트 가중치 정점 수집
+        items = []
+        for obj in target_objs:
+            if obj.type != 'MESH':
+                continue
+            vg = obj.vertex_groups.get(vg_target_name)
+            if not vg:
+                if bname in ("L", "Breast.L"):
+                    vg = obj.vertex_groups.get(VG_BREAST_L)
+                elif bname in ("R", "Breast.R"):
+                    vg = obj.vertex_groups.get(VG_BREAST_R)
+            if not vg:
+                continue
+
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+            group_map = {vg.index: "w"}
+            if vg_rigid:
+                group_map[vg_rigid.index] = "rigid"
+            arrs = read_vertex_group_arrays(obj, group_map)
+            world = world_vertex_positions(obj)
+
+            w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
+            rigid = (arrs.get("rigid", np.zeros(len(world), dtype=np.float32)) > 0.5)
+
+            active = (w_arr > 0.0001) & ~rigid
+            for vi in np.nonzero(active)[0].tolist():
+                pt = world[vi]
+                rel = pt - head
+                t_proj = float(rel @ bone_u)
+                d_head = float(np.linalg.norm(rel))
+                items.append({
+                    "obj": obj,
+                    "vg": vg,
+                    "vi": vi,
+                    "pt": Vector(pt),
+                    "w": float(w_arr[vi]),
+                    "t": t_proj,
+                    "d": d_head,
+                })
+
+        if len(items) < 2:
+            continue
+
+        # 2. 3D KD-Tree 구축
+        kd = KDTree(len(items))
+        for k, it in enumerate(items):
+            kd.insert(it["pt"], k)
+        kd.balance()
+
+        # 3. 안쪽(t_proj 작은 곳)에서 바깥쪽(t_proj 큰 곳)으로 순차 전파
+        sort_order = sorted(range(len(items)), key=lambda k: items[k]["t"])
+        updates = {}
+
+        for idx in sort_order:
+            it = items[idx]
+            cur_w = it["w"]
+            if cur_w <= 0.005:
+                continue
+            cur_t = it["t"]
+            cur_d = it["d"]
+
+            hits = kd.find_range(it["pt"], tol)
+            if not hits:
+                continue
+
+            for _, h_idx, _ in hits:
+                if h_idx == idx:
+                    continue
+                hit_it = items[h_idx]
+                is_outer = (hit_it["t"] >= cur_t - 0.002) and (hit_it["d"] >= cur_d - 0.002)
+                if is_outer and hit_it["w"] < cur_w:
+                    hit_it["w"] = cur_w
+                    key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
+                    updates[key] = cur_w
+                    total_promoted += 1
+
+        # 4. 갱신된 가중치를 버텍스 그룹에 적용
+        for (obj, vg, vi), new_w in updates.items():
+            vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
+
+    return total_promoted
 
 
 def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, tol=0.0012):
@@ -668,12 +821,18 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                         iters=s_iters, alpha=0.45, lock_registered=lock_registered
                     )
 
-    # 5. 동일 위치 공유 정점 동기화
+    # 5. 다중 레이어 3D 침투 방지(Anti-Clipping) 필터:
+    # 스무딩이나 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지 (w_outer >= w_inner 보장)
+    num_promoted = apply_multi_layer_anti_clipping(
+        target_objs, bone_info, active_bones=active_bones, tol=0.025
+    )
+
+    # 6. 동일 위치 공유 정점 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
         target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
     )
 
-    # 6. 강체(액세서리) 표면 밀착 가중치 동기화
+    # 7. 강체(액세서리) 표면 밀착 가중치 동기화
     slot_exclude = {}
     for item in props.rigid_items:
         rdata = get_rigid_data(item)

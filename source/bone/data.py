@@ -125,16 +125,16 @@ def get_bone_params(props, bname):
     item = get_bone_item(props, bname)
     if item:
         return {
-            "name": item.name,
-            "peak_weight": float(item.peak_weight),
-            "falloff_power": float(item.falloff_power),
-            "smooth_iterations": int(item.smooth_iterations),
-            "lock_registered_verts": bool(item.lock_registered_verts),
-            "strength": float(item.strength),
-            "speed": float(item.speed),
-            "damping": float(item.damping),
-            "inertia": float(item.inertia),
-            "idle_motion": float(item.idle_motion),
+            "name": getattr(item, "name", bname),
+            "peak_weight": float(getattr(item, "peak_weight", getattr(props, "peak_weight", 0.40))),
+            "falloff_power": float(getattr(item, "falloff_power", getattr(props, "falloff_power", 1.0))),
+            "smooth_iterations": int(getattr(item, "smooth_iterations", getattr(props, "smooth_iterations", 2))),
+            "lock_registered_verts": bool(getattr(item, "lock_registered_verts", getattr(props, "lock_registered_verts", True))),
+            "strength": float(getattr(item, "strength", getattr(props, "strength", 0.35))),
+            "speed": float(getattr(item, "speed", getattr(props, "speed", 2.5))),
+            "damping": float(getattr(item, "damping", getattr(props, "damping", 0.05))),
+            "inertia": float(getattr(item, "inertia", getattr(props, "inertia", 0.40))),
+            "idle_motion": float(getattr(item, "idle_motion", getattr(props, "idle_motion", 0.02))),
         }
 
     return {
