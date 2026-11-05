@@ -89,13 +89,16 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     w_depth = 0.5 * (1.0 - np.cos(np.pi * t_clamped))
     w_depth = np.where(t_proj > 0.0, w_depth, 0.0)
 
-    # 2. 본 세그먼트 [Head -> Tail] 와의 3D 수직 최단거리 및 Hann Cosine 감쇠
+    # 2. 본 세그먼트 [Head -> Tail] 와의 3D 수직 최단거리 및 매끄러운 감쇠 곡선
     proj_pts = head_arr + np.outer(t_clamped, bone_vec)
     d_perp = np.linalg.norm(world_pts - proj_pts, axis=1)
 
+    # 반경 마진 확장: 경계선 부근(가슴골, 옷깃, 외곽)에서 가중치가 0으로 급격히 절단되어
+    # 뾰족한 스파이크 버그나 메쉬 찢어짐이 발생하는 것을 방지하기 위해 1.30배까지 매끄러운 코사인 감쇠 적용
     radius = max(0.02, float(eff_radius))
-    rho_norm = np.clip(d_perp / radius, 0.0, 1.0)
-    w_radial = np.where(d_perp < radius, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
+    max_radius = radius * 1.30
+    rho_norm = np.clip(d_perp / max_radius, 0.0, 1.0)
+    w_radial = np.where(d_perp < max_radius, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
 
     # 3. 해부학적 합성 가중치 계산 (기저 지수 0.35 보정: 기본값 1.0에서 자연스럽고 풍성한 볼륨 형성)
     eff_power = 0.35 * max(0.05, float(falloff_p))
@@ -332,7 +335,7 @@ def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_
     return len(clusters)
 
 
-def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_registered=True):
+def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_registered=True, allowed_mask=None):
     """
     메쉬 엣지 위상 구조를 기반으로 지정된 버텍스 그룹들의 가중치를 라플라시안 스무딩합니다.
     """
@@ -353,6 +356,8 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
         if not np.any(active_initial):
             continue
 
+        domain_mask = allowed_mask if (allowed_mask is not None) else active_initial
+
         for _ in range(iters):
             n_sum = np.zeros(n_verts, dtype=np.float32)
             n_cnt = np.zeros(n_verts, dtype=np.int32)
@@ -364,7 +369,7 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
             avg_w = np.where(has_n, n_sum / np.maximum(1, n_cnt), w)
             w = np.where(rigid_mask, w, (1.0 - alpha) * w + alpha * avg_w)
             if lock_registered:
-                w[~active_initial & ~rigid_mask] = 0.0
+                w[~domain_mask & ~rigid_mask] = 0.0
 
         changed_idx = np.nonzero((w > 0.0001) & ~rigid_mask)[0]
         for vi in changed_idx.tolist():
@@ -502,8 +507,8 @@ def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_dist
         if not active_indices:
             continue
 
-        # --- 기하 배리어 2-Pass 실행 ---
-        # Pass 1: Conformal Clothing Pass (옷 페이스 가중치를 안쪽 살 가중치 이상으로 상향 일치)
+        # --- 기하 배리어 Conformal Pass 실행 ---
+        # 겉옷 페이스 가중치를 안쪽 살 가중치 이상으로 상향 일치(w_cloth >= w_skin)
         cloth_promotions = {}
         for g_vi in active_indices:
             p = global_positions[g_vi]
@@ -533,30 +538,8 @@ def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_dist
                 g_weights[vt] = promoted_w
                 total_clamped_and_promoted += 1
 
-        # Pass 2: Strict Face Barrier Clamp (안쪽 살 가중치가 바깥쪽 페이스 보간 가중치를 초과할 수 없음, 2회 반복 수렴)
-        for _ in range(2):
-            for g_vi in active_indices:
-                p = global_positions[g_vi]
-                n = global_normals[g_vi]
-                if n.length < 0.5:
-                    continue
-                n_u = n.normalized()
-
-                ray_start = p + n_u * 0.0003
-                hit_loc, hit_norm, hit_idx, hit_dist = bvh.ray_cast(ray_start, n_u, max_distance)
-
-                if hit_loc is not None and hit_norm is not None:
-                    dot_n = n_u.dot(hit_norm)
-                    if dot_n >= min_dot:
-                        v0, v1, v2 = global_faces[hit_idx]
-                        u, v, w = calc_barycentric_coords(
-                            hit_loc, global_positions[v0], global_positions[v1], global_positions[v2]
-                        )
-                        w_face = u * float(g_weights[v0]) + v * float(g_weights[v1]) + w * float(g_weights[v2])
-
-                        if g_weights[g_vi] > w_face:
-                            g_weights[g_vi] = w_face
-                            total_clamped_and_promoted += 1
+        # 주의: 안쪽 살의 가중치를 0으로 깎아버리는 하향 클램프(Pass 2)는 가슴골 V자 굴곡, 주름 등에서
+        # 쇄골/목/가슴골 안쪽 벽(0.0)을 때려 앞섬 정점을 0으로 못 박아버리는 스파이크 버그를 유발하므로 수행하지 않습니다.
 
         # 4. 버텍스 그룹에 반영
         for obj in valid_objs:
@@ -937,7 +920,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                 vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                 total_recomputed_verts += 1
             else:
-                vg.remove([vi])
+                if not side_lock_registered:
+                    vg.remove([vi])
+                else:
+                    # 사용자가 등록한 정점은 경계선 찢어짐/스파이크 방지를 위해 최소 가중치를 유지하여 스무딩 연결성 보존
+                    vg.add([vi], 0.002, 'REPLACE')
 
         if not side_lock_registered:
             for vg, z_list in zero_entries:
@@ -948,18 +935,30 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         b_params = get_bone_params(props, bname)
         s_iters = b_params["smooth_iterations"]
         if s_iters > 0:
+            b_item = get_bone_item(props, bname)
+            b_item_verts = get_bone_data(b_item) if b_item else {}
             vg_name = f"XXMI_{bname}"
             for obj, odata in obj_data.items():
                 vg = obj.vertex_groups.get(vg_name)
                 if vg:
+                    slot_obj_verts = set(b_item_verts.get(obj.name, []))
+                    n_v = len(odata["world"])
+                    allowed_m = np.zeros(n_v, dtype=bool)
+                    for vi in slot_obj_verts:
+                        if vi < n_v:
+                            allowed_m[vi] = True
+                    cur_arr = read_vertex_group_arrays(obj, {vg.index: "w"}).get("w", np.zeros(n_v))
+                    allowed_m |= (cur_arr > 0.0001)
+
                     smooth_mesh_weights(
                         obj, [vg], odata["rigid_mask"],
-                        iters=s_iters, alpha=0.45, lock_registered=lock_registered
+                        iters=s_iters, alpha=0.45, lock_registered=lock_registered,
+                        allowed_mask=allowed_m
                     )
 
-    # 5. 다중 레이어 3D 메쉬 페이스 비침투 배리어(Face-Barrier Anti-Penetration):
-    # 정점 매칭의 한계를 넘어 실제 삼각형 페이스 BVH 및 법선 레이캐스트를 통해
-    # 겉옷의 수동적 가슴 추종(Conformal)과 안쪽 살의 페이스 평면 관통 방지(Strict Boundary Cap)를 동시 달성
+    # 5. 다중 레이어 3D 메쉬 페이스 비침투 배리어(Face-Barrier Conformal Sync):
+    # 안쪽 가슴 정점 바로 위에 얹힌 겉옷 페이스 정점들의 가중치를 안쪽 가슴 이상으로 상향 일치(w_cloth >= w_skin)
+    # 옷이 가슴 볼륨 팽창을 온전히 감싸며 함께 이동하도록 보장하여 관통 원천 차단
     num_promoted = apply_face_barrier_anti_penetration(
         target_objs, active_bones=active_bones, max_distance=0.015, min_dot=0.60
     )
@@ -974,11 +973,6 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     # 6. 동일 위치 공유 정점 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
         target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
-    )
-
-    # 6.5. 최종 페이스 배리어 검증 및 미세 정렬 (정규화/동기화 후 무결성 확정)
-    apply_face_barrier_anti_penetration(
-        target_objs, active_bones=active_bones, max_distance=0.015, min_dot=0.60
     )
 
     # 7. 강체(액세서리) 표면 밀착 가중치 동기화
