@@ -462,12 +462,14 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
         kd.balance()
 
         # 3. 안쪽(t_proj 작은 곳)에서 바깥쪽(t_proj 큰 곳)으로 순차 전파
+        # 연쇄 증폭(Cascade Explosion) 방지: 원본 가중치 기준으로 단 1회 8% 안전 에어갭 부여
         sort_order = sorted(range(len(items)), key=lambda k: items[k]["t"])
+        orig_weights = [items[k]["w"] for k in range(len(items))]
         updates = {}
 
         for idx in sort_order:
             it = items[idx]
-            cur_w = it["w"]
+            cur_w = orig_weights[idx]
             if cur_w <= 0.005:
                 continue
             cur_pt = it["pt"]
@@ -484,17 +486,18 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 hit_it = items[h_idx]
 
                 # [수평 번짐 방지 / 진정한 수직 레이어 정합]:
-                # 1. 본 축 수직 단면 위치 차이가 3.5mm 이내여야 동일 단면 상의 수직 레이어로 인정 (외곽 감쇠 그라데이션 100% 보존)
+                # 1. 본 축 수직 단면 위치 차이가 7.0mm 이내인 동일 단면 상의 수직 레이어 매칭 (삼각망 폴리곤 간격 수용)
                 diff_perp = (hit_it["v_perp"] - cur_v_perp).length
-                if diff_perp > 0.0035:
+                if diff_perp > 0.0070:
                     continue
 
                 # 2. 전방 깊이(t)가 최소 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
                 diff_t = hit_it["t"] - cur_t
-                if diff_t >= 0.0003 and hit_it["w"] < cur_w:
-                    hit_it["w"] = cur_w
+                target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 겉옷이 살보다 항상 1~2mm 더 전방 확장되어 바닐라 스키닝 비틀림 오차 흡수
+                if diff_t >= 0.0003 and hit_it["w"] < target_w:
+                    hit_it["w"] = target_w
                     key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
-                    updates[key] = cur_w
+                    updates[key] = target_w
                     total_promoted += 1
 
         # 4. 갱신된 가중치를 버텍스 그룹에 적용

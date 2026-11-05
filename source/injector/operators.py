@@ -280,16 +280,18 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                             continue
 
                         # D3D 버퍼는 Z가 전방(+Z 방향으로 겉옷 돌출)
+                        # 연쇄 증폭(Cascade Explosion) 방지: 원본 가중치 기준으로 단 1회 8% 안전 에어갭 부여
+                        orig_w_arr = np.copy(w_arr)
                         sort_sub = sorted(sub_indices, key=lambda k: buf_np[phys_indices[k]][2])
 
                         for k in sort_sub:
                             bi = phys_indices[k]
-                            cur_w = float(w_arr[bi])
+                            cur_w = float(orig_w_arr[bi])
                             if cur_w <= 0.005:
                                 continue
                             cur_p = buf_np[bi]
 
-                            hits = kd_phys.find_range(Vector(cur_p), 0.012)
+                            hits = kd_phys.find_range(Vector(cur_p), 0.020)
                             if not hits:
                                 continue
 
@@ -299,16 +301,17 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                 hit_bi = phys_indices[hit_k]
                                 hit_p = buf_np[hit_bi]
 
-                                # 수평(XY 가슴 단면) 거리 오차 3.5mm 이내 (외곽 옆정점 배제)
+                                # 수평(XY 가슴 단면) 거리 오차 7.5mm 이내 (삼각망 폴리곤 간격 수용)
                                 dx = hit_p[0] - cur_p[0]
                                 dy = hit_p[1] - cur_p[1]
-                                if (dx * dx + dy * dy) > (0.0035 * 0.0035):
+                                if (dx * dx + dy * dy) > (0.0075 * 0.0075):
                                     continue
 
                                 # 깊이(Z): 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
                                 dz = hit_p[2] - cur_p[2]
-                                if dz >= 0.0003 and w_arr[hit_bi] < cur_w:
-                                    w_arr[hit_bi] = cur_w
+                                target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 바닐라 스키닝 비틀림 오차를 흡수하는 에어갭 보장
+                                if dz >= 0.0003 and w_arr[hit_bi] < target_w:
+                                    w_arr[hit_bi] = target_w
 
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
