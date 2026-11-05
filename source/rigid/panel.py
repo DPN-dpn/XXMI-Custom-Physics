@@ -63,9 +63,14 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
 
         layout.separator()
 
-        # 강체 가중치 즉시 갱신 편의 버튼
+        # 모핑 본에서 강체 정점 자동 제외 및 가중치 갱신 편의 버튼
         box_quick = layout.box()
         col_q = box_quick.column(align=True)
+        col_q.operator(
+            "object.xxmi_subtract_rigid_from_all_bones",
+            text="모핑 본에서 강체 정점 자동 제외 (경계 유지)",
+            icon='SELECT_SUBTRACT'
+        )
         col_q.operator("object.xxmi_rebake_breast_weights", text="강체 가중치 즉시 갱신", icon='FILE_REFRESH')
 
 

@@ -159,12 +159,15 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
 class XXMI_OT_generate_breast_rig(bpy.types.Operator):
     bl_idname = "object.xxmi_generate_breast_rig"
-    bl_label = "2. 모핑 본 자동 생성"
-    bl_description = "등록된 모핑 정점들의 3D 기하학적 형태 중심을 정밀 분석하여 모핑 본(Armature)을 자동 생성합니다"
+    bl_label = "모핑 본(스켈레톤) 자동 생성 및 배치"
+    bl_description = "등록된 모핑 본 슬롯들의 3D 기하학적 형태 중심을 정밀 분석하여 모핑 본(Armature)을 자동 생성 및 배치합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
+        props = getattr(context.scene, "xxmi_custom_physics_props", None)
+        if props and any(it.vert_count > 0 for it in props.bone_items):
+            return True
         return any(
             o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
             for o in bpy.data.objects
@@ -172,13 +175,22 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
-        target_objs = [
-            o for o in bpy.data.objects
-            if o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
-        ]
+        target_objs = []
+        for it in props.bone_items:
+            it_dict = get_bone_data(it)
+            for oname in it_dict.keys():
+                o = bpy.data.objects.get(oname)
+                if o and o.type == 'MESH' and o not in target_objs:
+                    target_objs.append(o)
 
         if not target_objs:
-            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 가슴 영역 선택 등록]을 진행해주세요.")
+            target_objs = [
+                o for o in bpy.data.objects
+                if o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
+            ]
+
+        if not target_objs:
+            self.report({'ERROR'}, "등록된 모핑 정점이 없습니다. 모핑 본 슬롯에 정점을 먼저 할당해주세요.")
             return {'CANCELLED'}
 
         if context.mode != 'OBJECT':
@@ -269,7 +281,7 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
 
         anchor_info = {}
 
-        if slot_bones_data and len(slot_bones_data) >= 2:
+        if slot_bones_data and len(slot_bones_data) >= 1:
             # 사용자가 슬롯별로 직접 모핑 영역을 지정한 경우: 각 영역의 기하학적 형태 중심에 본 생성
             for bname, s_pts in slot_bones_data:
                 center, bmin, bmax = compute_density_invariant_geometric_center(s_pts)
@@ -538,6 +550,177 @@ class XXMI_OT_select_breast_vertices(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def sync_slot_bone_to_rig(context, item):
+    """
+    지정된 모핑 본 슬롯 item의 정점 데이터를 기반으로
+    XXMI_Breast_Rig 내의 해당 본을 생성하거나 위치/크기를 자동 갱신합니다.
+    """
+    data = get_bone_data(item)
+    if not data:
+        return None
+
+    # 해당 슬롯의 모든 정점 월드 좌표 수집
+    pts = []
+    target_objs = []
+    for oname, vis in data.items():
+        obj = bpy.data.objects.get(oname)
+        if obj and obj.type == 'MESH' and vis:
+            target_objs.append(obj)
+            w_arr = world_vertex_positions(obj)
+            for vi in vis:
+                if vi < len(w_arr):
+                    pts.append(w_arr[vi])
+
+    if len(pts) < 4:
+        return None
+
+    props = context.scene.xxmi_custom_physics_props
+    ref_obj = target_objs[0]
+    rig = get_or_create_breast_rig(context, props, ref_obj)
+    ensure_object_visible(context, rig)
+
+    # 정점들의 형태 중심 및 바운딩 박스 계산
+    center, bmin, bmax = compute_density_invariant_geometric_center(pts)
+    depth = max(0.04, bmax.y - bmin.y)
+    span_x = max(0.04, bmax.x - bmin.x)
+    span_z = max(0.04, bmax.z - bmin.z)
+    bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
+
+    dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
+    head = Vector((center.x, bmax.y, center.z - span_z * 0.2))
+    tail = Vector((center.x + dx_out, bmin.y, center.z + span_z * 0.1))
+
+    was_mode = context.mode
+    active_obj = context.view_layer.objects.active
+
+    if was_mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    ebones = rig.data.edit_bones
+    eb = ebones.get(item.name)
+    if not eb:
+        eb = ebones.new(item.name)
+
+    eb.head = head
+    eb.tail = tail
+    eb.head_radius = bone_radius
+    eb.tail_radius = bone_radius * 0.7
+    eb.envelope_distance = bone_radius * 1.4
+    eb["xxmi_bone_type"] = "MORPH"
+
+    bone_out_name = eb.name
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+    rig.show_in_front = True
+
+    # 원래 모드로 복귀 (만약 에디트 모드였다면 원래 오브젝트 선택)
+    if was_mode == 'EDIT_MESH' and active_obj:
+        context.view_layer.objects.active = active_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+
+    return bone_out_name
+
+
+def get_all_rigid_verts_by_obj(props):
+    """등록된 모든 강체 슬롯에서 강체 정점 목록을 오브젝트별 set으로 수집합니다."""
+    rigid_verts_by_obj = {}
+    from ..rigid.data import get_rigid_data
+    for r_item in props.rigid_items:
+        r_dict = get_rigid_data(r_item)
+        if not r_dict:
+            continue
+        for oname, r_vis in r_dict.items():
+            rigid_verts_by_obj.setdefault(oname, set()).update(r_vis)
+    return rigid_verts_by_obj
+
+
+def subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=True):
+    """
+    모핑 본 슬롯 item의 정점 목록에서 등록된 강체 정점들을 제외합니다.
+    keep_boundary=True일 경우, 비-강체(가슴/모핑 표면) 정점과 엣지로 직접 연결되어 있거나
+    공간상 맞닿아 있는 경계 접합 정점은 제외하지 않고 유지합니다.
+
+    반환값: (subtracted_count, kept_boundary_count)
+    """
+    data = get_bone_data(item)
+    if not data:
+        return 0, 0
+
+    new_data = {}
+    subtracted_count = 0
+    kept_boundary_count = 0
+
+    for obj_name, v_indices in data.items():
+        obj = bpy.data.objects.get(obj_name)
+        if not obj or obj.type != 'MESH':
+            new_data[obj_name] = v_indices
+            continue
+
+        rigid_set = rigid_verts_by_obj.get(obj_name, set())
+        slot_set = set(v_indices)
+
+        overlap = slot_set & rigid_set
+        if not overlap:
+            new_data[obj_name] = v_indices
+            continue
+
+        mesh = obj.data
+
+        boundary_verts = set()
+        if keep_boundary:
+            # 1. 엣지 토폴로지 연결 검사: overlap 정점 중 비-강체 정점과 엣지로 연결된 정점 유지
+            edge_neighbors = {v: [] for v in overlap}
+            for e in mesh.edges:
+                v1, v2 = e.vertices[0], e.vertices[1]
+                if v1 in edge_neighbors:
+                    edge_neighbors[v1].append(v2)
+                if v2 in edge_neighbors:
+                    edge_neighbors[v2].append(v1)
+
+            for v, nbrs in edge_neighbors.items():
+                if any(nbr not in rigid_set for nbr in nbrs):
+                    boundary_verts.add(v)
+
+            # 2. 메쉬가 분리되어 있어 엣지가 없는 경우를 위한 공간 근접성(KDTree) 보정
+            non_rigid_slot = [v for v in slot_set if v not in rigid_set]
+            if non_rigid_slot and (len(boundary_verts) < len(overlap)):
+                wpos = world_vertex_positions(obj)
+                kd = KDTree(len(non_rigid_slot))
+                for idx, vi in enumerate(non_rigid_slot):
+                    kd.insert(Vector(wpos[vi]), idx)
+                kd.balance()
+
+                for v in overlap:
+                    if v not in boundary_verts:
+                        pt = Vector(wpos[v])
+                        hits = kd.find_range(pt, 0.0015)
+                        if hits:
+                            boundary_verts.add(v)
+
+        # 최종 남길 정점: (slot_set - overlap) + boundary_verts
+        to_remove = overlap - boundary_verts
+        remaining = [v for v in v_indices if v not in to_remove]
+
+        new_data[obj_name] = remaining
+        subtracted_count += len(to_remove)
+        kept_boundary_count += len(boundary_verts)
+
+        # 오브젝트의 버텍스 그룹에서도 제거된 정점 제외
+        vg_target_name = (
+            VG_BREAST_L if item.name.lower() in ('breast.l', 'l')
+            else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
+        )
+        vg = obj.vertex_groups.get(vg_target_name)
+        if vg and to_remove:
+            vg.remove(list(to_remove))
+
+    set_bone_data(item, new_data)
+    return subtracted_count, kept_boundary_count
+
+
 class XXMI_OT_bone_item_add(bpy.types.Operator):
     bl_idname = "object.xxmi_bone_item_add"
     bl_label = "물리 본 슬롯 추가"
@@ -594,7 +777,8 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
 
         if data:
             set_bone_data(item, data)
-            self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}' 생성 및 정점 {item.vert_count}개 할당 완료!")
+            sync_slot_bone_to_rig(context, item)
+            self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}' 생성 및 정점 {item.vert_count}개 할당 / 본 생성 완료!")
         else:
             self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}'이 추가되었습니다.")
 
@@ -617,6 +801,18 @@ class XXMI_OT_bone_item_remove(bpy.types.Operator):
         idx = props.bone_item_index
         item = props.bone_items[idx]
         name = item.name
+
+        # 리그에서 해당 본 삭제
+        rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
+        if rig and rig.type == 'ARMATURE':
+            was_mode = context.mode
+            if was_mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            context.view_layer.objects.active = rig
+            bpy.ops.object.mode_set(mode='EDIT')
+            if name in rig.data.edit_bones:
+                rig.data.edit_bones.remove(rig.data.edit_bones[name])
+            bpy.ops.object.mode_set(mode='OBJECT')
 
         props.bone_items.remove(idx)
         props.bone_item_index = max(0, min(idx, len(props.bone_items) - 1))
@@ -679,7 +875,91 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
             return {'CANCELLED'}
 
         set_bone_data(item, data)
-        self.report({'INFO'}, f"본 '{item.name}'에 정점 할당 완료 (총 {item.vert_count}개).")
+        sync_slot_bone_to_rig(context, item)
+        self.report({'INFO'}, f"본 '{item.name}'에 정점 할당 및 본 위치 갱신 완료 (총 {item.vert_count}개).")
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_subtract_rigid_verts(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_subtract_rigid_verts"
+    bl_label = "강체 정점 자동 제외 (경계 유지)"
+    bl_description = "현재 모핑 본 슬롯에서 등록된 강체 정점들을 자동 제외합니다 (모핑 표면과 맞닿아 있는 접합부 경계 버텍스는 자연스러운 연결을 위해 유지)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return (0 <= props.bone_item_index < len(props.bone_items)) and len(props.rigid_items) > 0
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        item = props.bone_items[props.bone_item_index]
+
+        rigid_verts_by_obj = get_all_rigid_verts_by_obj(props)
+        if not rigid_verts_by_obj:
+            self.report({'WARNING'}, "등록된 강체 정점이 없습니다. 먼저 [2. 강체(액세서리) 설정]에서 강체를 등록해주세요.")
+            return {'CANCELLED'}
+
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        subtracted, kept = subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=True)
+
+        # 강체 제외 후 순수 모핑 영역에 맞춰 본 위치 갱신
+        sync_slot_bone_to_rig(context, item)
+
+        if was_edit:
+            target_objs = get_target_mesh_objects(context)
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        if subtracted == 0:
+            self.report({'INFO'}, f"'{item.name}' 슬롯에 제외할 강체 정점이 없거나 모두 경계 정점으로 보존되었습니다.")
+        else:
+            self.report({'INFO'}, f"'{item.name}' 슬롯에서 강체 정점 {subtracted}개 제외 완료 (경계 정점 {kept}개 유지, 남은 정점 {item.vert_count}개).")
+
+        return {'FINISHED'}
+
+
+class XXMI_OT_subtract_rigid_from_all_bones(bpy.types.Operator):
+    bl_idname = "object.xxmi_subtract_rigid_from_all_bones"
+    bl_label = "모든 모핑 본에서 강체 정점 자동 제외 (경계 유지)"
+    bl_description = "모든 모핑 본 슬롯에서 등록된 강체 정점들을 일괄 제외합니다 (표면 접합부 경계 정점 보존)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.xxmi_custom_physics_props
+        return len(props.bone_items) > 0 and len(props.rigid_items) > 0
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        rigid_verts_by_obj = get_all_rigid_verts_by_obj(props)
+        if not rigid_verts_by_obj:
+            self.report({'WARNING'}, "등록된 강체 정점이 없습니다.")
+            return {'CANCELLED'}
+
+        was_edit = (context.mode == 'EDIT_MESH')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        total_sub = 0
+        total_kept = 0
+        for item in props.bone_items:
+            sub, kept = subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=True)
+            total_sub += sub
+            total_kept += kept
+            sync_slot_bone_to_rig(context, item)
+
+        if was_edit:
+            target_objs = get_target_mesh_objects(context)
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        self.report({'INFO'}, f"전체 모핑 본에서 강체 정점 {total_sub}개 제외 완료 (경계 정점 {total_kept}개 유지).")
         return {'FINISHED'}
 
 
@@ -885,6 +1165,8 @@ classes = (
     XXMI_OT_bone_item_assign,
     XXMI_OT_bone_item_select_verts,
     XXMI_OT_bone_item_remove_verts,
+    XXMI_OT_bone_item_subtract_rigid_verts,
+    XXMI_OT_subtract_rigid_from_all_bones,
     XXMI_OT_copy_bone_weights_to_all,
     XXMI_OT_select_breast_vertices,
     XXMI_OT_clear_breast_physics,

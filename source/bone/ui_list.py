@@ -10,7 +10,7 @@ class XXMI_UL_bone_items(bpy.types.UIList):
             row.prop(item, "name", text="", emboss=False)
             sub = row.row()
             sub.alignment = 'RIGHT'
-            sub.label(text=f"[모핑 본 | {item.vert_count}개 | W:{item.peak_weight:.2f} | P:{item.strength:.2f}]")
+            sub.label(text=f"[{item.vert_count}개 정점 | W:{item.peak_weight:.2f} | P:{item.strength:.2f}]")
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text="", icon='BONE_DATA')
