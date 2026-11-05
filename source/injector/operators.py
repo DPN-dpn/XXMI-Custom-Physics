@@ -289,9 +289,11 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         # 표면 법선(Normal) 기반 다층 레이어 Anti-Clipping 후처리
                         # 아랫가슴(Underboob), 윗가슴, 가슴골 등 곡면 경사 방향에 무관하게 항상 인체 외측을 정확히 판별
                         # 다층 레이어(살과 옷) 가중치 100% 1:1 완벽 동기화 (전방 뚫림 및 후방 압축 함몰 원천 차단)
+                        orig_w = w_arr.copy()
+                        updates_inj = {}
                         for k in sub_indices:
                             bi = phys_indices[k]
-                            cur_w = float(w_arr[bi])
+                            cur_w = float(orig_w[bi])
                             if cur_w <= 0.005:
                                 continue
                             cur_p = buf_np[bi]
@@ -308,23 +310,33 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                 hit_p = buf_np[hit_bi]
                                 hit_n = buf_norm[hit_bi]
 
-                                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 > 0.5)
+                                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.60)
                                 dot_n = float(cur_n[0]*hit_n[0] + cur_n[1]*hit_n[1] + cur_n[2]*hit_n[2])
-                                if dot_n < 0.5:
+                                if dot_n < 0.60:
                                     continue
 
-                                # 2. 접평면 상의 수평 거리: 7.0mm 이내 (삼각망 폴리곤 간격 수용)
+                                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
                                 delta = hit_p - cur_p
                                 d_norm = float(delta[0]*cur_n[0] + delta[1]*cur_n[1] + delta[2]*cur_n[2])
-                                d2 = float(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2])
-                                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
-                                if d_perp_sq > (0.0070 * 0.0070):
+                                abs_d_norm = abs(d_norm)
+                                if abs_d_norm < 0.0008 or abs_d_norm > 0.015:
                                     continue
 
-                                # 3. 1:1 일치화 (둘 중 최대값으로 통일하여 완벽 동기화)
-                                unified = max(w_arr[bi], w_arr[hit_bi])
-                                w_arr[bi] = unified
-                                w_arr[hit_bi] = unified
+                                # 3. 접평면 상의 수평 거리: 5.0mm 이내 (삼각망 폴리곤 간격 수용)
+                                d2 = float(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2])
+                                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
+                                if d_perp_sq > (0.0050 * 0.0050):
+                                    continue
+
+                                # 4. 1:1 일치화 (비연쇄적 독립 매칭: 둘 중 최대값으로 통일)
+                                unified = max(cur_w, float(orig_w[hit_bi]))
+                                if unified > updates_inj.get(bi, 0.0):
+                                    updates_inj[bi] = unified
+                                if unified > updates_inj.get(hit_bi, 0.0):
+                                    updates_inj[hit_bi] = unified
+
+                        for bi, u_w in updates_inj.items():
+                            w_arr[bi] = u_w
 
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())

@@ -79,15 +79,14 @@ def get_rig_bone_info(rig):
         if pb:
             scale_factor = max(abs(pb.scale.x), abs(pb.scale.y), abs(pb.scale.z))
 
-        r_cands = []
-        if db.head_radius > 0.005:
-            r_cands.append(db.head_radius * scale_factor)
         if db.envelope_distance > 0.005:
-            r_cands.append(db.envelope_distance * scale_factor)
-        if fwd_len > 0.01:
-            r_cands.append(fwd_len * 0.85)
-
-        radius = max(r_cands) if r_cands else 0.10
+            radius = db.envelope_distance * scale_factor
+        elif db.head_radius > 0.005:
+            radius = db.head_radius * scale_factor
+        elif fwd_len > 0.01:
+            radius = fwd_len * 0.70
+        else:
+            radius = 0.08
         radius = max(0.03, radius)
 
         entry = {
@@ -155,7 +154,7 @@ def sync_slot_bone_to_rig(context, item):
     depth = max(0.04, bmax.y - bmin.y)
     span_x = max(0.04, bmax.x - bmin.x)
     span_z = max(0.04, bmax.z - bmin.z)
-    bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
+    bone_radius = max(0.045, span_x * 0.50, span_z * 0.50)
 
     dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
     head = Vector((center.x, bmax.y, center.z))
@@ -206,7 +205,7 @@ def sync_slot_bone_to_rig(context, item):
         eb.tail = tail
         eb.head_radius = bone_radius
         eb.tail_radius = bone_radius * 0.7
-        eb.envelope_distance = bone_radius * 1.4
+        eb.envelope_distance = bone_radius * 1.05
         eb["xxmi_bone_type"] = btype
 
         bone_out_name = eb.name

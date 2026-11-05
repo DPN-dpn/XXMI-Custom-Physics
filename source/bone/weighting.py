@@ -83,22 +83,23 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
 
     pts_rel = world_pts - head_arr
 
-    # 1. 전방 깊이 축 투영 거리 및 매끄러운 돔 감쇠
+    # 1. 전방 깊이 축 투영 거리 및 매끄러운 돔 감쇠 (C1 연속 코사인 램프: 흉벽에서 0.0, 꼭짓점에서 1.0)
     t_proj = pts_rel @ bone_u
-    t_norm = np.clip(t_proj / bone_len, 0.0, 1.0)
-    w_depth = 0.25 + 0.75 * np.sin(np.sqrt(t_norm) * (np.pi * 0.5))
+    t_clamped = np.clip(t_proj / bone_len, 0.0, 1.0)
+    w_depth = 0.5 * (1.0 - np.cos(np.pi * t_clamped))
+    w_depth = np.where(t_proj > 0.0, w_depth, 0.0)
 
     # 2. 본 세그먼트 [Head -> Tail] 와의 3D 수직 최단거리 및 Hann Cosine 감쇠
-    proj_pts = head_arr + np.outer(t_norm, bone_vec)
+    proj_pts = head_arr + np.outer(t_clamped, bone_vec)
     d_perp = np.linalg.norm(world_pts - proj_pts, axis=1)
 
     radius = max(0.02, float(eff_radius))
     rho_norm = np.clip(d_perp / radius, 0.0, 1.0)
     w_radial = np.where(d_perp < radius, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
 
-    # 3. 해부학적 합성 가중치 계산 (반경 밖은 정확히 0.0)
+    # 3. 해부학적 합성 가중치 계산 (반경 밖 및 흉벽 뒤는 정확히 0.0으로 완벽한 곡면 수렴)
     w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
-    w_arr = np.where(w_radial > 0.0, np.clip(w_comb, 0.001, 1.0), 0.0)
+    w_arr = np.where((w_radial > 0.0) & (w_depth > 0.0), np.clip(w_comb, 0.001, 1.0), 0.0)
 
     # 4. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
     # (외곽 감쇠 그라데이션 보존: 동일 표면 내 수평 번짐 없이 순수 해부학적 Hann Cosine 감쇠 유지)
@@ -155,7 +156,7 @@ def eval_bone_weight_at_point(pt, bname, bone_info, props=None, falloff_p=1.0, p
 
     rho_norm = d_perp / radius
     w_radial = 0.5 * (1.0 + math.cos(math.pi * rho_norm))
-    w_depth = 0.25 + 0.75 * math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
+    w_depth = 0.5 * (1.0 - math.cos(math.pi * t_norm)) if t > 0.0 else 0.0
 
     if props:
         b_params = get_bone_params(props, bname)
@@ -461,11 +462,15 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
         kd.balance()
 
         # 3. 표면 법선(Normal) 기반 다층 레이어 1:1 완벽 가중치 동기화
+        # 주의: 동일 표면 상의 인접 버텍스끼리 연쇄 감염(Cascade Flood-Fill)되어 그라데이션이 파괴되는 것을 원천 차단!
+        # - 반드시 법선 방향 깊이 분리 거리(|d_norm| >= 0.8mm)가 있는 서로 다른 레이어끼리만 매칭
+        # - 원본 가중치(orig_weights)를 읽기 전용으로 참조하여 비연쇄적 독립 갱신 수행
+        orig_weights = [float(it["w"]) for it in items]
         updates = {}
 
         for idx in range(len(items)):
             it = items[idx]
-            cur_w = it["w"]
+            cur_w = orig_weights[idx]
             if cur_w <= 0.005:
                 continue
             cur_pt = it["pt"]
@@ -482,24 +487,33 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 hit_pt = hit_it["pt"]
                 hit_n = hit_it["norm"]
 
-                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 > 0.5)
+                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.60)
                 dot_n = cur_n.dot(hit_n)
-                if dot_n < 0.5:
+                if dot_n < 0.60:
                     continue
 
-                # 2. 탄젠트 평면(접평면) 상의 수평 거리: 7.0mm 이내 (삼각망 폴리곤 간격 수용)
+                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
                 delta = hit_pt - cur_pt
                 d_norm = delta.dot(cur_n)
-                d_perp_sq = max(0.0, delta.length_squared - d_norm * d_norm)
-                if d_perp_sq > (0.0070 * 0.0070):
+                abs_d_norm = abs(d_norm)
+                if abs_d_norm < 0.0008 or abs_d_norm > 0.015:
                     continue
 
-                # 3. 1:1 일치화 (둘 중 최대값으로 통일하여 완벽 동기화)
-                unified = max(it["w"], hit_it["w"])
-                it["w"] = unified
-                hit_it["w"] = unified
-                updates[(it["obj"], it["vg"], it["vi"])] = unified
-                updates[(hit_it["obj"], hit_it["vg"], hit_it["vi"])] = unified
+                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 5.0mm 이내 (삼각망 폴리곤 간격 수용)
+                d2 = delta.length_squared
+                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
+                if d_perp_sq > (0.0050 * 0.0050):
+                    continue
+
+                # 4. 1:1 일치화 (비연쇄적 독립 매칭: 둘 중 최대값으로 통일)
+                hit_w = orig_weights[h_idx]
+                unified = max(cur_w, hit_w)
+                k_cur = (it["obj"], it["vg"], it["vi"])
+                k_hit = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
+                if unified > updates.get(k_cur, 0.0):
+                    updates[k_cur] = unified
+                if unified > updates.get(k_hit, 0.0):
+                    updates[k_hit] = unified
                 total_promoted += 1
 
         # 4. 갱신된 가중치를 버텍스 그룹에 적용
