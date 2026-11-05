@@ -141,12 +141,13 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                     spring_vel_r = float3(0, 0, 0);
                 }}
 
-                // 실제 뼈대 애니메이션 이동 속도 기반 반작용 관성력
+                // 실제 뼈대 애니메이션 이동 속도 기반 정직한 뉴턴 관성력 (F = -m*a)
+                // 각 물리 본 슬롯은 독립된 관성력을 수신 (인위적인 좌우 왜곡/반전 제거)
                 float3 raw_vel = delta / dt;
                 float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
 
                 float3 ext_force_l = -anim_vel * (14.0 * INERTIA_SCALE_L);
-                float3 ext_force_r = -float3(-anim_vel.x * 0.9, anim_vel.y, anim_vel.z) * (14.0 * INERTIA_SCALE_R);
+                float3 ext_force_r = -anim_vel * (14.0 * INERTIA_SCALE_R);
 
                 // 부드러운 자연 호흡 바운스 중첩
                 if (IDLE_SCALE_L > 0.001) {{
@@ -154,7 +155,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                     ext_force_l += float3(0.0, sin(breath_t_l) * 1.5, cos(breath_t_l) * 1.0) * IDLE_SCALE_L;
                 }}
                 if (IDLE_SCALE_R > 0.001) {{
-                    float breath_t_r = time * (2.8 * SPEED_R) + 0.35;
+                    float breath_t_r = time * (2.8 * SPEED_R);
                     ext_force_r += float3(0.0, sin(breath_t_r) * 1.5, cos(breath_t_r) * 1.0) * IDLE_SCALE_R;
                 }}
 

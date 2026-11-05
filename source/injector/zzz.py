@@ -118,16 +118,16 @@ void main() {{
         float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
 
         float3 ext_force_l = -anim_vel * (12.0 * INERTIA_SCALE_L);
-        float3 ext_force_r = -float3(-anim_vel.x * 0.9, anim_vel.y, anim_vel.z) * (12.0 * INERTIA_SCALE_R);
+        float3 ext_force_r = -anim_vel * (12.0 * INERTIA_SCALE_R);
 
         if (IDLE_SCALE_L > 0.001) {{
             float breath_t = time * 2.5;
-            float3 idle_f_l = float3(sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_L;
+            float3 idle_f_l = float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_L;
             ext_force_l += idle_f_l;
         }}
         if (IDLE_SCALE_R > 0.001) {{
-            float breath_t = time * 2.5 + 0.35;
-            float3 idle_f_r = float3(-sin(breath_t) * 0.6, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_R;
+            float breath_t = time * 2.5;
+            float3 idle_f_r = float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_R;
             ext_force_r += idle_f_r;
         }}
 
