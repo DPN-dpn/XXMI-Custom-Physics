@@ -262,6 +262,54 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     wl_out[overlap_mask] *= scale
                     wr_out[overlap_mask] *= scale
 
+                # 2. Position.buf 3D 버퍼 공간 수직 레이어 Anti-Clipping 후처리
+                # 보간 오차로 인해 속살 가중치가 겉옷보다 커지는 역전 현상을 최종 0개로 소멸
+                # (수평 단면 거리 3.5mm 이내에서 앞뒤로 겹쳐 있는 수직 레이어만 매칭하여 그라데이션 100% 무손실 보존)
+                phys_indices = np.nonzero((wl_out > 0.005) | (wr_out > 0.005))[0]
+                if len(phys_indices) > 1:
+                    kd_phys = KDTree(len(phys_indices))
+                    for k, bi in enumerate(phys_indices):
+                        kd_phys.insert(Vector(buf_np[bi]), k)
+                    kd_phys.balance()
+
+                    for w_arr in (wl_out, wr_out):
+                        if w_arr.max() <= 0.005:
+                            continue
+                        sub_indices = [k for k in range(len(phys_indices)) if w_arr[phys_indices[k]] > 0.005]
+                        if len(sub_indices) < 2:
+                            continue
+
+                        # D3D 버퍼는 Z가 전방(+Z 방향으로 겉옷 돌출)
+                        sort_sub = sorted(sub_indices, key=lambda k: buf_np[phys_indices[k]][2])
+
+                        for k in sort_sub:
+                            bi = phys_indices[k]
+                            cur_w = float(w_arr[bi])
+                            if cur_w <= 0.005:
+                                continue
+                            cur_p = buf_np[bi]
+
+                            hits = kd_phys.find_range(Vector(cur_p), 0.012)
+                            if not hits:
+                                continue
+
+                            for _, hit_k, _ in hits:
+                                if hit_k == k:
+                                    continue
+                                hit_bi = phys_indices[hit_k]
+                                hit_p = buf_np[hit_bi]
+
+                                # 수평(XY 가슴 단면) 거리 오차 3.5mm 이내 (외곽 옆정점 배제)
+                                dx = hit_p[0] - cur_p[0]
+                                dy = hit_p[1] - cur_p[1]
+                                if (dx * dx + dy * dy) > (0.0035 * 0.0035):
+                                    continue
+
+                                # 깊이(Z): 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
+                                dz = hit_p[2] - cur_p[2]
+                                if dz >= 0.0003 and w_arr[hit_bi] < cur_w:
+                                    w_arr[hit_bi] = cur_w
+
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
                 max_rig = float(rig_out.max())

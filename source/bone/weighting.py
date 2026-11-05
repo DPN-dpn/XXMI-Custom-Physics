@@ -441,8 +441,7 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 pt = world[vi]
                 rel = pt - head
                 t_proj = float(rel @ bone_u)
-                d_head = float(np.linalg.norm(rel))
-                d_perp = float(np.sqrt(max(0.0, d_head * d_head - t_proj * t_proj)))
+                v_perp = Vector(rel) - Vector(bone_u) * t_proj
                 items.append({
                     "obj": obj,
                     "vg": vg,
@@ -450,8 +449,7 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                     "pt": Vector(pt),
                     "w": float(w_arr[vi]),
                     "t": t_proj,
-                    "d": d_head,
-                    "d_perp": d_perp,
+                    "v_perp": v_perp,
                 })
 
         if len(items) < 2:
@@ -472,10 +470,11 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             cur_w = it["w"]
             if cur_w <= 0.005:
                 continue
+            cur_pt = it["pt"]
             cur_t = it["t"]
-            cur_d_perp = it["d_perp"]
+            cur_v_perp = it["v_perp"]
 
-            hits = kd.find_range(it["pt"], tol)
+            hits = kd.find_range(cur_pt, tol)
             if not hits:
                 continue
 
@@ -484,15 +483,15 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                     continue
                 hit_it = items[h_idx]
 
-                # [수평 번짐 방지 / 방사형 정합]:
-                # 1. 중심축 수직 방사형 거리(d_perp)가 6mm 이내여야 같은 단면 상의 수직 레이어로 인정 (외곽으로의 감쇠 그라데이션 보존)
-                diff_perp = abs(hit_it["d_perp"] - cur_d_perp)
-                # 2. 전방 깊이(t)가 살과 거의 같거나(0.2mm 오차) 전방으로 나와 있는 바깥쪽 레이어
+                # [수평 번짐 방지 / 진정한 수직 레이어 정합]:
+                # 1. 본 축 수직 단면 위치 차이가 3.5mm 이내여야 동일 단면 상의 수직 레이어로 인정 (외곽 감쇠 그라데이션 100% 보존)
+                diff_perp = (hit_it["v_perp"] - cur_v_perp).length
+                if diff_perp > 0.0035:
+                    continue
+
+                # 2. 전방 깊이(t)가 최소 0.3mm 이상 전방으로 나와 있는 바깥쪽 레이어(겉옷)
                 diff_t = hit_it["t"] - cur_t
-
-                is_outer_layer = (diff_perp <= 0.006) and (diff_t >= -0.0005)
-
-                if is_outer_layer and hit_it["w"] < cur_w:
+                if diff_t >= 0.0003 and hit_it["w"] < cur_w:
                     hit_it["w"] = cur_w
                     key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
                     updates[key] = cur_w
