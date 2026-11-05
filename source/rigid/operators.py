@@ -24,6 +24,7 @@ class XXMI_OT_rigid_item_add(bpy.types.Operator):
         item.name = f"강체 {len(props.rigid_items)}"
         props.rigid_item_index = len(props.rigid_items) - 1
 
+        target_objs = get_target_mesh_objects(context)
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
             ensure_all_objects_in_object_mode(context)
@@ -43,7 +44,7 @@ class XXMI_OT_rigid_item_add(bpy.types.Operator):
                     vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
                     vg_rigid.add(sel_indices, 1.0, 'REPLACE')
 
-        if was_edit:
+        if was_edit and target_objs:
             for obj in target_objs:
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
@@ -74,6 +75,7 @@ class XXMI_OT_rigid_item_remove(bpy.types.Operator):
         item = props.rigid_items[idx]
         data = get_rigid_data(item)
 
+        target_objs = get_target_mesh_objects(context)
         was_edit = (context.mode == 'EDIT_MESH')
         if was_edit:
             ensure_all_objects_in_object_mode(context)
@@ -85,7 +87,7 @@ class XXMI_OT_rigid_item_remove(bpy.types.Operator):
                 if vg_rigid:
                     vg_rigid.remove(v_indices)
 
-        if was_edit:
+        if was_edit and target_objs:
             for obj in target_objs:
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
