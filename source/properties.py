@@ -264,10 +264,10 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         default=0
     )
 
-    # ── 2. 가슴 가중치 감쇠 옵션 ──
+    # ── 2. 물리 가중치 감쇠 옵션 ──
     peak_weight: bpy.props.FloatProperty(
         name="최대 가중치 (끝단 강도)",
-        description="가슴 꼭짓점의 최대 가중치입니다. 0.35~0.45(초록~파란색)으로 유지하면 노란색/빨간색 없이 부드럽고 유연하게 움직입니다 (기본값: 0.40)",
+        description="물리 본 끝단의 최대 가중치입니다. 0.35~0.45(초록~파란색)으로 유지하면 부드럽고 유연하게 움직입니다 (기본값: 0.40)",
         default=0.40,
         min=0.1,
         max=1.0,
@@ -277,7 +277,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     smooth_iterations: bpy.props.IntProperty(
         name="경계 부드러움 (스무딩)",
-        description="옷이 가슴 전체를 덮고 있을 때 경계선이 각지거나 접히지 않도록 메쉬 표면을 따라 가중치를 부드럽게 블렌딩합니다 (0이면 스무딩 끔, 기본값: 2)",
+        description="경계선이 각지거나 접히지 않도록 메쉬 표면을 따라 가중치를 부드럽게 블렌딩합니다 (0이면 스무딩 끔, 기본값: 2)",
         default=2,
         min=0,
         max=8,
@@ -285,7 +285,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     falloff_power: bpy.props.FloatProperty(
         name="가중치 퍼짐 정도",
-        description="가슴 가중치가 퍼지는 범위입니다. 기본값 1.0이며, 낮추면 전체로 부드럽게 퍼지고, 높이면 끝쪽으로 집중됩니다",
+        description="물리 가중치가 퍼지는 범위입니다. 기본값 1.0이며, 낮추면 전체로 부드럽게 퍼지고, 높이면 끝쪽으로 집중됩니다",
         default=1.0,
         min=0.3,
         max=3.0,
@@ -299,22 +299,10 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
         default=True
     )
 
-    ui_show_advanced_breast: bpy.props.BoolProperty(
-        name="고급 가중치 설정 펼치기",
-        description="가중치 감쇠, 최대 가중치 등 세부 옵션을 펼치거나 접습니다",
-        default=False
-    )
-
-    show_advanced_breast_settings: bpy.props.BoolProperty(
-        name="세부 설정 및 관리 도구",
-        description="가중치 세부 조절 및 초기화 도구를 펼치거나 접습니다",
-        default=False
-    )
-
-    # ── 3. 가슴 물리 거동 파라미터 ──
+    # ── 3. 전역 물리 거동 파라미터 ──
     strength: bpy.props.FloatProperty(
         name="흔들림 크기",
-        description="가슴이 흔들리는 전체적인 움직임 폭입니다 (0.0이면 정지, 1.0이 기본)",
+        description="파츠가 흔들리는 전체적인 움직임 폭입니다 (0.0이면 정지, 1.0이 기본)",
         default=1.0,
         min=0.0,
         max=3.0,

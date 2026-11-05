@@ -3,7 +3,7 @@ from ..utils import draw_help_button
 
 
 class XXMI_PHYS_PT_simulation(bpy.types.Panel):
-    """XXMI Custom Physics - 3. 가중치 계산 & 물리 프리뷰 패널"""
+    """XXMI Custom Physics - 3. 물리 파라미터 & 프리뷰 패널"""
     bl_label = ""
     bl_idname = "XXMI_PHYS_PT_simulation"
     bl_space_type = 'VIEW_3D'
@@ -13,7 +13,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
 
     def draw_header(self, context):
         layout = self.layout
-        layout.label(text="3. 가중치 계산 & 물리 프리뷰", icon='PHYSICS')
+        layout.label(text="3. 물리 파라미터 & 프리뷰", icon='PHYSICS')
 
     def draw(self, context):
         layout = self.layout
@@ -35,7 +35,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
 
         # 다중 물리 본 선택 UIList
         if len(props.bone_items) > 0:
-            layout.label(text="조절 대상 모핑 본:", icon='ARMATURE_DATA')
+            layout.label(text="조절 대상 물리 본:", icon='ARMATURE_DATA')
             row = layout.row()
             row.template_list(
                 "XXMI_UL_bone_items", "sim",

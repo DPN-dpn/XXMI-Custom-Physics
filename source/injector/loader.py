@@ -48,7 +48,10 @@ def _load_physics_from_mod(mod_folder, context, props):
                 for bd in bone_items_data:
                     it = props.bone_items.add()
                     it.name = str(bd.get("name", "모핑 본"))
-                    it.bone_type = 'MORPH'
+                    it.bone_type = str(bd.get("bone_type", "MORPH"))
+                    it.chain_segments = int(bd.get("chain_segments", 4))
+                    it.gravity_factor = float(bd.get("gravity_factor", 1.0))
+                    it.stiffness = float(bd.get("stiffness", 0.5))
                     it.peak_weight = float(bd.get("peak_weight", getattr(props, "peak_weight", 0.40)))
                     it.falloff_power = float(bd.get("falloff_power", getattr(props, "falloff_power", 1.0)))
                     it.smooth_iterations = int(bd.get("smooth_iterations", 2))

@@ -7,7 +7,7 @@ import math
 from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
 from ..utils import ensure_object_visible, ensure_all_objects_in_object_mode, read_vertex_group_arrays
-from ..simulation.operators import stop_physics_preview
+from ..simulation.engine import stop_physics_preview
 
 from .ini_parser import (
     _clean_injected_lines,
@@ -41,7 +41,7 @@ from .hsr import (
 class XXMI_OT_apply_custom_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_apply_custom_physics"
     bl_label = "모드에 물리 주입"
-    bl_description = "가슴 가중치와 물리 설정값을 캐릭터 모드에 적용하여 인게임에서 동작하도록 주입합니다"
+    bl_description = "현재 설정된 물리 가중치와 파라미터를 캐릭터 모드에 주입하여 인게임에서 동작하게 합니다"
 
     @classmethod
     def poll(cls, context):
@@ -64,31 +64,32 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             self.report({'ERROR'}, "모드 폴더 경로를 먼저 지정해주세요.")
             return {'CANCELLED'}
 
-        # 앵커 본(XXMI_Breast_Rig)이 존재하면 주입 전 웨이트를 본 위치 기준으로 강제 재베이크 동기화
+        # 물리 리그(XXMI_Physics_Rig)가 존재하면 주입 전 웨이트를 본 위치 기준으로 강제 재베이크 동기화
         rig = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
         if rig and rig.type == 'ARMATURE':
             from ..bone.weighting import rebake_mesh_weights_from_rig
             rebake_mesh_weights_from_rig(context, rig, props)
 
-        # 1. 가슴 웨이트를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
+        # 1. 물리 가중치를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
         active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-        b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
-        b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
+        b0_name = active_bones[0] if len(active_bones) > 0 else "Bone_0"
+        b1_name = active_bones[1] if len(active_bones) > 1 else "Bone_1"
         vg_b0 = f"XXMI_{b0_name}"
         vg_b1 = f"XXMI_{b1_name}"
-        target_vgs = {vg_b0, vg_b1, "XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
+        all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
+        target_vgs = all_bone_vgs | {vg_b0, vg_b1, "XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
 
-        breast_objs = [
+        physics_objs = [
             o for o in bpy.data.objects
             if o.type == 'MESH' and any(o.vertex_groups.get(vgn) for vgn in target_vgs)
         ]
 
-        if not breast_objs:
-            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 선택 영역을 가슴으로 등록]을 진행해주세요.")
+        if not physics_objs:
+            self.report({'ERROR'}, "등록된 물리 본 정점이 없습니다. 먼저 1패널에서 정점을 할당해주세요.")
             return {'CANCELLED'}
 
         mesh_caches = []
-        for obj in breast_objs:
+        for obj in physics_objs:
             ensure_object_visible(context, obj)
             n_verts = len(obj.data.vertices)
             if n_verts == 0:
@@ -132,157 +133,143 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             })
 
         if not mesh_caches:
-            self.report({'ERROR'}, "가슴 가중치가 계산되지 않았습니다. 먼저 [4. 본 기준 가중치(웨이트) 자동 계산]을 진행해주세요.")
+            self.report({'ERROR'}, "물리 가중치가 계산되지 않았습니다. 먼저 3패널에서 [본 & 강체 가중치 자동 계산 & 블렌딩]을 진행해주세요.")
             return {'CANCELLED'}
 
         global_peak_weight = 0.0
         for mcache in mesh_caches:
             global_peak_weight = max(global_peak_weight, float(mcache["w_l"].max()), float(mcache["w_r"].max()))
-        if global_peak_weight < 0.05:
-            global_peak_weight = 1.0
 
+        # 2. 대상 INI 파일 수집
         ini_files = []
         if os.path.isfile(target_mod_input) and target_mod_input.lower().endswith('.ini'):
             ini_files.append(target_mod_input)
         elif os.path.isdir(target_mod_input):
             for root, dirs, files in os.walk(target_mod_input):
-                dirs[:] = [d for d in dirs if not d.lower().startswith('disabled')]
                 for f in files:
                     if f.lower().endswith('.ini'):
                         ini_files.append(os.path.join(root, f))
 
         if not ini_files:
-            self.report({'ERROR'}, "모드 폴더 내에 .ini 파일이 없습니다.")
+            self.report({'ERROR'}, "지정된 경로에서 .ini 파일을 찾을 수 없습니다.")
             return {'CANCELLED'}
 
         total_injected_buffers = 0
-        matched_obj_names = set()
+        total_modified_inis = 0
 
         for ini_path in ini_files:
             mod_folder = os.path.dirname(ini_path)
-            custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")
-            os.makedirs(custom_physics_dir, exist_ok=True)
-            pos_buffers = _find_position_buffers(mod_folder, ini_path)
+
+            pos_buffers = _find_position_buffers(ini_path)
             if not pos_buffers:
                 continue
 
+            # 3. .ini 파일 백업 (영구 원본 + 타임스탬프 백업)
+            backup_ini_file(ini_path)
+
+            # 4. CustomPhysics 서브폴더 생성
+            custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")
+            os.makedirs(custom_physics_dir, exist_ok=True)
+
+            # 5. 파라미터 및 본 메타데이터 JSON 내보내기
+            _export_physics_config_json(custom_physics_dir, props, context)
+
             matched_in_ini = []
 
-            for idx, res_name, raw_fname, buf_v_count, norm_path, blend_sec, draw_sec in pos_buffers:
-                buf_np = _read_buf_positions_np(norm_path)
+            for idx, res_name, raw_fname, blend_sec, draw_sec in pos_buffers:
+                buf_path = os.path.join(mod_folder, raw_fname)
+                if not os.path.exists(buf_path):
+                    continue
+
+                buf_np = _read_buf_positions_np(buf_path)
                 n_buf = len(buf_np)
                 if n_buf == 0:
                     continue
-                buf_positions = [Vector(p) for p in buf_np.tolist()]
 
                 kd_buf = KDTree(n_buf)
-                for bp_i, bp_co in enumerate(buf_positions):
-                    kd_buf.insert(bp_co, bp_i)
+                for vi, p in enumerate(buf_np):
+                    kd_buf.insert(Vector(p), vi)
                 kd_buf.balance()
 
-                valid_matches = []
-                for mcache in mesh_caches:
-                    b_mat, b_score = _find_best_transform_for_object(kd_buf, mcache["sample_obj"], mcache["obj"])
-                    if b_mat is not None and b_score <= 0.05:
-                        valid_matches.append((mcache, b_mat, b_score))
+                # 버퍼와 가장 잘 매칭되는 블렌더 메쉬 탐색
+                best_cache = None
+                best_mat = None
+                best_score = float('inf')
 
-                if not valid_matches:
+                for mcache in mesh_caches:
+                    mat, score = _find_best_transform_for_object(kd_buf, mcache["sample_obj"], mcache["obj"])
+                    if score < best_score:
+                        best_score = score
+                        best_mat = mat
+                        best_cache = mcache
+                    if score < 1e-4:
+                        break
+
+                if best_score > 0.10:
+                    matched_in_ini.append((idx, res_name, raw_fname, n_buf, False, 0, 0, blend_sec, draw_sec))
                     continue
 
-                for mcache, _, _ in valid_matches:
-                    matched_obj_names.add(mcache["obj"].name)
+                # KD-Tree 기반 정점 가중치 보간
+                inv_mat = best_mat.inverted()
+                buf_in_obj = np.empty_like(buf_np)
+                for vi in range(n_buf):
+                    buf_in_obj[vi] = (inv_mat @ Vector(buf_np[vi]))[:]
 
-                # 모든 매칭 오브젝트의 가중치 정점을 버퍼 좌표계로 변환하여 하나의 KD-Tree로 통합
-                pts_chunks = []
-                wl_chunks = []
-                wr_chunks = []
-                rig_chunks = []
-                for mcache, b_mat, _ in valid_matches:
-                    M = np.array(b_mat, dtype=np.float64)
-                    pts_chunks.append(mcache["wco"] @ M[:3, :3].T + M[:3, 3])
-                    wl_chunks.append(mcache["w_l"])
-                    wr_chunks.append(mcache["w_r"])
-                    rig_chunks.append(mcache["rigid"])
+                wco = best_cache["wco"]
+                kd_mesh = KDTree(len(wco))
+                for vi, p in enumerate(wco):
+                    kd_mesh.insert(Vector(p), vi)
+                kd_mesh.balance()
 
-                all_pts = np.concatenate(pts_chunks, axis=0)
-                all_wl = np.concatenate(wl_chunks)
-                all_wr = np.concatenate(wr_chunks)
-                all_rig = np.concatenate(rig_chunks)
-
-                tol = min(0.02, max(2e-4, 2.0 * max(s for _, _, s in valid_matches)))
-
-                kd_w = KDTree(len(all_pts))
-                for k, p in enumerate(all_pts.tolist()):
-                    kd_w.insert(p, k)
-                kd_w.balance()
-
-                # 가중치 정점 영역(AABB) 밖의 버퍼 정점은 검색 없이 0으로 처리 (대형 모드 속도 최적화)
-                lo = all_pts.min(axis=0) - tol
-                hi = all_pts.max(axis=0) + tol
-                in_box = np.all((buf_np >= lo) & (buf_np <= hi), axis=1)
-                cand_idx = np.nonzero(in_box)[0]
+                w_l_src = best_cache["w_l"]
+                w_r_src = best_cache["w_r"]
+                rigid_src = best_cache["rigid"]
 
                 wl_out = np.zeros(n_buf, dtype=np.float32)
                 wr_out = np.zeros(n_buf, dtype=np.float32)
                 rig_out = np.zeros(n_buf, dtype=np.float32)
 
-                for i in cand_idx.tolist():
-                    hits = kd_w.find_range(buf_positions[i], tol)
-                    if not hits:
-                        continue
-                    # 1순위: 가장 가까운 3D 정점(최소 거리) 선택
-                    # 2순위: 0.1mm 이내 동일 위치 정점 간에는 가중치 및 강체 우선순위 적용
-                    # (근접한 피부/가슴 정점이 장신구/파우치 정점을 덮어쓰지 않도록 엄격 분리)
-                    best_h = min(hits, key=lambda h: (
-                        round(h[2], 4),
-                        -(all_wl[h[1]] + all_wr[h[1]] + (10.0 if all_rig[h[1]] > 0.5 else 0.0))
-                    ))
-                    k = best_h[1]
-                    wl_out[i] = all_wl[k]
-                    wr_out[i] = all_wr[k]
-                    rig_out[i] = all_rig[k]
-
-                # ── UV 심(Seam) 및 분리된 경계 정점 찢어짐 방지 (Coincident Vertex Synchronization) ──
-                # 버퍼 내에서 3D 공간 상 동일 위치(0.5mm 이내)를 공유하는 분리 정점들은
-                # 셰이더 상에서 100% 동일하게 움직이도록 가중치를 동기화합니다 (버텍스 개수 변경 없음).
-                active_mask = ((wl_out > 0.0001) | (wr_out > 0.0001)) & (rig_out <= 0.5)
-                active_indices = np.nonzero(active_mask)[0]
-                if len(active_indices) > 0:
-                    for ai in active_indices.tolist():
-                        p = buf_positions[ai]
-                        hits = kd_buf.find_range(p, 0.0005)
-                        if len(hits) > 1:
-                            soft_hits = [h[1] for h in hits if rig_out[h[1]] <= 0.5]
-                            if len(soft_hits) > 1:
-                                max_l = max(wl_out[hi] for hi in soft_hits)
-                                max_r = max(wr_out[hi] for hi in soft_hits)
-                                for hi in soft_hits:
-                                    wl_out[hi] = max_l
-                                    wr_out[hi] = max_r
+                tol = 0.008
+                for vi in range(n_buf):
+                    pt = Vector(buf_in_obj[vi])
+                    hits = kd_mesh.find_range(pt, tol)
+                    if hits:
+                        min_d = hits[0][2]
+                        if min_d < 1e-5:
+                            hi = hits[0][1]
+                            wl_out[vi] = w_l_src[hi]
+                            wr_out[vi] = w_r_src[hi]
+                            rig_out[vi] = rigid_src[hi]
+                        else:
+                            inv_d_sum = sum(1.0 / max(h[2], 1e-5) for h in hits)
+                            wl_out[vi] = sum(w_l_src[h[1]] * (1.0 / max(h[2], 1e-5)) for h in hits) / inv_d_sum
+                            wr_out[vi] = sum(w_r_src[h[1]] * (1.0 / max(h[2], 1e-5)) for h in hits) / inv_d_sum
+                            rig_out[vi] = 1.0 if any(rigid_src[h[1]] > 0.5 for h in hits) else 0.0
 
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
-                peak_l_idx = int(wl_out.argmax())
-                peak_r_idx = int(wr_out.argmax())
+                max_rig = float(rig_out.max())
+                peak_l_idx = int(wl_out.argmax()) if max_wl > 1e-4 else 0
+                peak_r_idx = int(wr_out.argmax()) if max_wr > 1e-4 else 0
 
-                # 버퍼 정점별 가중치 매핑: stride 16 (float4: wl, wr, is_rigid, 0.0)
-                map_bytes = np.stack(
+                # CustomPhysicsMap.buf (stride 16: float4 -> wl, wr, is_rigid, root_dist) 바이너리 빌드
+                map_bytes = np.column_stack(
                     [wl_out, wr_out, rig_out, np.zeros(n_buf, dtype=np.float32)], axis=1
                 ).astype('<f4').tobytes()
 
-                has_breast = (max_wl > 0.001 or max_wr > 0.001)
+                has_physics = (max_wl > 0.001 or max_wr > 0.001 or max_rig > 0.001)
 
-                if has_breast:
+                if has_physics:
                     map_buf_path = os.path.join(custom_physics_dir, f"CustomPhysicsMap_{idx}.buf")
                     with open(map_buf_path, 'wb') as f:
                         f.write(map_bytes)
 
                     # 흉골/몸통 중심 정점 탐색
                     best_root_idx = 0
-                    breast_mask = (wl_out > 0.1) | (wr_out > 0.1)
-                    if breast_mask.any():
-                        center_breast = buf_np[breast_mask].mean(axis=0)
-                        root_dist = np.linalg.norm(buf_np - center_breast, axis=1)
+                    physics_mask = (wl_out > 0.1) | (wr_out > 0.1)
+                    if physics_mask.any():
+                        center_phys = buf_np[physics_mask].mean(axis=0)
+                        root_dist = np.linalg.norm(buf_np - center_phys, axis=1)
                         root_dist[(wl_out >= 0.01) | (wr_out >= 0.01)] = np.inf
                         if np.isfinite(root_dist).any():
                             best_root_idx = int(root_dist.argmin())
@@ -300,34 +287,32 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                     total_injected_buffers += 1
 
-                matched_in_ini.append((idx, res_name, raw_fname, n_buf, has_breast, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
+                matched_in_ini.append((idx, res_name, raw_fname, n_buf, has_physics, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
 
             if matched_in_ini:
-                breast_entries = [e for e in matched_in_ini if e[4]]
-                if breast_entries:
-                    master_entry = max(breast_entries, key=lambda e: e[3])
+                physics_entries = [e for e in matched_in_ini if e[4]]
+                if physics_entries:
+                    master_entry = max(physics_entries, key=lambda e: e[3])
                     master_idx = master_entry[0]
                 else:
-                    master_idx = 0
-
-                # .ini 파일 원본 백업본(.bak) 생성 (주입 전 안전 보존)
-                backup_ini_file(ini_path)
+                    master_entry = matched_in_ini[0]
+                    master_idx = master_entry[0]
 
                 if target_game == 'HSR':
-                    inject_physics_hsr(ini_path, matched_in_ini, props, master_idx)
+                    inject_physics_hsr(ini_path, matched_in_ini, master_idx, props)
                 else:
-                    inject_physics_zzz(ini_path, matched_in_ini, props, master_idx)
+                    inject_physics_zzz(ini_path, matched_in_ini, master_idx, props)
+                total_modified_inis += 1
 
-                _export_physics_config_json(custom_physics_dir, props, context)
-
-        if total_injected_buffers > 0:
-            names_str = ", ".join(matched_obj_names)
-            game_label = "붕괴: 스타레일" if target_game == 'HSR' else "젠레스 존 제로"
-            self.report({'INFO'}, f"물리 주입 완료! [{game_label}] {total_injected_buffers}개 메쉬에 물리 효과가 적용되었습니다. (원본 ini 백업 생성 완료)")
-            return {'FINISHED'}
-        else:
-            self.report({'WARNING'}, "모드 폴더 내에서 일치하는 메쉬 데이터를 찾지 못했습니다. 올바른 캐릭터 모드 폴더인지 확인해주세요.")
+        if total_injected_buffers == 0:
+            self.report({'WARNING'}, "모드 버퍼와 매칭되는 물리 정점을 찾지 못했습니다. 모드 폴더의 원본 Position.buf 파일들을 확인해주세요.")
             return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"물리 주입 성공! {total_modified_inis}개 INI 파일 수정, {total_injected_buffers}개 메쉬 버퍼에 물리 쉐이더가 정상 주입되었습니다."
+        )
+        return {'FINISHED'}
 
 
 class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
@@ -377,21 +362,13 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
                 except Exception:
                     pass
 
-            # 백업 파일(.bak) 정리
-            if os.path.exists(bak_path):
-                try:
-                    os.remove(bak_path)
-                    removed_files += 1
-                except Exception:
-                    pass
-
             # 1. CustomPhysics 서브폴더 삭제
             custom_physics_dir = os.path.join(mod_folder, "CustomPhysics")
             if os.path.isdir(custom_physics_dir):
                 shutil.rmtree(custom_physics_dir, ignore_errors=True)
                 removed_files += 1
 
-            # 2. 레거시(모드 루트에 남아있던 파일들)도 함께 정리
+            # 2. 루트에 남아있을 수 있는 커스텀 물리 파일 정리
             for fname in os.listdir(mod_folder):
                 fl = fname.lower()
                 if (fl.startswith("customphysics") and (fl.endswith(".hlsl") or fl.endswith(".buf"))) or \
@@ -404,14 +381,14 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
                     except Exception:
                         pass
 
-        self.report({'INFO'}, f"롤백 완료: 모드가 주입 전 원본 상태로 복원되었습니다. ({cleaned_count}개 .ini 복원, {removed_files}개 물리 파일 삭제)")
+        self.report({'INFO'}, f"롤백 완료: 모드가 주입 전 원본 상태로 복원되었습니다. ({cleaned_count}개 .ini 복원, {removed_files}개 임시 파일 정리)")
         return {'FINISHED'}
 
 
 class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
     bl_idname = "object.xxmi_load_physics_from_mod"
     bl_label = "모드 폴더에서 물리 설정 불러오기"
-    bl_description = "선택된 모드 폴더에 저장된 물리 본 위치와 파라미터를 블렌더로 복원합니다"
+    bl_description = "지정된 모드 폴더의 설정 파일에서 물리 가중치와 파라미터를 복원합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -438,7 +415,7 @@ class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
 class XXMI_OT_physics_dir_picker(bpy.types.Operator):
     bl_idname = "object.xxmi_physics_dir_picker"
     bl_label = "모드 폴더 선택"
-    bl_description = "물리를 적용할 타겟 모드 폴더를 선택합니다"
+    bl_description = "모드 파일이 위치한 폴더를 선택합니다"
 
     directory: bpy.props.StringProperty(subtype='DIR_PATH')
 

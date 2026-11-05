@@ -1,5 +1,8 @@
 import json
 import bpy
+from mathutils import Vector
+from mathutils.kdtree import KDTree
+from ..utils import world_vertex_positions
 
 
 def get_bone_vg_name(bname):
@@ -155,9 +158,103 @@ def get_bone_params(props, bname):
     }
 
 
-def ensure_default_breast_bone_items(props):
+def get_all_rigid_verts_by_obj(props):
+    """등록된 모든 강체 슬롯에서 강체 정점 목록을 오브젝트별 set으로 수집합니다."""
+    rigid_verts_by_obj = {}
+    from ..rigid.data import get_rigid_data
+    for r_item in props.rigid_items:
+        r_dict = get_rigid_data(r_item)
+        if not r_dict:
+            continue
+        for oname, r_vis in r_dict.items():
+            rigid_verts_by_obj.setdefault(oname, set()).update(r_vis)
+    return rigid_verts_by_obj
+
+
+def subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=True):
     """
-    props.bone_items가 비어있으면 기본 모핑 본 슬롯 쌍을 생성합니다.
+    물리 본 슬롯 item의 정점 목록에서 등록된 강체 정점들을 제외합니다.
+    keep_boundary=True일 경우, 비-강체(물리 메인 표면) 정점과 엣지로 직접 연결되어 있거나
+    공간상 맞닿아 있는 경계 접합 정점은 제외하지 않고 유지합니다.
+
+    반환값: (subtracted_count, kept_boundary_count)
+    """
+    data = get_bone_data(item)
+    if not data:
+        return 0, 0
+
+    new_data = {}
+    subtracted_count = 0
+    kept_boundary_count = 0
+
+    for obj_name, v_indices in data.items():
+        obj = bpy.data.objects.get(obj_name)
+        if not obj or obj.type != 'MESH':
+            new_data[obj_name] = v_indices
+            continue
+
+        rigid_set = rigid_verts_by_obj.get(obj_name, set())
+        slot_set = set(v_indices)
+
+        overlap = slot_set & rigid_set
+        if not overlap:
+            new_data[obj_name] = v_indices
+            continue
+
+        mesh = obj.data
+
+        boundary_verts = set()
+        if keep_boundary:
+            # 1. 엣지 토폴로지 연결 검사: overlap 정점 중 비-강체 정점과 엣지로 연결된 정점 유지
+            edge_neighbors = {v: [] for v in overlap}
+            for e in mesh.edges:
+                v1, v2 = e.vertices[0], e.vertices[1]
+                if v1 in edge_neighbors:
+                    edge_neighbors[v1].append(v2)
+                if v2 in edge_neighbors:
+                    edge_neighbors[v2].append(v1)
+
+            for v, nbrs in edge_neighbors.items():
+                if any(nbr not in rigid_set for nbr in nbrs):
+                    boundary_verts.add(v)
+
+            # 2. 메쉬가 분리되어 있어 엣지가 없는 경우를 위한 공간 근접성(KDTree) 보정
+            non_rigid_slot = [v for v in slot_set if v not in rigid_set]
+            if non_rigid_slot and (len(boundary_verts) < len(overlap)):
+                wpos = world_vertex_positions(obj)
+                kd = KDTree(len(non_rigid_slot))
+                for idx, vi in enumerate(non_rigid_slot):
+                    kd.insert(Vector(wpos[vi]), idx)
+                kd.balance()
+
+                for v in overlap:
+                    if v not in boundary_verts:
+                        pt = Vector(wpos[v])
+                        hits = kd.find_range(pt, 0.0015)
+                        if hits:
+                            boundary_verts.add(v)
+
+        # 최종 남길 정점: (slot_set - overlap) + boundary_verts
+        to_remove = overlap - boundary_verts
+        remaining = [v for v in v_indices if v not in to_remove]
+
+        new_data[obj_name] = remaining
+        subtracted_count += len(to_remove)
+        kept_boundary_count += len(boundary_verts)
+
+        # 오브젝트의 버텍스 그룹에서도 제거된 정점 제외
+        vg_name = get_bone_vg_name(item.name)
+        vg = obj.vertex_groups.get(vg_name)
+        if vg and to_remove:
+            vg.remove(list(to_remove))
+
+    set_bone_data(item, new_data)
+    return subtracted_count, kept_boundary_count
+
+
+def ensure_default_bone_items(props):
+    """
+    props.bone_items가 비어있으면 기본 물리 본 슬롯 쌍을 생성합니다.
     """
     if not props or not hasattr(props, "bone_items"):
         return
@@ -188,3 +285,7 @@ def ensure_default_breast_bone_items(props):
         item_2.damping = getattr(props, "damping", 0.85)
         item_2.inertia = getattr(props, "inertia", 1.2)
         item_2.idle_motion = getattr(props, "idle_motion", 0.4)
+
+
+ensure_default_breast_bone_items = ensure_default_bone_items
+

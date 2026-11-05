@@ -3,7 +3,7 @@ from ..utils import draw_help_button
 
 
 class XXMI_PHYS_PT_bone(bpy.types.Panel):
-    """XXMI Custom Physics - 1. 모핑 본(스켈레톤) 설정 패널"""
+    """XXMI Custom Physics - 1. 물리 본 & 영역 설정 패널"""
     bl_label = ""
     bl_idname = "XXMI_PHYS_PT_bone"
     bl_space_type = 'VIEW_3D'
@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
     bl_order = 0
 
     def draw_header(self, context):
-        self.layout.label(text="1. 모핑 본(스켈레톤) 설정", icon='BONE_DATA')
+        self.layout.label(text="1. 물리 본 & 영역 설정", icon='BONE_DATA')
 
     def draw(self, context):
         layout = self.layout
@@ -22,12 +22,12 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[1단계: 모핑 본(스켈레톤) 설정 가이드]\n\n"
-                "• 에디트 모드에서 모핑(흔들림)할 부위의 정점들을 선택하고 [+]를 누르면 슬롯과 가상 물리 본이 즉시 생성됩니다.\n"
-                "• 무전기, 장식 등 강체(액세서리)가 붙어있는 경우, 일단 통째로 포함해서 모핑 슬롯을 생성하세요.\n"
-                "• 그 후 2패널에서 강체를 등록하고, [강체 정점 자동 제외 (경계 유지)]를 누르면 가슴 표면과 맞닿아 있는 접합 경계 버텍스는 유지하면서 돌출된 강체 정점만 깔끔하게 빠집니다!\n"
-                "• 특정 부위에 버텍스가 몰려있어도 3D 공간 형태의 중심을 계산하여 본이 배치됩니다.\n"
-                "• 본 배치가 완료되면 [2. 강체(액세서리) 설정]으로 넘어가거나 바로 [3. 가중치 계산 & 프리뷰]로 이동하세요."
+                "[1단계: 물리 본 & 영역 설정 가이드]\n\n"
+                "• 에디트 모드에서 물리(흔들림/모핑) 효과를 줄 부위의 정점들을 선택하고 [+]를 누르면 슬롯과 가상 물리 본이 즉시 생성됩니다.\n"
+                "• 꼬리, 헤어, 스커트, 날개 등의 경우 '추가할 본 종류'를 선택하여 다관절 체인으로 생성할 수 있습니다.\n"
+                "• 단추, 브로치, 무전기 등 강체(액세서리)가 붙어있는 경우, 일단 통째로 포함해서 본 슬롯을 생성하세요.\n"
+                "• 그 후 2패널에서 강체를 등록하고, [강체 정점 자동 제외 (경계 유지)]를 누르면 본 표면과 맞닿아 있는 접합 경계 버텍스는 유지하면서 돌출된 강체 정점만 깔끔하게 제외됩니다!\n"
+                "• 본 배치가 완료되면 [2. 강체(액세서리) 설정]으로 넘어가거나 바로 [3. 물리 파라미터 & 프리뷰]로 이동하세요."
             ),
         )
 
