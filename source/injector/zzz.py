@@ -212,10 +212,12 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     float total_w = wl + wr;
 
     if (total_w > 0.0001 && (SCALE_L > 0.0001 || SCALE_R > 0.0001)) {{
-        float3 disp_l = PhysState[0].xyz;
-        float3 disp_r = PhysState[1].xyz;
+        float3 disp_l = PhysState[0].xyz * (wl * SCALE_L);
+        float3 disp_r = PhysState[1].xyz * (wr * SCALE_R);
 
-        float3 total_disp = disp_l * (wl * SCALE_L) + disp_r * (wr * SCALE_R);
+        // 좌우 본 영향이 겹치는 부위(가슴골 등)에서 변위가 무작정 2배로 폭발하지 않도록 정규화 선형 블렌딩
+        float blend_norm = max(1.0, (wl + wr));
+        float3 total_disp = (disp_l + disp_r) / blend_norm;
 
         float d_len = length(total_disp);
         if (d_len > MAX_DISP && d_len > 1e-5) {{

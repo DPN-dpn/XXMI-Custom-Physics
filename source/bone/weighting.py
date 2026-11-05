@@ -402,12 +402,13 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
                 vg.remove([vi])
 
 
-def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.025):
+def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.035):
     """
     다중 레이어(피부 vs 겉옷/자켓/속옷 등) 3D 기하 침투 방지(Anti-Clipping) 필터:
     단일 메쉬든 분리된 다중 오브젝트든 3D 월드 공간 상에서 안쪽 살(피부) 위에 얹힌
     모든 바깥쪽 레이어(겉옷)의 가중치가 안쪽 정점보다 작아지지 않도록 w_outer >= w_inner를 보장합니다.
     (스무딩 또는 개방형 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상 원천 차단)
+    가슴 하단부(언더붑) 곡면 및 측면 곡면을 모두 포괄하도록 3D 공간 판정을 강화했습니다.
     """
     if not target_objs or not bone_info:
         return 0
@@ -510,7 +511,15 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 if h_idx == idx:
                     continue
                 hit_it = items[h_idx]
-                is_outer = (hit_it["t"] >= cur_t - 0.002) and (hit_it["d"] >= cur_d - 0.002)
+                dt = hit_it["t"] - cur_t
+                dd = hit_it["d"] - cur_d
+
+                # 가슴 앞면뿐 아니라 하단부 곡면(언더붑) 및 측면 곡면을 포괄하는 outer 판정:
+                # 1) 전방 깊이와 3D 거리가 모두 비슷하거나 앞설 때
+                # 2) 또는 방사형 3D 거리가 더 바깥쪽이면서 전방 깊이가 극단적으로 뒤처지지 않을 때
+                # 3) 또는 전방으로 2mm 이상 돌출되어 있을 때
+                is_outer = (dt >= -0.003 and dd >= -0.002) or (dd >= 0.002 and dt >= -0.010) or (dt >= 0.002)
+
                 if is_outer and hit_it["w"] < cur_w:
                     hit_it["w"] = cur_w
                     key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
@@ -522,6 +531,69 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
 
     return total_promoted
+
+
+def normalize_overlapping_bone_weights(target_objs, active_bones, max_total_weight=0.80):
+    """
+    여러 모핑 본(예: Left, Right)의 영향 영역이 겹치는 가슴 중앙/클리비지 정점에서
+    가중치 합이 max_total_weight를 초과하여 변위가 2배로 폭발하거나 뾰족하게 튀어나오는 현상을 방지합니다.
+    양쪽 본의 비율(L:R)은 정확히 보존하면서 합이 max_total_weight 이내가 되도록 부드럽게 크로스 블렌딩합니다.
+    """
+    if not target_objs or len(active_bones) < 2:
+        return 0
+
+    valid_objs = [o for o in target_objs if o and o.type == 'MESH']
+    total_clamped = 0
+
+    for obj in valid_objs:
+        n_verts = len(obj.data.vertices)
+        if n_verts == 0:
+            continue
+
+        # 활성 본들의 버텍스 그룹 및 가중치 배열 수집
+        vg_dict = {}
+        for bn in active_bones:
+            vg = obj.vertex_groups.get(f"XXMI_{bn}")
+            if not vg:
+                if bn in ("L", "Breast.L"):
+                    vg = obj.vertex_groups.get(VG_BREAST_L)
+                elif bn in ("R", "Breast.R"):
+                    vg = obj.vertex_groups.get(VG_BREAST_R)
+            if vg:
+                vg_dict[bn] = vg
+
+        if len(vg_dict) < 2:
+            continue
+
+        gmap = {vg.index: bn for bn, vg in vg_dict.items()}
+        arrs = read_vertex_group_arrays(obj, gmap)
+
+        weight_matrix = np.zeros((len(vg_dict), n_verts), dtype=np.float32)
+        bn_keys = list(vg_dict.keys())
+        for row_idx, bn in enumerate(bn_keys):
+            weight_matrix[row_idx] = arrs.get(bn, np.zeros(n_verts, dtype=np.float32))
+
+        # 활성 가중치 합 계산
+        sum_w = weight_matrix.sum(axis=0)
+        # 2개 이상의 본에 영향받으며, 합이 max_total_weight를 초과하는 정점 식별
+        active_counts = (weight_matrix > 0.001).sum(axis=0)
+        over_mask = (active_counts >= 2) & (sum_w > max_total_weight)
+
+        if not np.any(over_mask):
+            continue
+
+        over_idx = np.nonzero(over_mask)[0]
+        for vi in over_idx.tolist():
+            s = float(sum_w[vi])
+            scale_factor = max_total_weight / s
+            for row_idx, bn in enumerate(bn_keys):
+                w_orig = float(weight_matrix[row_idx, vi])
+                if w_orig > 0.0001:
+                    new_w = w_orig * scale_factor
+                    vg_dict[bn].add([vi], max(0.0005, min(1.0, new_w)), 'REPLACE')
+            total_clamped += 1
+
+    return total_clamped
 
 
 def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, tol=0.0012):
@@ -824,7 +896,14 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     # 5. 다중 레이어 3D 침투 방지(Anti-Clipping) 필터:
     # 스무딩이나 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지 (w_outer >= w_inner 보장)
     num_promoted = apply_multi_layer_anti_clipping(
-        target_objs, bone_info, active_bones=active_bones, tol=0.025
+        target_objs, bone_info, active_bones=active_bones, tol=0.035
+    )
+
+    # 5.5. 가슴 좌우 본 중복 영역 가중치 정규화 & 크로스 블렌딩:
+    # 좌우 본 영향이 겹치는 가슴 중앙/클리비지 정점에서 변위가 2배로 폭발하지 않도록 가중치 합을 peak_w 이내로 부드럽게 정규화
+    max_peak_w = max(0.40, float(peak_w))
+    num_normalized = normalize_overlapping_bone_weights(
+        target_objs, active_bones, max_total_weight=max_peak_w
     )
 
     # 6. 동일 위치 공유 정점 동기화
