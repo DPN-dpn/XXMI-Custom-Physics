@@ -460,14 +460,12 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             kd.insert(it["pt"], k)
         kd.balance()
 
-        # 3. 표면 법선(Normal) 기반 다층 레이어 안티 클리핑
-        # 연쇄 증폭(Cascade Explosion) 방지: 원본 가중치 기준으로 단 1회 8% 안전 에어갭 부여
-        orig_weights = [items[k]["w"] for k in range(len(items))]
+        # 3. 표면 법선(Normal) 기반 다층 레이어 1:1 완벽 가중치 동기화
         updates = {}
 
         for idx in range(len(items)):
             it = items[idx]
-            cur_w = orig_weights[idx]
+            cur_w = it["w"]
             if cur_w <= 0.005:
                 continue
             cur_pt = it["pt"]
@@ -489,23 +487,20 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 if dot_n < 0.5:
                     continue
 
-                # 2. 노멀 방향(법선 벡터)으로의 거리: cur에서 hit로 향하는 거리
+                # 2. 탄젠트 평면(접평면) 상의 수평 거리: 7.0mm 이내 (삼각망 폴리곤 간격 수용)
                 delta = hit_pt - cur_pt
                 d_norm = delta.dot(cur_n)
-
-                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 7.5mm 이내 (삼각망 폴리곤 간격 수용)
                 d_perp_sq = max(0.0, delta.length_squared - d_norm * d_norm)
-                if d_perp_sq > (0.0075 * 0.0075):
+                if d_perp_sq > (0.0070 * 0.0070):
                     continue
 
-                # 4. 진정한 바깥쪽 레이어(겉옷) 판정: 법선(Normal) 방향으로 0.3mm 이상 외부에 위치
-                # (아랫가슴(Underboob)이나 가슴골처럼 곡면이 경사진 부위에서도 노멀은 항상 인체 바깥쪽을 향함)
-                target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 겉옷이 살보다 항상 1~2mm 더 전방 확장되어 바닐라 스키닝 비틀림 오차 흡수
-                if d_norm >= 0.0003 and hit_it["w"] < target_w:
-                    hit_it["w"] = target_w
-                    key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
-                    updates[key] = target_w
-                    total_promoted += 1
+                # 3. 1:1 일치화 (둘 중 최대값으로 통일하여 완벽 동기화)
+                unified = max(it["w"], hit_it["w"])
+                it["w"] = unified
+                hit_it["w"] = unified
+                updates[(it["obj"], it["vg"], it["vi"])] = unified
+                updates[(hit_it["obj"], hit_it["vg"], hit_it["vi"])] = unified
+                total_promoted += 1
 
         # 4. 갱신된 가중치를 버텍스 그룹에 적용
         for (obj, vg, vi), new_w in updates.items():

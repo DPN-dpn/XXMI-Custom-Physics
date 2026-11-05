@@ -73,12 +73,22 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         # 1. 물리 가중치를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
         active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-        b0_name = active_bones[0] if len(active_bones) > 0 else "Bone_0"
-        b1_name = active_bones[1] if len(active_bones) > 1 else "Bone_1"
-        vg_b0 = f"XXMI_{b0_name}"
-        vg_b1 = f"XXMI_{b1_name}"
+
+        # 좌우 본 식별 (이름 또는 뼈대 위치 기준 자동 분류)
+        def _classify_side(bname):
+            b_lower = bname.lower()
+            if any(k in b_lower for k in ("_l", ".l", "left", "왼")):
+                return "l"
+            if any(k in b_lower for k in ("_r", ".r", "right", "오른")):
+                return "r"
+            if rig and rig.type == 'ARMATURE':
+                eb = rig.data.bones.get(bname)
+                if eb:
+                    return "l" if eb.head_local.x > 0 else "r"
+            return "l"
+
         all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
-        target_vgs = all_bone_vgs | {vg_b0, vg_b1, "XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
+        target_vgs = all_bone_vgs | {"XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
 
         physics_objs = [
             o for o in bpy.data.objects
@@ -97,11 +107,11 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 continue
 
             group_map = {}
-            for gname, key in (
-                (vg_b0, "l"), ("XXMI_Breast_L", "l"),
-                (vg_b1, "r"), ("XXMI_Breast_R", "r"),
-                ("XXMI_Role_Rigid", "rigid")
-            ):
+            for bn in active_bones:
+                vg = obj.vertex_groups.get(f"XXMI_{bn}")
+                if vg:
+                    group_map[vg.index] = _classify_side(bn)
+            for gname, key in (("XXMI_Breast_L", "l"), ("XXMI_Breast_R", "r"), ("XXMI_Role_Rigid", "rigid")):
                 vg = obj.vertex_groups.get(gname)
                 if vg and vg.index not in group_map:
                     group_map[vg.index] = key
@@ -282,17 +292,16 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                         # 표면 법선(Normal) 기반 다층 레이어 Anti-Clipping 후처리
                         # 아랫가슴(Underboob), 윗가슴, 가슴골 등 곡면 경사 방향에 무관하게 항상 인체 외측을 정확히 판별
-                        orig_w_arr = np.copy(w_arr)
-
+                        # 다층 레이어(살과 옷) 가중치 100% 1:1 완벽 동기화 (전방 뚫림 및 후방 압축 함몰 원천 차단)
                         for k in sub_indices:
                             bi = phys_indices[k]
-                            cur_w = float(orig_w_arr[bi])
+                            cur_w = float(w_arr[bi])
                             if cur_w <= 0.005:
                                 continue
                             cur_p = buf_np[bi]
                             cur_n = buf_norm[bi]
 
-                            hits = kd_phys.find_range(Vector(cur_p), 0.020)
+                            hits = kd_phys.find_range(Vector(cur_p), 0.015)
                             if not hits:
                                 continue
 
@@ -308,20 +317,18 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                 if dot_n < 0.5:
                                     continue
 
-                                # 2. 노멀 방향(법선 벡터)으로의 거리: cur에서 hit로 향하는 거리
+                                # 2. 접평면 상의 수평 거리: 7.0mm 이내 (삼각망 폴리곤 간격 수용)
                                 delta = hit_p - cur_p
                                 d_norm = float(delta[0]*cur_n[0] + delta[1]*cur_n[1] + delta[2]*cur_n[2])
-
-                                # 3. 탄젠트 평면(접평면) 상의 수평 거리: 7.5mm 이내 (삼각망 폴리곤 간격 수용)
                                 d2 = float(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2])
                                 d_perp_sq = max(0.0, d2 - d_norm * d_norm)
-                                if d_perp_sq > (0.0075 * 0.0075):
+                                if d_perp_sq > (0.0070 * 0.0070):
                                     continue
 
-                                # 4. 진정한 바깥쪽 레이어(겉옷) 판정: 법선(Normal) 방향으로 0.3mm 이상 외부에 위치
-                                target_w = min(1.0, cur_w * 1.08)  # 8% 안전 마진: 바닐라 스키닝 비틀림 오차를 흡수하는 에어갭 보장
-                                if d_norm >= 0.0003 and w_arr[hit_bi] < target_w:
-                                    w_arr[hit_bi] = target_w
+                                # 3. 1:1 일치화 (둘 중 최대값으로 통일하여 완벽 동기화)
+                                unified = max(w_arr[bi], w_arr[hit_bi])
+                                w_arr[bi] = unified
+                                w_arr[hit_bi] = unified
 
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
