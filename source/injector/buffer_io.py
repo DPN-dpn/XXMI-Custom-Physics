@@ -105,7 +105,7 @@ def _find_best_transform_for_object(kd_buf, sample_obj, obj):
 def _export_physics_state_buf(export_dir, idx):
     out_path = os.path.join(export_dir, f"CustomPhysicsState_{idx}.buf")
     with open(out_path, 'wb') as f:
-        f.write(bytearray(5 * 16))
+        f.write(bytearray(6 * 16))
 
 
 def _export_physics_config_json(export_dir, props, context):

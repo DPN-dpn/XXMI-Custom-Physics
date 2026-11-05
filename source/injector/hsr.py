@@ -10,12 +10,12 @@ from .ini_parser import (
 from ..bone.data import get_bone_params
 
 
-def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx, props):
+def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx_l, root_vert_idx_r, props):
     """[단일 통합 Compute Shader 파이프라인으로 일원화되어 별도 모션 파일 미사용]"""
     pass
 
 
-def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_weight=1.0, root_vert_idx=0):
+def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_weight=1.0, root_vert_idx_l=0, root_vert_idx_r=0):
     active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
     b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
     b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
@@ -50,7 +50,8 @@ def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_we
     stiff_k_r = omega_r * omega_r
     damp_c_r = 2.0 * omega_r * (damping_r * 0.55)
 
-    root_idx = root_vert_idx if (root_vert_idx is not None and root_vert_idx > 0) else (getattr(props, "root_vert_idx", 0) or 0)
+    root_l = root_vert_idx_l if (root_vert_idx_l is not None and root_vert_idx_l > 0) else 0
+    root_r = root_vert_idx_r if (root_vert_idx_r is not None and root_vert_idx_r > 0) else root_l
 
     hlsl_code = f"""// ============================================================================
 // XXMI Custom Physics - Step 4B: Unified Animation Inertia & Spring Dynamics
@@ -69,7 +70,8 @@ RWStructuredBuffer<Vertex> Output : register(u5);
 RWStructuredBuffer<float4> PhysState : register(u6);
 
 static const uint VERTEX_COUNT = {vertex_count};
-static const uint ROOT_VERTEX_IDX = {root_idx};
+static const uint ROOT_VERTEX_IDX_L = {root_l};
+static const uint ROOT_VERTEX_IDX_R = {root_r};
 
 static const float STIFF_K_L = {stiff_k_l:.4f};
 static const float DAMP_C_L = {damp_c_l:.4f};
@@ -96,7 +98,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     float4 s0 = PhysState[0];
     float4 s1 = PhysState[1];
 
-    // 2. 스레드 0: LiveMesh를 추적하여 다음 프레임 물리 연산 수행
+    // 2. 스레드 0: LiveMesh를 추적하여 각 본별 독립 앵커 물리 연산 수행
     if (threadID.x == 0) {{
         float time = IniParams.Load(int2(87, 0)).x;
         if (isnan(time) || isinf(time)) {{
@@ -106,6 +108,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
         float4 s2 = PhysState[2];
         float4 s3 = PhysState[3];
         float4 s4 = PhysState[4];
+        float4 s5 = PhysState[5];
 
         float3 prev_disp_l  = s0.xyz;
         float3 prev_disp_r  = s1.xyz;
@@ -113,11 +116,16 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
         float  prev_time    = s2.w;
         float3 spring_vel_r = s3.xyz;
         float  init_flag    = s3.w;
-        float3 prev_root    = s4.xyz;
+        float3 prev_root_l  = s4.xyz;
+        float3 prev_root_r  = s5.xyz;
 
-        float3 curr_root = LiveMesh[ROOT_VERTEX_IDX].position;
-        if (isnan(curr_root.x) || isinf(curr_root.x) || length(curr_root) < 1e-4) {{
-            curr_root = prev_root;
+        float3 curr_root_l = LiveMesh[ROOT_VERTEX_IDX_L].position;
+        float3 curr_root_r = LiveMesh[ROOT_VERTEX_IDX_R].position;
+        if (isnan(curr_root_l.x) || isinf(curr_root_l.x) || length(curr_root_l) < 1e-4) {{
+            curr_root_l = prev_root_l;
+        }}
+        if (isnan(curr_root_r.x) || isinf(curr_root_r.x) || length(curr_root_r) < 1e-4) {{
+            curr_root_r = prev_root_r;
         }}
 
         if (init_flag < 0.5) {{
@@ -125,29 +133,36 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
             prev_disp_r = float3(0, 0, 0);
             spring_vel_l = float3(0, 0, 0);
             spring_vel_r = float3(0, 0, 0);
-            prev_root = curr_root;
+            prev_root_l = curr_root_l;
+            prev_root_r = curr_root_r;
             prev_time = time;
             init_flag = 1.0;
         }} else {{
             float raw_dt = time - prev_time;
             if (abs(raw_dt) > 0.0005) {{
                 float dt = clamp(raw_dt, 0.002, 0.04);
-                float3 delta = curr_root - prev_root;
+                float3 delta_l = curr_root_l - prev_root_l;
+                float3 delta_r = curr_root_r - prev_root_r;
 
                 // 텔레포트/컷씬 튐 방지
-                if (length(delta) > 0.35 || raw_dt < 0.0 || raw_dt > 0.15) {{
-                    delta = float3(0, 0, 0);
+                if (length(delta_l) > 0.35 || raw_dt < 0.0 || raw_dt > 0.15) {{
+                    delta_l = float3(0, 0, 0);
                     spring_vel_l = float3(0, 0, 0);
+                }}
+                if (length(delta_r) > 0.35 || raw_dt < 0.0 || raw_dt > 0.15) {{
+                    delta_r = float3(0, 0, 0);
                     spring_vel_r = float3(0, 0, 0);
                 }}
 
                 // 실제 뼈대 애니메이션 이동 속도 기반 정직한 뉴턴 관성력 (F = -m*a)
-                // 각 물리 본 슬롯은 독립된 관성력을 수신 (인위적인 좌우 왜곡/반전 제거)
-                float3 raw_vel = delta / dt;
-                float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
+                // 각 본은 자신의 뿌리 앵커 속도를 기반으로 독립적 관성력을 수신
+                float3 raw_vel_l = delta_l / dt;
+                float3 raw_vel_r = delta_r / dt;
+                float3 anim_vel_l = raw_vel_l / (1.0 + length(raw_vel_l) * 0.35);
+                float3 anim_vel_r = raw_vel_r / (1.0 + length(raw_vel_r) * 0.35);
 
-                float3 ext_force_l = -anim_vel * (14.0 * INERTIA_SCALE_L);
-                float3 ext_force_r = -anim_vel * (14.0 * INERTIA_SCALE_R);
+                float3 ext_force_l = -anim_vel_l * (14.0 * INERTIA_SCALE_L);
+                float3 ext_force_r = -anim_vel_r * (14.0 * INERTIA_SCALE_R);
 
                 // 부드러운 자연 호흡 바운스 중첩
                 if (IDLE_SCALE_L > 0.001) {{
@@ -172,7 +187,8 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                     prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.040, 0.040);
                 }}
 
-                prev_root = curr_root;
+                prev_root_l = curr_root_l;
+                prev_root_r = curr_root_r;
                 prev_time = time;
             }}
         }}
@@ -181,7 +197,8 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
         PhysState[1] = float4(prev_disp_r, 0.0);
         PhysState[2] = float4(spring_vel_l, prev_time);
         PhysState[3] = float4(spring_vel_r, init_flag);
-        PhysState[4] = float4(prev_root, 0.0);
+        PhysState[4] = float4(prev_root_l, 0.0);
+        PhysState[5] = float4(prev_root_r, 0.0);
     }}
 
     // 3. 각 정점별 가슴 변위 적용

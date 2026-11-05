@@ -356,25 +356,72 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     with open(map_buf_path, 'wb') as f:
                         f.write(map_bytes)
 
-                    # 흉골/몸통 중심 정점 탐색
-                    best_root_idx = 0
-                    physics_mask = (wl_out > 0.1) | (wr_out > 0.1)
-                    if physics_mask.any():
-                        center_phys = buf_np[physics_mask].mean(axis=0)
-                        root_dist = np.linalg.norm(buf_np - center_phys, axis=1)
-                        root_dist[(wl_out >= 0.01) | (wr_out >= 0.01)] = np.inf
-                        if np.isfinite(root_dist).any():
-                            best_root_idx = int(root_dist.argmin())
+                    # 슬롯별(본 0, 본 1) 개별 신체 앵커 정점 독립 탐색
+                    # - 각 본의 뿌리(Head/흉벽) 위치를 기준으로 뒤쪽 흉곽/갈비뼈의 비물리 정점을 각각 탐색
+                    # - 걷기/달리기/회전 시 각 본이 100% 독립된 관성력과 교차 바운스를 생성
+                    root_idx_0 = 0
+                    root_idx_1 = 0
+                    non_phys_mask = (wl_out < 0.01) & (wr_out < 0.01)
 
-                    # 런타임 물리 상태 버퍼 초기화 (.buf)
+                    # 리그 본 정보가 있을 경우 Head 좌표 우선 활용
+                    rig_obj = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
+                    bone_heads_buf = {}
+                    if rig_obj and best_cache and best_mat:
+                        try:
+                            from ..bone.rig import get_rig_bone_info
+                            binfo = get_rig_bone_info(rig_obj)
+                            m_obj = best_cache["obj"]
+                            inv_m = m_obj.matrix_world.inverted()
+                            for bn_key in (b0_name, b1_name):
+                                if bn_key in binfo:
+                                    hw = Vector(binfo[bn_key]["head"])
+                                    h_obj = inv_m @ hw
+                                    h_buf = best_mat @ h_obj
+                                    bone_heads_buf[bn_key] = np.array([h_buf.x, h_buf.y, h_buf.z], dtype=np.float64)
+                        except Exception:
+                            pass
+
+                    # 1. 본 0의 독립 앵커
+                    if wl_out.max() > 0.005:
+                        if b0_name in bone_heads_buf:
+                            c0 = bone_heads_buf[b0_name]
+                        elif (wl_out > 0.05).any():
+                            c0 = buf_np[wl_out > 0.05].mean(axis=0)
+                        else:
+                            c0 = buf_np[wl_out.argmax()]
+                        d0 = np.linalg.norm(buf_np - c0, axis=1)
+                        d0[~non_phys_mask] = np.inf
+                        if np.isfinite(d0).any():
+                            root_idx_0 = int(d0.argmin())
+
+                    # 2. 본 1의 독립 앵커
+                    if wr_out.max() > 0.005:
+                        if b1_name in bone_heads_buf:
+                            c1 = bone_heads_buf[b1_name]
+                        elif (wr_out > 0.05).any():
+                            c1 = buf_np[wr_out > 0.05].mean(axis=0)
+                        else:
+                            c1 = buf_np[wr_out.argmax()]
+                        d1 = np.linalg.norm(buf_np - c1, axis=1)
+                        d1[~non_phys_mask] = np.inf
+                        if np.isfinite(d1).any():
+                            root_idx_1 = int(d1.argmin())
+
+                    # 폴백: 한쪽만 발견되었거나 단일 본일 경우
+                    if root_idx_0 == 0 and root_idx_1 > 0:
+                        root_idx_0 = root_idx_1
+                    elif root_idx_1 == 0 and root_idx_0 > 0:
+                        root_idx_1 = root_idx_0
+
+                    # 런타임 물리 상태 버퍼 초기화 (.buf, 6개 float4 = 96바이트)
                     _export_physics_state_buf(custom_physics_dir, idx)
 
                     # 게임별 분기 쉐이더 내보내기 (ZZZ vs HSR)
                     if target_game == 'HSR':
-                        export_physics_motion_hlsl_hsr(custom_physics_dir, idx, best_root_idx, props)
-                        export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, best_root_idx)
+                        export_physics_motion_hlsl_hsr(custom_physics_dir, idx, root_idx_0, root_idx_1, props)
+                        export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_idx_0, root_idx_1)
                     else:
-                        export_physics_motion_hlsl_zzz(custom_physics_dir, idx, best_root_idx, props)
+                        export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_idx_0, root_idx_1, props)
                         export_vertex_physics_hlsl_zzz(custom_physics_dir, idx, n_buf, props, global_peak_weight)
 
                     total_injected_buffers += 1
