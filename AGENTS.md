@@ -70,12 +70,29 @@ XXMI-Custom-Physics/
 ## 4. 블렌더 & 3DMigoto 기술 컨벤션 및 주의사항
 1. **Property Group**: `PointerProperty` 선언 시 반드시 `type=` 인자를 명시합니다.
 2. **뷰포트 가시성(Visibility) 보장**: 모드 전환(`bpy.ops.object.mode_set`)이나 메쉬 조작 전 대상 오브젝트의 `hide_get()`, `hide_select`, `hide_viewport`를 해제해야 런타임 에러가 발생하지 않습니다.
-3. **UV 심(Seam) 및 하드 엣지 찢어짐 방지**:
+3. **독립적인 물리 본 (Independent Physics Bones)**:
+   - 좌/우 하드코딩이나 임의의 편향, 공유 루트 앵커 등의 꼼수를 전면 배제합니다.
+   - 각 물리 본(`Breast.L`, `Breast.R` 등 모든 임의의 본)은 고유한 독립 루트 버텍스 앵커(`ROOT_VERTEX_IDX_L`, `ROOT_VERTEX_IDX_R`)와 독립적인 스프링/관성 시뮬레이션 상태(`PhysState`)를 가지며 대칭성과 독립성을 엄격히 보장합니다.
+4. **C1 연속 해부학적 가중치 감쇠 (Hann Cosine & Calibrated Falloff)**:
+   - 가중치는 전방 깊이 코사인 램프(흉벽 0.0 → 꼭짓점 1.0)와 방사형 Hann 코사인 감쇠(중심축 0.0 → 외곽 1.0)의 합성으로 산출합니다.
+   - 기저 지수 보정(`0.35 * falloff_power`)을 적용하여, UI 기본값 1.0에서 끝에 몰리지 않고 풍성하고 자연스러운 볼륨 곡면을 형성하도록 합니다.
+   - 가슴골/중앙 등 인접 본의 영향권이 중첩되는 영역은 양쪽 비율을 보존하면서 합이 `peak_weight`를 넘지 않도록 크로스 블렌딩 정규화합니다.
+5. **다층 메쉬 비침투 기하 배리어 (Face-Barrier Non-Penetration Constraint)**:
+   - 단순 정점 대 정점(Vertex-to-Vertex) 거리 매칭은 토폴로지 밀도 차이나 페이스 내부 정점을 누락하는 꼼수이므로 절대 사용하지 않습니다.
+   - Blender 메쉬 삼각망(Face Triangles) 기반 글로벌 `BVHTree`를 구축하고, 안쪽 정점에서 외향 법선($+\vec{N}$) 방향 광선 투사(Raycast, 0.3mm ~ 15mm)로 마주보는 바깥쪽 겉옷 페이스를 기하학적으로 정밀 감지합니다.
+   - **2-Pass 배리어 원칙**:
+     1) **Conformal Pass (겉옷 동기화)**: 겉옷 페이스 정점들의 가중치를 안쪽 가슴 가중치 이상으로 상향 일치($w_{\text{cloth}} \ge w_{\text{skin}}$)하여 옷이 가슴 볼륨 바운스를 온전히 감싸며 함께 이동하도록 보장합니다.
+     2) **Strict Barrier Pass (페이스 평면 절대적 상한 제한)**: 겉옷 페이스의 무게중심 보간(Barycentric Coordinates) 표면 가중치 $w_{\text{face}}$를 상한선으로 하여, 안쪽 살의 가중치가 바깥쪽 페이스를 초과할 수 없도록 엄격 제한($w_{\text{skin}} \le w_{\text{face}}$)합니다.
+     3) 이를 통해 물리 변위 발생 시 $(\Delta \vec{P}_{\text{skin}} - \Delta \vec{P}_{\text{cloth}}) \cdot \vec{N}_{\text{face}} \le 0$을 만족시켜 속살이 겉옷을 뚫고 솟구쳐 나오는 현상을 기하학적으로 원천 차단합니다.
+6. **UV 심(Seam) 및 하드 엣지 찢어짐 방지**:
    - 블렌더에서 1개의 정점이 익스포트 시 UV 경계나 날카로운 모서리(Sharp Edge)에서 여러 개의 `.buf` 정점으로 분리됩니다.
    - 스키닝 가중치를 계산할 때 **동일한 3D 좌표를 공유하는 모든 정점은 반드시 100% 동일한 본 인덱스와 가중치**를 갖도록 동기화해야 인게임에서 메쉬가 찢어지지 않습니다.
-4. **강체 악세서리(Rigid Accessory) 보존**:
-   - 가슴이나 옷 위에 있는 단추, 브로치, 리본 장식, 벨트 버클 등이 모핑으로 휘어지는 것을 막기 위해, `XXMI_Role_Rigid` 그룹에 속한 정점은 **연결된 메쉬 덩어리(Connected Mesh Island) 전체의 중심점(Centroid)에서 평가한 단일 가상 본 가중치로 통일**합니다.
-5. **3DMigoto INI 주입 규칙**:
+7. **강체 악세서리(Rigid Accessory) 보존**:
+   - 가슴이나 옷 위에 있는 단추, 브로치, 리본 장식, 벨트 버클 등이 모핑으로 휘어지는 것을 막기 위해, `XXMI_Role_Rigid` 그룹에 속한 정점은 **연결된 메쉬 덩어리(Connected Mesh Island) 전체의 중심점(Centroid) 또는 표면 간접 추종 가중치로 통일**합니다.
+8. **DirectX (DXGI) ↔ 블렌더 좌표계 변환 주의**:
+   - 3DMigoto 버퍼(`Position.buf`)는 DirectX Y-Up 계열 좌표계를 사용하며, Blender 메쉬는 Z-Up 계열 좌표계를 사용합니다.
+   - 버퍼 직접 파싱 및 위치 매칭 시 축 변환(`(px, -pz, py)`)을 반드시 일치시켜야 앵커 및 버텍스 위치 오차가 발생하지 않습니다.
+9. **3DMigoto INI 주입 규칙**:
    - `vb0 = Resource...` 뿐만 아니라 최신 XXMI Tools의 `vb0 = ref Resource...`, `vb0 = copy Resource...` 형태를 모두 파싱·매칭해야 합니다.
    - 교체 시 `; [XXMI-PHYSICS-VB-START]`와 `; [XXMI-PHYSICS-ORIG] <원본 줄>` 주석 메타데이터를 함께 기록하여, 재주입이나 롤백 시 원본 `.ini` 구문을 100% 무손실 복원해야 합니다.
    - 디버그 모드(`debug_mode`) 활성화 시 `[KeyXXMIPhysToggle]` 섹션과 `if $xxmi_phys_enable == 1 ... else ... endif` 분기를 주입하여 인게임 단축키(기본 `VK_F9`)로 즉시 전/후 비교가 가능해야 합니다.
