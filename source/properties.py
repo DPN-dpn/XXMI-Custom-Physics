@@ -196,7 +196,7 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
     target_bone: bpy.props.StringProperty(
         name="목표 본",
         default="",
-        description="이 강체가 100% 일체형으로 따라갈 대상 모핑 본입니다 (비워두면 위치 기반 자동 추종)"
+        description="특정 본에 강제 고정할 경우 지정합니다 (비워두면 표면 위치를 기반으로 자동 간접 추종)"
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(
@@ -210,13 +210,13 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
         description="이 강체 슬롯에 등록된 총 정점 개수입니다"
     )
     weight_scale: bpy.props.FloatProperty(
-        name="가중치 배율",
+        name="간접 영향력 배율",
         default=1.0,
         min=0.1,
         max=2.0,
         step=5,
         precision=2,
-        description="부착된 모핑 표면 대비 강체의 흔들림 크기 배율입니다 (기본값: 1.0 = 표면과 100% 동일 밀착)"
+        description="부착된 메쉬 표면 대비 강체의 흔들림 간접 영향력 배율입니다 (기본값: 1.0)"
     )
 
 

@@ -23,11 +23,13 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
             layout,
             (
                 "[2단계: 강체(액세서리) 설정 가이드]\n\n"
-                "• 모핑 파츠(가슴, 의상, 복부 등) 위에 부착된 단추, 무전기, 리본, 브로치 등은 모핑 동작 시 형태를 유지(강체)해야 합니다.\n"
-                "• [+] 버튼으로 강체 슬롯을 추가합니다.\n"
-                "• 에디트 모드에서 부품 정점들을 선택하고 [선택 정점 할당]을 누릅니다. (여러 오브젝트에 걸친 부품도 동시 지원)\n"
-                "• [목표 본]을 지정하면 해당 모핑 본의 움직임과 100% 동일하게 고정되어 따라 움직입니다.\n"
-                "• 설정 후 바로 [강체 가중치 즉시 갱신]을 누르거나, [3. 가중치 계산 & 프리뷰] 패널로 이동하여 물리 파라미터와 함께 일괄 계산할 수 있습니다."
+                "• 물리 파츠 위에 부착된 단추, 배지, 리본 끈, 브로치 등은 모핑 동작 시 형태를 유지(강체)해야 합니다.\n"
+                "• [+] 버튼으로 강체 슬롯을 추가하고 [선택 정점 할당]으로 부품 정점들을 등록하세요.\n"
+                "• [표면 간접 추종 (기본)]: 모든 강체는 맞닿은 메쉬 표면의 움직임을 부드럽게 이어받습니다.\n"
+                "  - 단추/배지 같은 단일 본 장식은 해당 위치 표면에 맞춰 고정되어 움직입니다.\n"
+                "  - 가슴 앞 리본 끈처럼 여러 본에 걸친 장식은 양쪽 표면의 움직임을 이어받아 찢어짐이나 이탈 없이 자연스럽게 따라 움직입니다!\n"
+                "• [목표 본]: 비워두면 자동 표면 추종이며, 특정 본에 100% 강제 고정할 때만 선택하세요.\n"
+                "• [간접 영향력 배율]: 표면 대비 강체의 흔들림 전달 크기입니다 (기본값: 1.0)."
             ),
         )
 
@@ -51,8 +53,8 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
             box_item.use_property_decorate = False
 
             box_item.prop(item, "name", text="부품 이름")
-            box_item.prop_search(item, "target_bone", props, "bone_items", text="목표 본", icon='BONE_DATA')
-            box_item.prop(item, "weight_scale", text="움직임 배율")
+            box_item.prop_search(item, "target_bone", props, "bone_items", text="목표 본 (선택 시 강제 고정)", icon='BONE_DATA')
+            box_item.prop(item, "weight_scale", text="간접 영향력 배율")
 
             row_acts = box_item.row(align=True)
             row_acts.operator("object.xxmi_rigid_item_assign", text="선택 정점 할당", icon='PLUS')

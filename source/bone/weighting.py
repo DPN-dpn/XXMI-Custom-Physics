@@ -713,86 +713,135 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             kd.balance()
             bone_kd_map[bname] = (kd, soft_weights)
 
-    # 다중 강체 슬롯 가중치 계산 및 할당
+    # 다중 강체 슬롯 가중치 계산 및 할당 (통합 표면 간접 추종 / Surface Proximity Transfer)
     applied_slots = 0
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
         if not rdata:
             continue
 
-        slot_pts = []
-        for oname, vis in rdata.items():
-            robj = bpy.data.objects.get(oname)
-            if robj and robj.type == 'MESH':
-                r_world = world_vertex_positions(robj)
-                for vi in vis:
-                    if vi < len(r_world):
-                        slot_pts.append(Vector(r_world[vi]))
+        w_scale = getattr(item, "weight_scale", 1.0)
+        t_bone = getattr(item, "target_bone", "").strip()
 
-        c_cent = Vector(np.mean([p[:] for p in slot_pts], axis=0)) if slot_pts else Vector((0.0, 0.0, 0.0))
+        # 사용자가 특정 본을 명시적으로 지정한 경우: 단일 본 완전 고정 오버라이드
+        if t_bone and t_bone != 'AUTO' and (t_bone in active_bones or f"XXMI_{t_bone}" in [f"XXMI_{b}" for b in active_bones]):
+            target_bname = t_bone if t_bone in active_bones else t_bone.replace("XXMI_", "")
+            target_vg_name = f"XXMI_{target_bname}"
 
-        # 목표 본 결정
-        t_bone = item.target_bone
-        best_bname = None
-        if t_bone != 'AUTO' and t_bone in active_bones:
-            best_bname = t_bone
-        elif t_bone != 'AUTO' and (f"XXMI_{t_bone}" in [f"XXMI_{b}" for b in active_bones]):
-            best_bname = t_bone
-        else:
-            # AUTO: 강체 중심과 가장 가까운 모핑 본 선택
-            min_dist = float('inf')
-            for bn in active_bones:
-                bentry = bone_info.get(bn)
-                if bentry:
-                    b_cent = Vector(bentry["centroid"])
-                    d = (c_cent - b_cent).length
-                    if d < min_dist:
-                        min_dist = d
-                        best_bname = bn
+            slot_pts = []
+            for oname, vis in rdata.items():
+                robj = bpy.data.objects.get(oname)
+                if robj and robj.type == 'MESH':
+                    r_world = world_vertex_positions(robj)
+                    for vi in vis:
+                        if vi < len(r_world):
+                            slot_pts.append(Vector(r_world[vi]))
+            c_cent = Vector(np.mean([p[:] for p in slot_pts], axis=0)) if slot_pts else Vector((0.0, 0.0, 0.0))
 
-        if not best_bname and active_bones:
-            best_bname = active_bones[0]
+            surf_w = 0.0
+            if target_bname in bone_kd_map and slot_pts:
+                kd, s_weights = bone_kd_map[target_bname]
+                hits = kd.find_range(c_cent, 0.08)
+                if not hits:
+                    hits = [kd.find(c_cent)]
+                valid_hits = [h for h in hits if h is not None and h[0] is not None]
+                if valid_hits:
+                    ws = [s_weights[h[1]] for h in valid_hits if s_weights[h[1]] > 0.001]
+                    if ws:
+                        surf_w = float(np.mean(ws))
+            anat_w = eval_bone_weight_at_point(c_cent, target_bname, bone_info, props)
+            base_w = surf_w if surf_w > 0.01 else anat_w
+            final_rigid_w = min(1.0, max(0.02, base_w * w_scale))
 
-        if not best_bname:
+            for oname, vis in rdata.items():
+                robj = bpy.data.objects.get(oname)
+                if not robj or robj.type != 'MESH' or not vis:
+                    continue
+                vg_target = robj.vertex_groups.get(target_vg_name) or robj.vertex_groups.new(name=target_vg_name)
+                vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
+                vg_rigid.add(vis, 1.0, 'REPLACE')
+                vg_target.add(vis, final_rigid_w, 'REPLACE')
+                for obn in active_bones:
+                    if obn != target_bname:
+                        o_vg = robj.vertex_groups.get(f"XXMI_{obn}")
+                        if o_vg:
+                            o_vg.remove(vis)
+            applied_slots += 1
             continue
 
-        # 표면 가중치 탐색
-        surf_w = 0.0
-        if best_bname in bone_kd_map and slot_pts:
-            kd, s_weights = bone_kd_map[best_bname]
-            hits = kd.find_range(c_cent, 0.08)
-            if not hits:
-                hits = [kd.find(c_cent)]
-            valid_hits = [h for h in hits if h is not None and h[0] is not None]
-            if valid_hits:
-                ws = [s_weights[h[1]] for h in valid_hits if s_weights[h[1]] > 0.001]
-                if ws:
-                    surf_w = float(np.mean(ws))
-
-        anat_w = eval_bone_weight_at_point(c_cent, best_bname, bone_info, props)
-        base_w = surf_w if surf_w > 0.01 else anat_w
-        w_scale = getattr(item, "weight_scale", 1.0)
-        final_rigid_w = min(1.0, max(0.02, base_w * w_scale))
-
-        target_vg_name = f"XXMI_{best_bname}"
-
+        # ── [표면 간접 추종 (기본값 / Universal Surface Proximity Transfer)] ──
+        # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭) 모두 자동 지원
         for oname, vis in rdata.items():
             robj = bpy.data.objects.get(oname)
             if not robj or robj.type != 'MESH' or not vis:
                 continue
 
-            vg_target = robj.vertex_groups.get(target_vg_name) or robj.vertex_groups.new(name=target_vg_name)
+            r_world = world_vertex_positions(robj)
+            n_v = len(vis)
+            bone_weights_for_slot = {bn: np.zeros(n_v, dtype=np.float32) for bn in active_bones}
+
+            for bn in active_bones:
+                if bn not in bone_kd_map:
+                    continue
+                kd, s_weights = bone_kd_map[bn]
+                for idx_i, vi in enumerate(vis):
+                    if vi >= len(r_world):
+                        continue
+                    pt = Vector(r_world[vi])
+                    max_range = 0.08
+                    hits = kd.find_range(pt, max_range)
+                    valid_hits = [h for h in hits if h is not None and h[0] is not None] if hits else []
+                    if valid_hits:
+                        inv_d_sum = sum(1.0 / max(h[2], 0.002) for h in valid_hits)
+                        sample_w = sum(s_weights[h[1]] * (1.0 / max(h[2], 0.002)) for h in valid_hits) / inv_d_sum
+                        min_d = min(h[2] for h in valid_hits)
+                        dist_factor = max(0.0, 1.0 - max(0.0, min_d - 0.04) / 0.04)
+                        bone_weights_for_slot[bn][idx_i] = sample_w * dist_factor * w_scale
+                    else:
+                        bone_weights_for_slot[bn][idx_i] = 0.0
+
+            # 메쉬 엣지 기반 라플라시안 스무딩 (급격한 가중치 차이 방지 및 끈 형태 유지)
+            mesh = robj.data
+            vis_set = set(vis)
+            adj = {vi: [] for vi in vis}
+            for e in mesh.edges:
+                v1, v2 = e.vertices[0], e.vertices[1]
+                if v1 in vis_set and v2 in vis_set:
+                    adj[v1].append(v2)
+                    adj[v2].append(v1)
+
+            v_to_idx = {vi: i for i, vi in enumerate(vis)}
+            for _ in range(3):
+                for bn in active_bones:
+                    w_arr = bone_weights_for_slot[bn]
+                    new_w = w_arr.copy()
+                    for vi, nbrs in adj.items():
+                        if nbrs:
+                            idx_cur = v_to_idx[vi]
+                            nbr_vals = [w_arr[v_to_idx[n]] for n in nbrs]
+                            new_w[idx_cur] = 0.5 * w_arr[idx_cur] + 0.5 * float(np.mean(nbr_vals))
+                    bone_weights_for_slot[bn] = new_w
+
+            # 버텍스 그룹에 적용
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
-
             vg_rigid.add(vis, 1.0, 'REPLACE')
-            vg_target.add(vis, final_rigid_w, 'REPLACE')
 
-            # 다른 모핑 본 그룹에서는 제외하여 강체가 왜곡되지 않도록 보장
-            for obn in active_bones:
-                if obn != best_bname:
-                    o_vg = robj.vertex_groups.get(f"XXMI_{obn}")
-                    if o_vg:
-                        o_vg.remove(vis)
+            for bn in active_bones:
+                vg_target = robj.vertex_groups.get(f"XXMI_{bn}") or robj.vertex_groups.new(name=f"XXMI_{bn}")
+                w_arr = bone_weights_for_slot[bn]
+                add_list = []
+                rem_list = []
+                for idx_i, vi in enumerate(vis):
+                    w_val = float(w_arr[idx_i])
+                    if w_val > 0.001:
+                        add_list.append((vi, min(1.0, w_val)))
+                    else:
+                        rem_list.append(vi)
+
+                for vi, w_val in add_list:
+                    vg_target.add([vi], w_val, 'REPLACE')
+                if rem_list:
+                    vg_target.remove(rem_list)
 
         applied_slots += 1
 
