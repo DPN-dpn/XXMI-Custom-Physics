@@ -141,9 +141,23 @@ def _find_draw_section(sections, blend_sec):
     return cand_draw_sec or blend_sec
 
 
-def _find_position_buffers(target_dir, mod_ini_path):
-    with open(mod_ini_path, 'r', encoding='utf-8') as f:
-        ini_lines = f.readlines()
+def _find_position_buffers(target_dir, mod_ini_path=None):
+    """
+    모드 .ini 파일에서 Position.buf 버퍼와 Draw/Blend 섹션 매핑을 파싱하여 반환합니다.
+    _find_position_buffers(ini_path) 및 _find_position_buffers(mod_folder, ini_path) 호출 방식을 모두 지원합니다.
+    """
+    if mod_ini_path is None:
+        mod_ini_path = target_dir
+        base_dir = os.path.dirname(mod_ini_path) if os.path.isfile(mod_ini_path) else mod_ini_path
+    else:
+        base_dir = target_dir or os.path.dirname(mod_ini_path)
+
+    try:
+        with open(mod_ini_path, 'r', encoding='utf-8-sig', errors='replace') as f:
+            ini_lines = f.readlines()
+    except Exception:
+        with open(mod_ini_path, 'r', encoding='utf-8', errors='ignore') as f:
+            ini_lines = f.readlines()
 
     clean_lines, _ = _clean_injected_lines(ini_lines)
     sections = _parse_ini_sections(clean_lines)
@@ -170,8 +184,6 @@ def _find_position_buffers(target_dir, mod_ini_path):
     matched_buffers = []
     seen_fnames = set()
     idx = 0
-
-    base_dir = os.path.dirname(mod_ini_path)
 
     for blend_sec, res_name in draw_sec_vb0.items():
         actual_res = None

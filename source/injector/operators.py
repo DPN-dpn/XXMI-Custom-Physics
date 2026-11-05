@@ -139,6 +139,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         global_peak_weight = 0.0
         for mcache in mesh_caches:
             global_peak_weight = max(global_peak_weight, float(mcache["w_l"].max()), float(mcache["w_r"].max()))
+        if global_peak_weight < 0.05:
+            global_peak_weight = 1.0
 
         # 2. 대상 INI 파일 수집
         ini_files = []
@@ -176,8 +178,14 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
             matched_in_ini = []
 
-            for idx, res_name, raw_fname, blend_sec, draw_sec in pos_buffers:
-                buf_path = os.path.join(mod_folder, raw_fname)
+            for item in pos_buffers:
+                if len(item) == 7:
+                    idx, res_name, raw_fname, buf_v_count, norm_path, blend_sec, draw_sec = item
+                    buf_path = norm_path
+                else:
+                    idx, res_name, raw_fname, blend_sec, draw_sec = item
+                    buf_path = os.path.join(mod_folder, raw_fname)
+
                 if not os.path.exists(buf_path):
                     continue
 
@@ -254,7 +262,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                 # CustomPhysicsMap.buf (stride 16: float4 -> wl, wr, is_rigid, root_dist) 바이너리 빌드
                 map_bytes = np.column_stack(
-                    [wl_out, wr_out, rig_out, np.zeros(n_buf, dtype=np.float32)], axis=1
+                    [wl_out, wr_out, rig_out, np.zeros(n_buf, dtype=np.float32)]
                 ).astype('<f4').tobytes()
 
                 has_physics = (max_wl > 0.001 or max_wr > 0.001 or max_rig > 0.001)
@@ -299,9 +307,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     master_idx = master_entry[0]
 
                 if target_game == 'HSR':
-                    inject_physics_hsr(ini_path, matched_in_ini, master_idx, props)
+                    inject_physics_hsr(ini_path, matched_in_ini, props, master_idx)
                 else:
-                    inject_physics_zzz(ini_path, matched_in_ini, master_idx, props)
+                    inject_physics_zzz(ini_path, matched_in_ini, props, master_idx)
                 total_modified_inis += 1
 
         if total_injected_buffers == 0:
