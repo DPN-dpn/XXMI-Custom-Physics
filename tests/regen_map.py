@@ -96,3 +96,4 @@ with open(map_path, "wb") as f:
 print("Regenerated CustomPhysicsMap_0.buf with smooth gradient and non-cascading multi-layer sync!")
 print("wl > 0.001:", int(np.count_nonzero(wl_out > 0.001)), "max:", float(wl_out.max()), "mean:", float(wl_out[wl_out > 0.001].mean()))
 print("wr > 0.001:", int(np.count_nonzero(wr_out > 0.001)), "max:", float(wr_out.max()), "mean:", float(wr_out[wr_out > 0.001].mean()))
+

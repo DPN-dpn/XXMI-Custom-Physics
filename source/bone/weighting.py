@@ -97,8 +97,9 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     rho_norm = np.clip(d_perp / radius, 0.0, 1.0)
     w_radial = np.where(d_perp < radius, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
 
-    # 3. 해부학적 합성 가중치 계산 (반경 밖 및 흉벽 뒤는 정확히 0.0으로 완벽한 곡면 수렴)
-    w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
+    # 3. 해부학적 합성 가중치 계산 (기저 지수 0.35 보정: 기본값 1.0에서 자연스럽고 풍성한 볼륨 형성)
+    eff_power = 0.35 * max(0.05, float(falloff_p))
+    w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), eff_power)
     w_arr = np.where((w_radial > 0.0) & (w_depth > 0.0), np.clip(w_comb, 0.001, 1.0), 0.0)
 
     # 4. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
@@ -163,7 +164,8 @@ def eval_bone_weight_at_point(pt, bname, bone_info, props=None, falloff_p=1.0, p
         peak_w = b_params["peak_weight"]
         falloff_p = b_params["falloff_power"]
 
-    w = peak_w * math.pow(max(0.0, w_depth * w_radial), falloff_p)
+    eff_power = 0.35 * max(0.05, float(falloff_p))
+    w = peak_w * math.pow(max(0.0, w_depth * w_radial), eff_power)
     return max(0.001, min(1.0, w))
 
 
