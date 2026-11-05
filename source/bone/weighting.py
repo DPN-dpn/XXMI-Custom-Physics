@@ -100,51 +100,21 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     w_comb = peak_w * np.power(np.maximum(0.0, w_depth * w_radial), falloff_p)
     w_arr = np.where(w_radial > 0.0, np.clip(w_comb, 0.001, 1.0), 0.0)
 
-    # 4. 다중 레이어 Anti-Clipping 필터:
-    # 겹쳐 있는 다중 레이어(피부 vs 겉옷/자켓)에서 바깥쪽(전방 깊이 t 및 흉벽/본 중심거리 d) 정점이
-    # 안쪽 정점보다 가중치가 작지 않도록 보장하여, 모핑 시 속살이 겉옷을 뚫고 나오는 현상을 원천 방지
+    # 4. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
+    # (외곽 감쇠 그라데이션 보존: 동일 표면 내 수평 번짐 없이 순수 해부학적 Hann Cosine 감쇠 유지)
     if len(world_pts) > 1:
         kd = KDTree(len(world_pts))
         for k, pt in enumerate(world_pts.tolist()):
             kd.insert(Vector(pt), k)
         kd.balance()
 
-        dist_from_head = np.linalg.norm(pts_rel, axis=1)
-        sort_order = np.argsort(t_proj)
-        w_filtered = w_arr.copy()
-        tol = 0.025  # 2.5cm 반경 내 이웃 레이어 검사
-
-        for idx in sort_order:
-            cur_w = w_filtered[idx]
-            if cur_w <= 0.005:
-                continue
-            cur_pt = Vector(world_pts[idx])
-            cur_t = t_proj[idx]
-            cur_d = dist_from_head[idx]
-
-            hits = kd.find_range(cur_pt, tol)
-            if not hits:
-                continue
-
-            for _, h_idx, _ in hits:
-                if h_idx == idx:
-                    continue
-                h_t = t_proj[h_idx]
-                h_d = dist_from_head[h_idx]
-                is_outer = (h_t >= cur_t - 0.002) and (h_d >= cur_d - 0.002)
-                if is_outer and w_filtered[h_idx] < cur_w:
-                    w_filtered[h_idx] = cur_w
-
-        # 5. UV 심(Seam) 및 분리 정점 동기화: 0.5mm 이내 동일 3D 좌표 100% 동일 가중치 부여
         for idx in range(len(world_pts)):
             co = Vector(world_pts[idx])
             hits = kd.find_range(co, 0.0005)
             if len(hits) > 1:
-                max_w = max(w_filtered[h_idx] for _, h_idx, _ in hits)
+                max_w = max(w_arr[h_idx] for _, h_idx, _ in hits)
                 for _, h_idx, _ in hits:
-                    w_filtered[h_idx] = max_w
-
-        w_arr = w_filtered
+                    w_arr[h_idx] = max_w
 
     return w_arr
 
@@ -402,13 +372,13 @@ def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_regi
                 vg.remove([vi])
 
 
-def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.035):
+def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, tol=0.015):
     """
     다중 레이어(피부 vs 겉옷/자켓/속옷 등) 3D 기하 침투 방지(Anti-Clipping) 필터:
-    단일 메쉬든 분리된 다중 오브젝트든 3D 월드 공간 상에서 안쪽 살(피부) 위에 얹힌
-    모든 바깥쪽 레이어(겉옷)의 가중치가 안쪽 정점보다 작아지지 않도록 w_outer >= w_inner를 보장합니다.
-    (스무딩 또는 개방형 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상 원천 차단)
-    가슴 하단부(언더붑) 곡면 및 측면 곡면을 모두 포괄하도록 3D 공간 판정을 강화했습니다.
+    - 3D 공간 상에서 안쪽 살(피부) 바로 위에 얹힌 바깥쪽 레이어(겉옷)의 가중치가
+      스무딩이나 옷깃 절단으로 인해 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지합니다.
+    - [그라데이션 보존 원칙]: 방사형 위치(d_perp)가 동일 단면(4mm 이내)에 위치한 수직 레이어만 매칭하여,
+      가슴 외곽으로 갈수록 부드럽게 감쇠되는 Hann Cosine 그라데이션을 100% 손상 없이 온전히 보존합니다.
     """
     if not target_objs or not bone_info:
         return 0
@@ -472,6 +442,7 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 rel = pt - head
                 t_proj = float(rel @ bone_u)
                 d_head = float(np.linalg.norm(rel))
+                d_perp = float(np.sqrt(max(0.0, d_head * d_head - t_proj * t_proj)))
                 items.append({
                     "obj": obj,
                     "vg": vg,
@@ -480,6 +451,7 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                     "w": float(w_arr[vi]),
                     "t": t_proj,
                     "d": d_head,
+                    "d_perp": d_perp,
                 })
 
         if len(items) < 2:
@@ -501,7 +473,7 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
             if cur_w <= 0.005:
                 continue
             cur_t = it["t"]
-            cur_d = it["d"]
+            cur_d_perp = it["d_perp"]
 
             hits = kd.find_range(it["pt"], tol)
             if not hits:
@@ -511,16 +483,16 @@ def apply_multi_layer_anti_clipping(target_objs, bone_info, active_bones=None, t
                 if h_idx == idx:
                     continue
                 hit_it = items[h_idx]
-                dt = hit_it["t"] - cur_t
-                dd = hit_it["d"] - cur_d
 
-                # 가슴 앞면뿐 아니라 하단부 곡면(언더붑) 및 측면 곡면을 포괄하는 outer 판정:
-                # 1) 전방 깊이와 3D 거리가 모두 비슷하거나 앞설 때
-                # 2) 또는 방사형 3D 거리가 더 바깥쪽이면서 전방 깊이가 극단적으로 뒤처지지 않을 때
-                # 3) 또는 전방으로 2mm 이상 돌출되어 있을 때
-                is_outer = (dt >= -0.003 and dd >= -0.002) or (dd >= 0.002 and dt >= -0.010) or (dt >= 0.002)
+                # [수평 번짐 방지 / 방사형 정합]:
+                # 1. 중심축 수직 방사형 거리(d_perp)가 6mm 이내여야 같은 단면 상의 수직 레이어로 인정 (외곽으로의 감쇠 그라데이션 보존)
+                diff_perp = abs(hit_it["d_perp"] - cur_d_perp)
+                # 2. 전방 깊이(t)가 살과 거의 같거나(0.2mm 오차) 전방으로 나와 있는 바깥쪽 레이어
+                diff_t = hit_it["t"] - cur_t
 
-                if is_outer and hit_it["w"] < cur_w:
+                is_outer_layer = (diff_perp <= 0.006) and (diff_t >= -0.0005)
+
+                if is_outer_layer and hit_it["w"] < cur_w:
                     hit_it["w"] = cur_w
                     key = (hit_it["obj"], hit_it["vg"], hit_it["vi"])
                     updates[key] = cur_w
@@ -896,7 +868,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     # 5. 다중 레이어 3D 침투 방지(Anti-Clipping) 필터:
     # 스무딩이나 옷깃 경계선으로 인해 겉옷 가중치가 낮아져 속살이 겉옷을 뚫고 나오는 현상을 원천 방지 (w_outer >= w_inner 보장)
     num_promoted = apply_multi_layer_anti_clipping(
-        target_objs, bone_info, active_bones=active_bones, tol=0.035
+        target_objs, bone_info, active_bones=active_bones, tol=0.015
     )
 
     # 5.5. 가슴 좌우 본 중복 영역 가중치 정규화 & 크로스 블렌딩:

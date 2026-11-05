@@ -262,44 +262,6 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     wl_out[overlap_mask] *= scale
                     wr_out[overlap_mask] *= scale
 
-                # 2. Position.buf 3D 버퍼 공간 Anti-Clipping 후처리
-                # 블렌더 -> 버퍼 역거리 보간 시 겉옷 경계면 가중치 감쇄로 속살이 뚫고 나오는 현상 최종 차단
-                phys_indices = np.nonzero((wl_out > 0.001) | (wr_out > 0.001))[0]
-                if len(phys_indices) > 1:
-                    kd_phys = KDTree(len(phys_indices))
-                    for k, bi in enumerate(phys_indices):
-                        kd_phys.insert(Vector(buf_np[bi]), k)
-                    kd_phys.balance()
-
-                    for w_arr in (wl_out, wr_out):
-                        if w_arr.max() <= 0.001:
-                            continue
-                        active_b_sub = [k for k in range(len(phys_indices)) if w_arr[phys_indices[k]] > 0.005]
-                        if len(active_b_sub) < 2:
-                            continue
-
-                        active_pts = buf_np[phys_indices[active_b_sub]]
-                        cent_pt = active_pts.mean(axis=0)
-                        d_from_cent = np.linalg.norm(buf_np[phys_indices] - cent_pt, axis=1)
-                        sort_sub = sorted(active_b_sub, key=lambda k: d_from_cent[k])
-
-                        for k in sort_sub:
-                            bi = phys_indices[k]
-                            cur_w = float(w_arr[bi])
-                            if cur_w <= 0.005:
-                                continue
-                            cur_pt = Vector(buf_np[bi])
-                            cur_d = d_from_cent[k]
-
-                            hits = kd_phys.find_range(cur_pt, 0.035)
-                            if not hits:
-                                continue
-                            for _, hit_k, _ in hits:
-                                hit_bi = phys_indices[hit_k]
-                                hit_d = d_from_cent[hit_k]
-                                if hit_d >= cur_d - 0.002 and w_arr[hit_bi] < cur_w:
-                                    w_arr[hit_bi] = cur_w
-
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
                 max_rig = float(rig_out.max())
