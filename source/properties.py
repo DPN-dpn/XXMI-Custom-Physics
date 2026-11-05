@@ -1,12 +1,25 @@
 import bpy
 
 
+def on_bone_item_name_update(self, context):
+    try:
+        from .bone.data import handle_bone_item_rename
+        handle_bone_item_rename(self, context)
+    except Exception:
+        pass
+
+
 class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     """개별 물리/모핑 본을 독립 슬롯으로 관리하며 고유한 가중치 및 파라미터를 보관합니다."""
     name: bpy.props.StringProperty(
         name="본 이름",
         default="새 모핑 본",
-        description="모핑 본의 식별 이름입니다 (예: Breast.L, Breast.R, Morph_1 등)"
+        description="모핑 본의 식별 이름입니다 (예: LeftChest, RightChest, Ponytail, Cape 등)",
+        update=on_bone_item_name_update
+    )
+    prev_name: bpy.props.StringProperty(
+        name="이전 본 이름",
+        default=""
     )
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
@@ -121,12 +134,12 @@ def get_target_bone_enum_items(self, context):
                 seen_ids.add(it.name)
                 items.append((it.name, f"{it.name} (모핑 본)", f"'{it.name}' 모핑 본에 100% 고정되어 따라 움직입니다"))
 
-    # 2. 씬 내 가상 물리 스켈레톤(XXMI_Breast_Rig)에 실제 존재하는 본들 추가
+    # 2. 씬 내 가상 물리 스켈레톤(XXMI_Physics_Rig)에 실제 존재하는 본들 추가
     rig = None
     if context and hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
         rig = context.scene.xxmi_custom_physics_props.anchor_obj
     if not rig:
-        rig = bpy.data.objects.get("XXMI_Breast_Rig")
+        rig = bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
     if rig and rig.type == 'ARMATURE':
         for b in rig.data.bones:
             if b.name not in seen_ids:
@@ -146,10 +159,10 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
         default="새 강체",
         description="강체 부품의 식별 이름입니다"
     )
-    target_bone: bpy.props.EnumProperty(
+    target_bone: bpy.props.StringProperty(
         name="목표 본",
-        description="이 강체가 100% 일체형으로 따라갈 대상 모핑 본입니다",
-        items=get_target_bone_enum_items
+        default="",
+        description="이 강체가 100% 일체형으로 따라갈 대상 모핑 본입니다 (비워두면 위치 기반 자동 추종)"
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(
@@ -169,7 +182,7 @@ class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
         max=2.0,
         step=5,
         precision=2,
-        description="부착된 가슴 표면 대비 강체의 흔들림 크기 배율입니다 (기본값: 1.0 = 표면과 100% 동일 밀착)"
+        description="부착된 모핑 표면 대비 강체의 흔들림 크기 배율입니다 (기본값: 1.0 = 표면과 100% 동일 밀착)"
     )
 
 
@@ -178,25 +191,25 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     target_obj: bpy.props.PointerProperty(
         name="대상 메쉬",
         type=bpy.types.Object,
-        description="가슴 물리를 적용할 캐릭터 모드 메쉬 오브젝트입니다",
+        description="물리를 적용할 캐릭터 모드 메쉬 오브젝트입니다",
         poll=lambda self, obj: obj.type == 'MESH'
     )
 
     anchor_obj: bpy.props.PointerProperty(
-        name="가슴 물리 본",
+        name="가상 물리 리그",
         type=bpy.types.Object,
-        description="가슴 물리 움직임의 중심이 되는 본 오브젝트(XXMI_Breast_Rig)입니다",
+        description="모핑 물리 움직임의 중심이 되는 본 오브젝트(XXMI_Physics_Rig)입니다",
         poll=lambda self, obj: obj.type == 'ARMATURE'
     )
 
-    # ── 본 종류 선택 (향후 꼬리, 헤어 등으로 확장) ──
+    # ── 본 종류 선택 ──
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
         description="생성할 물리 본의 종류입니다",
         items=[
-            ('BREAST', "가슴 모핑 본 (Breast Pair)", "좌/우 대칭 한 쌍의 가슴 물리 본을 생성합니다"),
+            ('MORPH', "모핑 본 (Morph Bone)", "자연스럽게 블렌딩되는 물리 모핑 본입니다"),
         ],
-        default='BREAST'
+        default='MORPH'
     )
 
     # ── 다중 물리 본 목록 ──

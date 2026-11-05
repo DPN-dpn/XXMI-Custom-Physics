@@ -51,7 +51,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
             box_item.use_property_decorate = False
 
             box_item.prop(item, "name", text="부품 이름")
-            box_item.prop(item, "target_bone", text="목표 본")
+            box_item.prop_search(item, "target_bone", props, "bone_items", text="목표 본", icon='BONE_DATA')
             box_item.prop(item, "weight_scale", text="움직임 배율")
 
             row_acts = box_item.row(align=True)

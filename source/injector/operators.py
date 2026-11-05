@@ -46,7 +46,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return any(
-            o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R"))
+            o.type == 'MESH' and any(vg.name.startswith("XXMI_") for vg in o.vertex_groups)
             for o in bpy.data.objects
         )
 
@@ -63,15 +63,22 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             return {'CANCELLED'}
 
         # 앵커 본(XXMI_Breast_Rig)이 존재하면 주입 전 웨이트를 본 위치 기준으로 강제 재베이크 동기화
-        rig = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Breast_Rig")
+        rig = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
         if rig and rig.type == 'ARMATURE':
             from ..bone.weighting import rebake_mesh_weights_from_rig
             rebake_mesh_weights_from_rig(context, rig, props)
 
         # 1. 가슴 웨이트를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
+        active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
+        b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
+        b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
+        vg_b0 = f"XXMI_{b0_name}"
+        vg_b1 = f"XXMI_{b1_name}"
+        target_vgs = {vg_b0, vg_b1, "XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
+
         breast_objs = [
             o for o in bpy.data.objects
-            if o.type == 'MESH' and (o.vertex_groups.get("XXMI_Breast_L") or o.vertex_groups.get("XXMI_Breast_R"))
+            if o.type == 'MESH' and any(o.vertex_groups.get(vgn) for vgn in target_vgs)
         ]
 
         if not breast_objs:
@@ -86,9 +93,13 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 continue
 
             group_map = {}
-            for gname, key in (("XXMI_Breast_L", "l"), ("XXMI_Breast_R", "r"), ("XXMI_Role_Rigid", "rigid")):
+            for gname, key in (
+                (vg_b0, "l"), ("XXMI_Breast_L", "l"),
+                (vg_b1, "r"), ("XXMI_Breast_R", "r"),
+                ("XXMI_Role_Rigid", "rigid")
+            ):
                 vg = obj.vertex_groups.get(gname)
-                if vg:
+                if vg and vg.index not in group_map:
                     group_map[vg.index] = key
             arrs = read_vertex_group_arrays(obj, group_map)
             zeros = np.zeros(n_verts, dtype=np.float32)

@@ -71,23 +71,22 @@ def _export_physics_state_buf(export_dir, idx):
 
 def _export_physics_config_json(export_dir, props, context):
     """모드 폴더에 현재 물리 파라미터 및 본 앵커 좌표를 담은 XXMI_Physics_Config.json을 저장합니다."""
-    rig = props.anchor_obj or bpy.data.objects.get("XXMI_Breast_Rig")
+    rig = props.anchor_obj or bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
     bones_dict = {}
 
     if rig and rig.type == 'ARMATURE':
         mw = rig.matrix_world
         data_bones = rig.data.bones
-        for bname in ("Breast.L", "Breast.R"):
-            db = data_bones.get(bname)
-            if db:
-                head_w = mw @ db.head_local
-                tail_w = mw @ db.tail_local
-                radius = max(0.03, db.head_radius, db.envelope_distance / 1.4)
-                bones_dict[bname] = {
-                    "head": [round(head_w.x, 6), round(head_w.y, 6), round(head_w.z, 6)],
-                    "tail": [round(tail_w.x, 6), round(tail_w.y, 6), round(tail_w.z, 6)],
-                    "radius": round(radius, 6),
-                }
+        for db in data_bones:
+            bname = db.name
+            head_w = mw @ db.head_local
+            tail_w = mw @ db.tail_local
+            radius = max(0.03, db.head_radius, db.envelope_distance / 1.4)
+            bones_dict[bname] = {
+                "head": [round(head_w.x, 6), round(head_w.y, 6), round(head_w.z, 6)],
+                "tail": [round(tail_w.x, 6), round(tail_w.y, 6), round(tail_w.z, 6)],
+                "radius": round(radius, 6),
+            }
 
     bone_items_list = []
     if hasattr(props, "bone_items"):

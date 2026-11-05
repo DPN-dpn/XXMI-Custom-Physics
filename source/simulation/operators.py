@@ -20,16 +20,12 @@ _preview_frame_handler = preview_frame_handler
 class XXMI_OT_preview_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_preview_physics"
     bl_label = "뷰포트 실시간 물리 프리뷰"
-    bl_description = "뷰포트에서 가슴 물리 움직임을 실시간으로 미리 확인합니다"
+    bl_description = "뷰포트에서 물리 본의 움직임을 실시간으로 미리 확인합니다"
 
     @classmethod
     def poll(cls, context):
         return any(
-            o.type == 'MESH' and (
-                o.vertex_groups.get("XXMI_Breast_L") or
-                o.vertex_groups.get("XXMI_Breast_R") or
-                o.vertex_groups.get("XXMI_Role_Rigid")
-            )
+            o.type == 'MESH' and any(vg.name.startswith("XXMI_") for vg in o.vertex_groups)
             for o in bpy.data.objects
         )
 
@@ -38,71 +34,86 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
 
         if props.is_preview_running:
             stop_physics_preview(context)
-            self.report({'INFO'}, "가슴 물리 프리뷰가 중지되었으며 메쉬들이 원상 복구되었습니다.")
+            self.report({'INFO'}, "물리 프리뷰가 중지되었으며 메쉬들이 원상 복구되었습니다.")
             return {'FINISHED'}
 
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        breast_objs = [
-            o for o in bpy.data.objects
-            if o.type == 'MESH' and (
-                o.vertex_groups.get("XXMI_Breast_L") or
-                o.vertex_groups.get("XXMI_Breast_R") or
-                o.vertex_groups.get("XXMI_Role_Rigid")
-            )
-        ]
+        # 1. 활성 본 슬롯 목록 추출
+        active_bones = []
+        if props and hasattr(props, "bone_items") and len(props.bone_items) > 0:
+            active_bones = [it.name for it in props.bone_items if it.name.strip()]
 
-        if not breast_objs:
-            self.report({'ERROR'}, "등록된 가슴 정점이 없습니다. 먼저 [1. 가슴 영역 선택 등록]을 진행해주세요.")
+        if not active_bones:
+            # 씬 내 메쉬의 버텍스 그룹에서 탐색
+            bone_set = set()
+            for o in bpy.data.objects:
+                if o.type == 'MESH':
+                    for vg in o.vertex_groups:
+                        if vg.name.startswith("XXMI_") and vg.name not in ("XXMI_Role_Rigid", "XXMI_Role_Static", "XXMI_Physics"):
+                            bone_set.add(vg.name[5:])
+            active_bones = sorted(list(bone_set))
+
+        if not active_bones:
+            self.report({'ERROR'}, "등록된 모핑 본 슬롯이나 가중치 버텍스 그룹이 없습니다. 먼저 1패널에서 슬롯을 생성하세요.")
             return {'CANCELLED'}
 
-        rig = props.anchor_obj or bpy.data.objects.get("XXMI_Breast_Rig")
-        world_anchor_l = Vector((0.0, 0.0, 0.0))
-        world_anchor_r = Vector((0.0, 0.0, 0.0))
-        if rig and rig.type == 'ARMATURE':
-            b_l = rig.data.bones.get("Breast.L")
-            b_r = rig.data.bones.get("Breast.R")
-            if b_l:
-                world_anchor_l = rig.matrix_world @ b_l.head_local
-            if b_r:
-                world_anchor_r = rig.matrix_world @ b_r.head_local
+        # 2. 관련 메쉬 오브젝트 탐색
+        active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
+        legacy_vg_names = ["XXMI_Breast_L", "XXMI_Breast_R"]
+        all_candidate_vgs = set(active_vg_names + legacy_vg_names + ["XXMI_Role_Rigid"])
+
+        mesh_objs = [
+            o for o in bpy.data.objects
+            if o.type == 'MESH' and any(o.vertex_groups.get(vgn) for vgn in all_candidate_vgs)
+        ]
+
+        if not mesh_objs:
+            self.report({'ERROR'}, "물리 가중치가 적용된 메쉬 오브젝트를 찾을 수 없습니다.")
+            return {'CANCELLED'}
 
         objects_data = []
 
-        for obj in breast_objs:
+        for obj in mesh_objs:
             ensure_object_visible(context, obj)
             mesh = obj.data
             n_verts = len(mesh.vertices)
-            vg_l_idx = obj.vertex_groups.find("XXMI_Breast_L")
-            vg_r_idx = obj.vertex_groups.find("XXMI_Breast_R")
-            vg_rigid_idx = obj.vertex_groups.find("XXMI_Role_Rigid")
 
-            w_l = [0.0] * n_verts
-            w_r = [0.0] * n_verts
+            # 본별 가중치 배열 수집
+            weights_by_bone = {}
+            has_any_weights = False
+
+            for bn in active_bones:
+                vg = obj.vertex_groups.get(f"XXMI_{bn}")
+                # 레거시 매핑 호환
+                if not vg and bn.lower() in ("breast.l", "l"):
+                    vg = obj.vertex_groups.get("XXMI_Breast_L")
+                elif not vg and bn.lower() in ("breast.r", "r"):
+                    vg = obj.vertex_groups.get("XXMI_Breast_R")
+
+                w_arr = [0.0] * n_verts
+                if vg:
+                    vg_idx = vg.index
+                    for v in mesh.vertices:
+                        for g in v.groups:
+                            if g.group == vg_idx and g.weight > 1e-4:
+                                w_arr[v.index] = g.weight
+                                has_any_weights = True
+                weights_by_bone[bn] = w_arr
+
+            vg_rigid = obj.vertex_groups.get("XXMI_Role_Rigid")
             rigid_flags = [False] * n_verts
+            if vg_rigid:
+                vr_idx = vg_rigid.index
+                for v in mesh.vertices:
+                    for g in v.groups:
+                        if g.group == vr_idx and g.weight > 0.5:
+                            rigid_flags[v.index] = True
+                            has_any_weights = True
 
-            has_weights = False
-            for v in mesh.vertices:
-                for g in v.groups:
-                    if g.group == vg_l_idx:
-                        w_l[v.index] = g.weight
-                        if g.weight > 0:
-                            has_weights = True
-                    elif g.group == vg_r_idx:
-                        w_r[v.index] = g.weight
-                        if g.weight > 0:
-                            has_weights = True
-                    elif g.group == vg_rigid_idx and g.weight > 0.5:
-                        rigid_flags[v.index] = True
-                        has_weights = True
-
-            if not has_weights:
+            if not has_any_weights:
                 continue
-
-            inv_mw = obj.matrix_world.inverted()
-            local_anchor_l = inv_mw @ world_anchor_l if world_anchor_l.length_squared > 1e-6 else Vector((0.0, 0.0, 0.0))
-            local_anchor_r = inv_mw @ world_anchor_r if world_anchor_r.length_squared > 1e-6 else Vector((0.0, 0.0, 0.0))
 
             up_local, right_local, fwd_local = get_local_axes(obj)
 
@@ -115,15 +126,15 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             sk = obj.shape_key_add(name=PREVIEW_SK_NAME, from_mix=False)
             sk.value = 1.0
 
-            active_indices = [i for i in range(n_verts) if w_l[i] > 1e-5 or w_r[i] > 1e-5 or rigid_flags[i]]
+            active_indices = [
+                i for i in range(n_verts)
+                if any(weights_by_bone[bn][i] > 1e-4 for bn in active_bones) or rigid_flags[i]
+            ]
 
             objects_data.append({
                 "obj_name": obj.name,
-                "anchor_l": local_anchor_l,
-                "anchor_r": local_anchor_r,
                 "active_indices": active_indices,
-                "weights_l": w_l,
-                "weights_r": w_r,
+                "weights_by_bone": weights_by_bone,
                 "rigid_flags": rigid_flags,
                 "base_coords": [v.co.copy() for v in mesh.vertices],
                 "up_vec": up_local,
@@ -132,50 +143,23 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
             })
 
         if not objects_data:
-            self.report({'ERROR'}, "가슴 가중치가 계산되지 않았습니다. 먼저 [3. 본 기준 가중치(웨이트) 자동 계산]을 진행해주세요.")
+            self.report({'ERROR'}, "물리 가중치가 계산되지 않았습니다. 먼저 3패널에서 [가중치 자동 계산 & 블렌딩]을 진행해주세요.")
             return {'CANCELLED'}
-
-        all_pts_preview = []
-        for o_idx, odata in enumerate(objects_data):
-            obj = bpy.data.objects.get(odata["obj_name"])
-            if not obj:
-                continue
-            mw = obj.matrix_world
-            base_coords = odata["base_coords"]
-            rigid_flags = odata["rigid_flags"]
-            for vi in odata["active_indices"]:
-                if rigid_flags[vi]:
-                    continue
-                w_co = mw @ base_coords[vi]
-                all_pts_preview.append((w_co, o_idx, vi))
-
-        if len(all_pts_preview) > 1:
-            kd_prev = KDTree(len(all_pts_preview))
-            for k, (w_co, _, _) in enumerate(all_pts_preview):
-                kd_prev.insert(w_co, k)
-            kd_prev.balance()
-
-            for w_co, o_idx, vi in all_pts_preview:
-                hits = kd_prev.find_range(w_co, 0.0012)
-                if len(hits) > 1:
-                    max_wl = max(objects_data[all_pts_preview[h_k][1]]["weights_l"][all_pts_preview[h_k][2]] for _, h_k, _ in hits)
-                    max_wr = max(objects_data[all_pts_preview[h_k][1]]["weights_r"][all_pts_preview[h_k][2]] for _, h_k, _ in hits)
-                    objects_data[o_idx]["weights_l"][vi] = max_wl
-                    objects_data[o_idx]["weights_r"][vi] = max_wr
 
         global_peak_w = 0.0
         for odata in objects_data:
-            max_l = max(odata["weights_l"]) if odata["weights_l"] else 0.0
-            max_r = max(odata["weights_r"]) if odata["weights_r"] else 0.0
-            global_peak_w = max(global_peak_w, max_l, max_r)
+            for bn in active_bones:
+                w_arr = odata["weights_by_bone"].get(bn, [])
+                if w_arr:
+                    m = max(w_arr)
+                    if m > global_peak_w:
+                        global_peak_w = m
 
         _PREVIEW_CACHE["objects_data"] = objects_data
+        _PREVIEW_CACHE["active_bones"] = active_bones
         _PREVIEW_CACHE["norm_factor"] = (1.0 / global_peak_w) if global_peak_w > 0.05 else 1.0
         _PREVIEW_CACHE["ode_state"] = {
-            "disp_l": Vector((0.0, 0.0, 0.0)),
-            "disp_r": Vector((0.0, 0.0, 0.0)),
-            "vel_l": Vector((0.0, 0.0, 0.0)),
-            "vel_r": Vector((0.0, 0.0, 0.0)),
+            "bones": {},
             "prev_t": None,
         }
         props.is_preview_running = True
@@ -191,7 +175,7 @@ class XXMI_OT_preview_physics(bpy.types.Operator):
         except Exception:
             pass
 
-        self.report({'INFO'}, f"물리 프리뷰 시작 ({len(objects_data)}개 메쉬 오브젝트)")
+        self.report({'INFO'}, f"물리 프리뷰 시작 ({len(objects_data)}개 메쉬 오브젝트, 본 {len(active_bones)}개)")
         return {'FINISHED'}
 
 

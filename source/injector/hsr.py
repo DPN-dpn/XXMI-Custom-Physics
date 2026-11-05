@@ -16,8 +16,11 @@ def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx, props):
 
 
 def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_weight=1.0, root_vert_idx=0):
-    params_l = get_bone_params(props, "Breast.L")
-    params_r = get_bone_params(props, "Breast.R")
+    active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
+    b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
+    b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
+    params_l = get_bone_params(props, b0_name)
+    params_r = get_bone_params(props, b1_name)
 
     speed_l = max(0.2, float(params_l["speed"]))
     damping_l = max(0.1, float(params_l["damping"]))

@@ -2,6 +2,87 @@ import json
 import bpy
 
 
+def get_bone_vg_name(bname):
+    """모핑 본의 버텍스 그룹 이름을 반환합니다. (규칙: XXMI_<본이름>)"""
+    return f"XXMI_{bname}"
+
+
+def handle_bone_item_rename(item, context=None):
+    """
+    모핑 본 슬롯의 이름(item.name)이 변경되었을 때:
+    1. 관련 메쉬들의 버텍스 그룹 이름을 XXMI_<이전이름>에서 XXMI_<새이름>으로 일괄 변경
+    2. 물리 리그(XXMI_Physics_Rig / XXMI_Breast_Rig) 내의 본 이름 변경
+    3. 강체 슬롯(props.rigid_items)의 target_bone 참조 변경
+    4. item.prev_name 갱신
+    """
+    if not item:
+        return
+
+    new_name = item.name.strip()
+    if not new_name:
+        return
+
+    prev_name = getattr(item, "prev_name", "")
+    if not prev_name:
+        item.prev_name = new_name
+        return
+
+    if prev_name == new_name:
+        return
+
+    old_vg_name = get_bone_vg_name(prev_name)
+    new_vg_name = get_bone_vg_name(new_name)
+
+    # 1. 씬 내 모든 메쉬 오브젝트의 버텍스 그룹 이름 일괄 변경
+    for obj in bpy.data.objects:
+        if obj.type == 'MESH':
+            vg = obj.vertex_groups.get(old_vg_name)
+            if vg:
+                vg.name = new_vg_name
+
+    # 2. 물리 리그 내의 본 이름 변경
+    props = getattr(bpy.context.scene, "xxmi_custom_physics_props", None) if bpy.context else None
+    rig = None
+    if props and props.anchor_obj:
+        rig = props.anchor_obj
+    else:
+        rig = bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
+
+    if rig and rig.type == 'ARMATURE':
+        was_mode = bpy.context.mode
+        orig_active = bpy.context.view_layer.objects.active
+        if was_mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        try:
+            bpy.context.view_layer.objects.active = rig
+            bpy.ops.object.mode_set(mode='EDIT')
+            if prev_name in rig.data.edit_bones:
+                rig.data.edit_bones[prev_name].name = new_name
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+        if orig_active and orig_active.name in bpy.data.objects:
+            try:
+                bpy.context.view_layer.objects.active = orig_active
+                if was_mode == 'EDIT_MESH':
+                    bpy.ops.object.mode_set(mode='EDIT')
+            except Exception:
+                pass
+
+    # 3. 강체 슬롯의 target_bone 참조 갱신
+    if props:
+        for r_item in props.rigid_items:
+            if r_item.target_bone == prev_name:
+                r_item.target_bone = new_name
+
+    item.prev_name = new_name
+
+
 def get_bone_data(item):
     """BoneItem의 JSON 문자열 데이터를 딕셔너리로 파싱합니다."""
     if not item or not item.data_json:
@@ -21,7 +102,7 @@ def set_bone_data(item, data):
 
 
 def get_bone_item(props, bname):
-    """본 이름 또는 인덱스에 해당하는 슬롯을 반환합니다."""
+    """본 이름 또는 버텍스 그룹 이름에 해당하는 슬롯을 반환합니다."""
     if not props or not hasattr(props, "bone_items"):
         return None
 
@@ -30,11 +111,12 @@ def get_bone_item(props, bname):
         if item.name.lower() == b_lower:
             return item
 
-    # 하위 호환용 (L/Breast.L -> 0번째 본, R/Breast.R -> 1번째 본)
-    if b_lower in ("breast.l", "l") and len(props.bone_items) > 0:
-        return props.bone_items[0]
-    if b_lower in ("breast.r", "r") and len(props.bone_items) > 1:
-        return props.bone_items[1]
+    # XXMI_ 접두사가 붙어있는 경우 제거 후 검색
+    if b_lower.startswith("xxmi_"):
+        stripped = b_lower[5:]
+        for item in props.bone_items:
+            if item.name.lower() == stripped:
+                return item
 
     return None
 

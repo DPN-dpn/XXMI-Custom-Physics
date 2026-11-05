@@ -19,7 +19,7 @@ from .rig import (
     get_rig_bone_info,
 )
 from ..rigid.data import get_rigid_data
-from .data import get_bone_params
+from .data import get_bone_params, get_bone_item, get_bone_data
 
 VG_RIGID = ROLE_RIGID_VG
 
@@ -117,20 +117,30 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     return w_arr
 
 
-def eval_bone_weight_at_point(pt, side, bone_info, props=None, falloff_p=1.0, peak_w=0.40):
+def eval_bone_weight_at_point(pt, bname, bone_info, props=None, falloff_p=1.0, peak_w=0.40):
     """
-    3D 월드 상의 한 점(강체의 중심점 등)에서 해당 물리 본(Breast.L 또는 Breast.R)에 의한
+    3D 월드 상의 한 점(강체의 중심점 등)에서 해당 물리 본(bname)에 의한
     해부학적 가중치를 평가하여 반환합니다.
     """
-    if side not in bone_info:
+    if not bone_info:
         return 0.0
 
-    head = Vector(bone_info[side]["head"])
-    tail = Vector(bone_info[side]["tail"])
+    entry = bone_info.get(bname)
+    if not entry:
+        if bname in ("L", "R"):
+            entry = bone_info.get(bname)
+        elif f"Breast.{bname}" in bone_info:
+            entry = bone_info.get(f"Breast.{bname}")
+
+    if not entry:
+        return 0.0
+
+    head = Vector(entry["head"])
+    tail = Vector(entry["tail"])
     bone_vec = tail - head
     bone_len = bone_vec.length
     fwd_u = bone_vec.normalized() if bone_len > 1e-4 else Vector((0.0, -1.0, 0.0))
-    radius = max(0.02, bone_info[side]["radius"])
+    radius = max(0.02, entry["radius"])
 
     v = pt - head
     t = v.dot(fwd_u)
@@ -146,7 +156,7 @@ def eval_bone_weight_at_point(pt, side, bone_info, props=None, falloff_p=1.0, pe
     w_depth = 0.25 + 0.75 * math.sin(math.sqrt(t_norm) * (math.pi * 0.5))
 
     if props:
-        b_params = get_bone_params(props, f"Breast.{side}")
+        b_params = get_bone_params(props, bname)
         peak_w = b_params["peak_weight"]
         falloff_p = b_params["falloff_power"]
 
@@ -281,61 +291,59 @@ def unify_rigid_clusters_across_objects(target_objs, bone_info, falloff_p, peak_
     for i in range(n_isl):
         clusters.setdefault(_find(i), []).append(islands[i])
 
-    _eval_side_weight = lambda pt, side: eval_bone_weight_at_point(pt, side, bone_info, falloff_p=falloff_p, peak_w=peak_w)
+    active_bones = [k for k in bone_info.keys() if k not in ("L", "R")]
+    if not active_bones:
+        active_bones = list(bone_info.keys())
 
     for comp in clusters.values():
         all_pts = np.concatenate([isl["pts"] for isl in comp], axis=0)
         c_cent = Vector(all_pts.mean(axis=0).tolist())
-        min_x = float(all_pts[:, 0].min())
-        max_x = float(all_pts[:, 0].max())
 
-        has_l = "L" in bone_info
-        has_r = "R" in bone_info
+        best_bname = None
+        best_dist = 1e9
+        for bn in active_bones:
+            bentry = bone_info.get(bn)
+            if bentry:
+                d = (c_cent - Vector(bentry["centroid"])).length
+                if d < best_dist:
+                    best_dist = d
+                    best_bname = bn
 
-        cluster_wl = _eval_side_weight(c_cent, "L") if has_l else 0.0
-        cluster_wr = _eval_side_weight(c_cent, "R") if has_r else 0.0
+        if not best_bname:
+            continue
+
+        c_w = eval_bone_weight_at_point(c_cent, best_bname, bone_info, falloff_p=falloff_p, peak_w=peak_w)
+        vg_name = f"XXMI_{best_bname}"
 
         for isl in comp:
             obj = isl["obj"]
             verts = isl["verts"]
-            vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
-            vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
-
-            if cluster_wl > 0.0:
-                vg_l.add(verts, cluster_wl, 'REPLACE')
+            vg = obj.vertex_groups.get(vg_name) or obj.vertex_groups.new(name=vg_name)
+            if c_w > 0.0:
+                vg.add(verts, c_w, 'REPLACE')
             else:
-                vg_l.remove(verts)
-
-            if cluster_wr > 0.0:
-                vg_r.add(verts, cluster_wr, 'REPLACE')
-            else:
-                vg_r.remove(verts)
+                vg.remove(verts)
 
     return len(clusters)
 
 
-def smooth_mesh_weights(obj, vg_l, vg_r, rigid_mask, iters=2, alpha=0.45, lock_registered=True):
+def smooth_mesh_weights(obj, vg_list, rigid_mask, iters=2, alpha=0.45, lock_registered=True):
     """
-    메쉬 엣지 위상 구조를 기반으로 가중치를 라플라시안 스무딩합니다.
+    메쉬 엣지 위상 구조를 기반으로 지정된 버텍스 그룹들의 가중치를 라플라시안 스무딩합니다.
     """
-    if iters <= 0 or not obj or obj.type != 'MESH':
+    if iters <= 0 or not obj or obj.type != 'MESH' or not vg_list:
         return
     mesh = obj.data
     e0, e1 = mesh_edge_arrays(mesh)
     if len(e0) == 0:
         return
     n_verts = len(mesh.vertices)
-    group_map = {}
-    if vg_l: group_map[vg_l.index] = "l"
-    if vg_r: group_map[vg_r.index] = "r"
-    if not group_map:
-        return
-    arrs = read_vertex_group_arrays(obj, group_map)
 
-    for side_key, vg in (("l", vg_l), ("r", vg_r)):
-        if side_key not in arrs or not vg:
+    for vg in vg_list:
+        if not vg:
             continue
-        w = arrs[side_key].astype(np.float32)
+        arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
+        w = arrs.get("w", np.zeros(n_verts, dtype=np.float32)).astype(np.float32)
         active_initial = (w > 0.0001) & ~rigid_mask
         if not np.any(active_initial):
             continue
@@ -362,143 +370,146 @@ def smooth_mesh_weights(obj, vg_l, vg_r, rigid_mask, iters=2, alpha=0.45, lock_r
                 vg.remove([vi])
 
 
-def synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012):
+def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, tol=0.0012):
     """
     모든 대상 오브젝트에 걸쳐 3D 공간 상에서 동일한 위치(기본 1.2mm 이내)를 공유하는
     모든 정점(UV 심, 하드 엣지 분리점 등)의 가중치를 100% 동일하게 동기화합니다.
+    동적으로 등록된 모든 모핑 본 버텍스 그룹(XXMI_*)을 지원합니다.
     """
     if not target_objs:
         return 0
 
-    obj_entries = []
-
-    for obj in target_objs:
-        if obj.type != 'MESH':
-            continue
-        mesh = obj.data
-        n_verts = len(mesh.vertices)
-        if n_verts == 0:
-            continue
-
-        vg_l = obj.vertex_groups.get(VG_BREAST_L)
-        vg_r = obj.vertex_groups.get(VG_BREAST_R)
-        vg_rigid = obj.vertex_groups.get(VG_RIGID)
-
-        group_map = {}
-        if vg_l: group_map[vg_l.index] = "l"
-        if vg_r: group_map[vg_r.index] = "r"
-        if vg_rigid: group_map[vg_rigid.index] = "rigid"
-
-        arrs = read_vertex_group_arrays(obj, group_map)
-        world = world_vertex_positions(obj)
-
-        zeros = np.zeros(n_verts, dtype=np.float32)
-        wl = arrs.get("l", zeros)
-        wr = arrs.get("r", zeros)
-        rigid = (arrs.get("rigid", zeros) > 0.5)
-
-        obj_entries.append({
-            "obj": obj,
-            "vg_l": vg_l,
-            "vg_r": vg_r,
-            "world": world,
-            "wl": wl,
-            "wr": wr,
-            "rigid": rigid,
-            "n": n_verts,
-        })
-
-    if not obj_entries:
+    valid_objs = [o for o in target_objs if o and o.type == 'MESH' and len(o.data.vertices) > 0]
+    if not valid_objs:
         return 0
 
-    active_items = []
-    for o_idx, entry in enumerate(obj_entries):
-        wl = entry["wl"]
-        wr = entry["wr"]
-        world = entry["world"]
-        mask = (wl > 0.0001) | (wr > 0.0001)
-        for vi in np.nonzero(mask)[0].tolist():
-            active_items.append((o_idx, vi, world[vi], float(wl[vi]), float(wr[vi])))
+    if vg_names is None:
+        vg_set = set()
+        for obj in valid_objs:
+            for vg in obj.vertex_groups:
+                if vg.name.startswith("XXMI_") and vg.name not in (VG_RIGID, "XXMI_Role_Static", "XXMI_Physics"):
+                    vg_set.add(vg.name)
+        vg_names = sorted(list(vg_set))
 
-    if not active_items:
+    if not vg_names:
         return 0
 
-    kd = KDTree(len(active_items))
-    for k, item in enumerate(active_items):
-        kd.insert(Vector(item[2]), k)
-    kd.balance()
-
-    updates_per_obj = {o_idx: {} for o_idx in range(len(obj_entries))}
     synced_count = 0
 
-    for o_idx, entry in enumerate(obj_entries):
-        world = entry["world"]
-        wl = entry["wl"]
-        wr = entry["wr"]
-        rigid = entry["rigid"]
+    for vgroup_name in vg_names:
+        active_items = []
+        obj_entries = []
 
-        for vi in range(entry["n"]):
-            if rigid[vi]:
-                continue
+        for o_idx, obj in enumerate(valid_objs):
+            vg = obj.vertex_groups.get(vgroup_name)
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
 
-            pt = Vector(world[vi])
-            hits = kd.find_range(pt, tol)
-            if not hits:
-                continue
+            gmap = {}
+            if vg: gmap[vg.index] = "w"
+            if vg_rigid: gmap[vg_rigid.index] = "rigid"
 
-            max_wl = float(wl[vi])
-            max_wr = float(wr[vi])
-            for _, hit_idx, _ in hits:
-                _, _, _, hw_l, hw_r = active_items[hit_idx]
-                if hw_l > max_wl: max_wl = hw_l
-                if hw_r > max_wr: max_wr = hw_r
+            arrs = read_vertex_group_arrays(obj, gmap)
+            world = world_vertex_positions(obj)
+            n_verts = len(world)
 
-            if (abs(wl[vi] - max_wl) > 1e-4) or (abs(wr[vi] - max_wr) > 1e-4):
-                updates_per_obj[o_idx][vi] = (max_wl, max_wr)
+            w = arrs.get("w", np.zeros(n_verts, dtype=np.float32))
+            rigid = (arrs.get("rigid", np.zeros(n_verts, dtype=np.float32)) > 0.5)
 
-    for o_idx, updates in updates_per_obj.items():
-        if not updates:
+            obj_entries.append({
+                "obj": obj,
+                "vg": vg,
+                "world": world,
+                "w": w,
+                "rigid": rigid,
+                "n": n_verts,
+            })
+
+            mask = (w > 0.0001) & ~rigid
+            for vi in np.nonzero(mask)[0].tolist():
+                active_items.append((o_idx, vi, world[vi], float(w[vi])))
+
+        if not active_items:
             continue
-        entry = obj_entries[o_idx]
-        obj = entry["obj"]
-        vg_l = entry["vg_l"] or obj.vertex_groups.new(name=VG_BREAST_L)
-        vg_r = entry["vg_r"] or obj.vertex_groups.new(name=VG_BREAST_R)
 
-        for vi, (new_l, new_r) in updates.items():
-            if new_l > 0.0005:
-                vg_l.add([vi], max(0.0, min(1.0, new_l)), 'REPLACE')
-            elif new_l <= 0.0001:
-                vg_l.remove([vi])
+        kd = KDTree(len(active_items))
+        for k, item in enumerate(active_items):
+            kd.insert(Vector(item[2]), k)
+        kd.balance()
 
-            if new_r > 0.0005:
-                vg_r.add([vi], max(0.0, min(1.0, new_r)), 'REPLACE')
-            elif new_r <= 0.0001:
-                vg_r.remove([vi])
+        updates_per_obj = {o_idx: {} for o_idx in range(len(obj_entries))}
 
-            synced_count += 1
+        for o_idx, entry in enumerate(obj_entries):
+            world = entry["world"]
+            w = entry["w"]
+            rigid = entry["rigid"]
+
+            for vi in range(entry["n"]):
+                if rigid[vi]:
+                    continue
+
+                pt = Vector(world[vi])
+                hits = kd.find_range(pt, tol)
+                if not hits:
+                    continue
+
+                max_w = float(w[vi])
+                for _, hit_idx, _ in hits:
+                    hw = active_items[hit_idx][3]
+                    if hw > max_w:
+                        max_w = hw
+
+                if abs(w[vi] - max_w) > 1e-4:
+                    updates_per_obj[o_idx][vi] = max_w
+
+        for o_idx, updates in updates_per_obj.items():
+            if not updates:
+                continue
+            entry = obj_entries[o_idx]
+            obj = entry["obj"]
+            vg = entry["vg"] or obj.vertex_groups.new(name=vgroup_name)
+
+            for vi, new_w in updates.items():
+                if new_w > 0.0005:
+                    vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
+                elif new_w <= 0.0001:
+                    vg.remove([vi])
+                synced_count += 1
 
     return synced_count
 
 
 def rebake_mesh_weights_from_rig(context, rig, props=None):
     """
-    XXMI_Breast_Rig 내의 본 위치(Breast.L / Breast.R)를 기준으로
-    씬 내의 모든 관련 메쉬 오브젝트들의 버텍스 가중치를 다시 계산합니다.
+    물리 리그(XXMI_Physics_Rig) 내의 본 위치를 기준으로
+    씬 내의 모든 관련 메쉬 오브젝트들의 버텍스 가중치를 동적으로 다시 계산합니다.
+    사용자가 등록한 개별 모핑 본 슬롯 및 본 위치 수정을 100% 반영합니다.
     """
     if props is None:
         props = context.scene.xxmi_custom_physics_props
 
     bone_info = get_rig_bone_info(rig)
     if not bone_info:
-        return 0, "유효한 본(Breast.L 또는 Breast.R)을 찾을 수 없습니다."
+        return 0, "유효한 물리 본을 찾을 수 없습니다."
+
+    # 1. 활성 본 슬롯 목록 추출
+    active_bones = []
+    if props and hasattr(props, "bone_items") and len(props.bone_items) > 0:
+        active_bones = [it.name for it in props.bone_items if it.name.strip()]
+
+    if not active_bones:
+        active_bones = [k for k in bone_info.keys() if k not in ("L", "R")]
+
+    if not active_bones:
+        active_bones = list(bone_info.keys())
+
+    # 2. 대상 메쉬 오브젝트 수집
+    active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
+    legacy_vg_names = [VG_BREAST_L, VG_BREAST_R]
+    all_target_vg_names = set(active_vg_names + legacy_vg_names + [VG_RIGID])
 
     target_objs = [
         o for o in bpy.data.objects
-        if o.type == 'MESH' and (
-            o.vertex_groups.get(VG_BREAST_L) or
-            o.vertex_groups.get(VG_BREAST_R) or
-            o.vertex_groups.get(VG_RIGID)
-        )
+        if o.type == 'MESH' and any(o.vertex_groups.get(vgn) for vgn in all_target_vg_names)
     ]
 
     if not target_objs:
@@ -511,12 +522,9 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     if not target_objs:
         return 0, "씬 내에서 대상 메쉬 오브젝트를 찾을 수 없습니다."
 
-    falloff_p = props.falloff_power
+    falloff_p = getattr(props, "falloff_power", 1.0)
     peak_w = getattr(props, "peak_weight", 0.40)
-    smooth_iters = max(
-        get_bone_params(props, "Breast.L")["smooth_iterations"],
-        get_bone_params(props, "Breast.R")["smooth_iterations"]
-    )
+    smooth_iters = getattr(props, "smooth_iterations", 2)
     lock_registered = getattr(props, "lock_registered_verts", True)
     updated_obj_count = 0
     total_recomputed_verts = 0
@@ -525,19 +533,16 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     for obj in target_objs:
         ensure_object_visible(context, obj)
 
-        vg_l = obj.vertex_groups.get(VG_BREAST_L) or obj.vertex_groups.new(name=VG_BREAST_L)
-        vg_r = obj.vertex_groups.get(VG_BREAST_R) or obj.vertex_groups.new(name=VG_BREAST_R)
         vg_rigid = obj.vertex_groups.get(VG_RIGID)
-
-        group_map = {vg_l.index: "l", vg_r.index: "r"}
-        if vg_rigid:
-            group_map[vg_rigid.index] = "rigid"
-        arrs = read_vertex_group_arrays(obj, group_map)
-
-        rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world_vertex_positions(obj)), dtype=bool)
         world = world_vertex_positions(obj)
-
         n_verts = len(world)
+
+        rigid_mask = np.zeros(n_verts, dtype=bool)
+        if vg_rigid:
+            r_arr = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"}).get("rigid")
+            if r_arr is not None:
+                rigid_mask = (r_arr > 0.5)
+
         if vg_rigid and np.any(rigid_mask):
             e0, e1 = mesh_edge_arrays(obj.data)
             lab_all = label_components(n_verts, e0, e1)
@@ -556,22 +561,24 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                 vg_rigid.add(to_add_list, 1.0, 'REPLACE')
 
         obj_data[obj] = {
-            "vg_l": vg_l,
-            "vg_r": vg_r,
-            "arrs": arrs,
             "world": world,
             "rigid_mask": rigid_mask,
         }
 
     updated_obj_count = len(obj_data)
 
-    unique_bones = {}
-    for k, bentry in bone_info.items():
-        bname = bentry["bname"]
-        if bname not in unique_bones:
-            unique_bones[bname] = bentry
+    # 3. 각 모핑 본별 독립 가중치 계산 (슬롯별 설정 및 본 위치 반영)
+    for bname in active_bones:
+        bentry = bone_info.get(bname)
+        if not bentry:
+            b_low = bname.lower()
+            for k, e in bone_info.items():
+                if k.lower() == b_low or e["bname"].lower() == b_low:
+                    bentry = e
+                    break
+        if not bentry:
+            continue
 
-    for bname, bentry in unique_bones.items():
         b_params = get_bone_params(props, bname)
         side_falloff_p = b_params["falloff_power"]
         side_peak_w = b_params["peak_weight"]
@@ -584,12 +591,11 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         radius = bentry["radius"]
         eff_radius = max(0.02, radius)
 
-        is_first_ch = (bname.lower() in ("breast.l", "l") or (bone_info.get("L") and bone_info["L"]["bname"] == bname))
-        is_second_ch = (bname.lower() in ("breast.r", "r") or (bone_info.get("R") and bone_info["R"]["bname"] == bname))
+        vg_target_name = f"XXMI_{bname}"
 
-        vg_target_name = VG_BREAST_L if is_first_ch else (
-            VG_BREAST_R if is_second_ch else f"XXMI_{bname}"
-        )
+        # 해당 슬롯의 정점 사전 데이터 가져오기
+        b_item = get_bone_item(props, bname)
+        b_item_verts = get_bone_data(b_item) if b_item else {}
 
         side_cand = []
         zero_entries = []
@@ -597,25 +603,28 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         for obj, odata in obj_data.items():
             vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
             world = odata["world"]
-            arrs = odata["arrs"]
             rigid_mask = odata["rigid_mask"]
+            n_v = len(world)
 
-            prev_l = arrs.get("l", np.zeros(len(world)))
-            prev_r = arrs.get("r", np.zeros(len(world)))
+            slot_obj_verts = set(b_item_verts.get(obj.name, []))
+
             cur_vg = obj.vertex_groups.get(vg_target_name)
-            cur_arr = read_vertex_group_arrays(obj, {cur_vg.index: "cur"})["cur"] if cur_vg else np.zeros(len(world))
-            is_registered_chest = ((prev_l > 0.0001) | (prev_r > 0.0001) | (cur_arr > 0.0001))
+            cur_arr = read_vertex_group_arrays(obj, {cur_vg.index: "cur"})["cur"] if cur_vg else np.zeros(n_v)
+            is_registered_b = (cur_arr > 0.0001)
+            for vi in slot_obj_verts:
+                if vi < n_v:
+                    is_registered_b[vi] = True
 
             if side_lock_registered:
-                cand_mask = is_registered_chest & ~rigid_mask
+                cand_mask = is_registered_b & ~rigid_mask
             else:
                 dist = np.linalg.norm(world - cent, axis=1)
                 in_radius = (dist <= eff_radius)
                 dot_fwd = (world - head) @ fwd_u
                 front_ok = (dot_fwd >= -eff_radius * 0.35)
-                cand_mask = (is_registered_chest | (in_radius & front_ok)) & ~rigid_mask
+                cand_mask = (is_registered_b | (in_radius & front_ok)) & ~rigid_mask
 
-                non_cand_prev = np.nonzero(is_registered_chest & ~cand_mask)[0]
+                non_cand_prev = np.nonzero(is_registered_b & ~cand_mask)[0]
                 if len(non_cand_prev) > 0:
                     zero_entries.append((vg, non_cand_prev.tolist()))
 
@@ -642,20 +651,26 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             for vg, z_list in zero_entries:
                 vg.remove(z_list)
 
-    # 각 모핑 본별 독립 거리 감쇄 연산이 완료되어 중첩 영역은 자연스럽게 자동 블렌딩됨
+    # 4. 라플라시안 스무딩 (모든 활성 모핑 본 버텍스 그룹 대상)
+    for bname in active_bones:
+        b_params = get_bone_params(props, bname)
+        s_iters = b_params["smooth_iterations"]
+        if s_iters > 0:
+            vg_name = f"XXMI_{bname}"
+            for obj, odata in obj_data.items():
+                vg = obj.vertex_groups.get(vg_name)
+                if vg:
+                    smooth_mesh_weights(
+                        obj, [vg], odata["rigid_mask"],
+                        iters=s_iters, alpha=0.45, lock_registered=lock_registered
+                    )
 
-    # 라플라시안 스무딩
-    if smooth_iters > 0:
-        for obj, odata in obj_data.items():
-            smooth_mesh_weights(
-                obj, odata["vg_l"], odata["vg_r"], odata["rigid_mask"],
-                iters=smooth_iters, alpha=0.45, lock_registered=lock_registered
-            )
+    # 5. 동일 위치 공유 정점 동기화
+    num_synced = synchronize_coincident_vertices_across_objects(
+        target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
+    )
 
-    # 동일 위치 공유 정점 동기화
-    num_synced = synchronize_coincident_vertices_across_objects(target_objs, tol=0.0012)
-
-    # 레거시 / 슬롯 외 강체 정점 fallback 클러스터 통합
+    # 6. 강체(액세서리) 표면 밀착 가중치 동기화
     slot_exclude = {}
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -664,36 +679,38 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         for oname, vis in rdata.items():
             slot_exclude.setdefault(oname, set()).update(vis)
 
-    num_clusters = unify_rigid_clusters_across_objects(
+    # 레거시 / 슬롯 외 강체 정점 fallback 클러스터 통합
+    unify_rigid_clusters_across_objects(
         target_objs, bone_info, falloff_p, peak_w, exclude_verts_by_obj=slot_exclude
     )
 
-    # 1. 주변 연질(Soft) 가슴 표면 정점 수집 및 KD-Tree 구성 (강체 표면 밀착 추종용)
-    soft_pts = []
-    soft_w_l = []
-    soft_w_r = []
-    for obj, odata in obj_data.items():
-        world = odata["world"]
-        rigid_mask = odata["rigid_mask"]
-        vg_l = odata["vg_l"]
-        vg_r = odata["vg_r"]
-        cur_arrs = read_vertex_group_arrays(obj, {vg_l.index: "l", vg_r.index: "r"})
-        wl_arr = cur_arrs["l"]
-        wr_arr = cur_arrs["r"]
-        for vi in range(len(world)):
-            if not rigid_mask[vi] and (wl_arr[vi] > 0.001 or wr_arr[vi] > 0.001):
-                soft_pts.append(Vector(world[vi]))
-                soft_w_l.append(float(wl_arr[vi]))
-                soft_w_r.append(float(wr_arr[vi]))
+    # 활성 본별 주변 연질(Soft) 표면 KD-Tree 구성
+    bone_kd_map = {}
+    for bname in active_bones:
+        vg_name = f"XXMI_{bname}"
+        soft_pts = []
+        soft_weights = []
+        for obj, odata in obj_data.items():
+            world = odata["world"]
+            rigid_mask = odata["rigid_mask"]
+            vg = obj.vertex_groups.get(vg_name)
+            if not vg:
+                continue
+            cur_arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
+            w_arr = cur_arrs["w"]
+            for vi in range(len(world)):
+                if not rigid_mask[vi] and w_arr[vi] > 0.001:
+                    soft_pts.append(Vector(world[vi]))
+                    soft_weights.append(float(w_arr[vi]))
 
-    kd_soft = None
-    if soft_pts:
-        kd_soft = KDTree(len(soft_pts))
-        for k, p in enumerate(soft_pts):
-            kd_soft.insert(p, k)
-        kd_soft.balance()
+        if soft_pts:
+            kd = KDTree(len(soft_pts))
+            for k, p in enumerate(soft_pts):
+                kd.insert(p, k)
+            kd.balance()
+            bone_kd_map[bname] = (kd, soft_weights)
 
-    # 2. 다중 강체 슬롯 가중치 계산 (표면 밀착 100% 동기화 적용 - 1.0 빨간색 과진동 방지)
+    # 다중 강체 슬롯 가중치 계산 및 할당
     applied_slots = 0
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -710,94 +727,72 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                         slot_pts.append(Vector(r_world[vi]))
 
         c_cent = Vector(np.mean([p[:] for p in slot_pts], axis=0)) if slot_pts else Vector((0.0, 0.0, 0.0))
-        c_x = c_cent.x
 
-        surf_wl = 0.0
-        surf_wr = 0.0
-        if kd_soft and slot_pts:
-            hits = kd_soft.find_range(c_cent, 0.08)
+        # 목표 본 결정
+        t_bone = item.target_bone
+        best_bname = None
+        if t_bone != 'AUTO' and t_bone in active_bones:
+            best_bname = t_bone
+        elif t_bone != 'AUTO' and (f"XXMI_{t_bone}" in [f"XXMI_{b}" for b in active_bones]):
+            best_bname = t_bone
+        else:
+            # AUTO: 강체 중심과 가장 가까운 모핑 본 선택
+            min_dist = float('inf')
+            for bn in active_bones:
+                bentry = bone_info.get(bn)
+                if bentry:
+                    b_cent = Vector(bentry["centroid"])
+                    d = (c_cent - b_cent).length
+                    if d < min_dist:
+                        min_dist = d
+                        best_bname = bn
+
+        if not best_bname and active_bones:
+            best_bname = active_bones[0]
+
+        if not best_bname:
+            continue
+
+        # 표면 가중치 탐색
+        surf_w = 0.0
+        if best_bname in bone_kd_map and slot_pts:
+            kd, s_weights = bone_kd_map[best_bname]
+            hits = kd.find_range(c_cent, 0.08)
             if not hits:
-                hits = [kd_soft.find(c_cent)]
+                hits = [kd.find(c_cent)]
             valid_hits = [h for h in hits if h is not None and h[0] is not None]
             if valid_hits:
-                w_ls = [soft_w_l[h[1]] for h in valid_hits if soft_w_l[h[1]] > 0.001]
-                w_rs = [soft_w_r[h[1]] for h in valid_hits if soft_w_r[h[1]] > 0.001]
-                if w_ls: surf_wl = float(np.mean(w_ls))
-                if w_rs: surf_wr = float(np.mean(w_rs))
+                ws = [s_weights[h[1]] for h in valid_hits if s_weights[h[1]] > 0.001]
+                if ws:
+                    surf_w = float(np.mean(ws))
 
-        anat_wl = eval_bone_weight_at_point(c_cent, "L", bone_info, props)
-        anat_wr = eval_bone_weight_at_point(c_cent, "R", bone_info, props)
-
-        base_wl = surf_wl if surf_wl > 0.01 else anat_wl
-        base_wr = surf_wr if surf_wr > 0.01 else anat_wr
-
-        # 강체 슬롯 배율 반영 (기본값: 1.0)
+        anat_w = eval_bone_weight_at_point(c_cent, best_bname, bone_info, props)
+        base_w = surf_w if surf_w > 0.01 else anat_w
         w_scale = getattr(item, "weight_scale", 1.0)
-        base_wl = min(1.0, base_wl * w_scale)
-        base_wr = min(1.0, base_wr * w_scale)
+        final_rigid_w = min(1.0, max(0.02, base_w * w_scale))
 
-        t_bone = item.target_bone
-        custom_target_bone = None
-        custom_bone_w = 0.0
-
-        if t_bone in ('BREAST_L', 'Breast.L'):
-            slot_wl = base_wl if base_wl > 0.01 else anat_wl
-            slot_wr = 0.0
-        elif t_bone in ('BREAST_R', 'Breast.R'):
-            slot_wl = 0.0
-            slot_wr = base_wr if base_wr > 0.01 else anat_wr
-        elif t_bone == 'CENTER':
-            center_w = max(base_wl, base_wr, anat_wl, anat_wr)
-            slot_wl = center_w * 0.5
-            slot_wr = center_w * 0.5
-        elif t_bone != 'AUTO' and (t_bone in bone_info or f"Breast.{t_bone}" in bone_info):
-            matched_b = t_bone if t_bone in bone_info else f"Breast.{t_bone}"
-            custom_target_bone = matched_b
-            custom_bone_w = min(1.0, max(0.02, eval_bone_weight_at_point(c_cent, matched_b, bone_info, props) * w_scale))
-            slot_wl = 0.0
-            slot_wr = 0.0
-        else:
-            if c_x > 0.012:
-                slot_wl = base_wl if base_wl > 0.01 else anat_wl
-                slot_wr = 0.0
-            elif c_x < -0.012:
-                slot_wl = 0.0
-                slot_wr = base_wr if base_wr > 0.01 else anat_wr
-            else:
-                center_w = max(base_wl, base_wr, anat_wl, anat_wr)
-                slot_wl = center_w * 0.5
-                slot_wr = center_w * 0.5
+        target_vg_name = f"XXMI_{best_bname}"
 
         for oname, vis in rdata.items():
             robj = bpy.data.objects.get(oname)
             if not robj or robj.type != 'MESH' or not vis:
                 continue
-            vg_l = robj.vertex_groups.get(VG_BREAST_L) or robj.vertex_groups.new(name=VG_BREAST_L)
-            vg_r = robj.vertex_groups.get(VG_BREAST_R) or robj.vertex_groups.new(name=VG_BREAST_R)
+
+            vg_target = robj.vertex_groups.get(target_vg_name) or robj.vertex_groups.new(name=target_vg_name)
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
 
             vg_rigid.add(vis, 1.0, 'REPLACE')
-            if custom_target_bone:
-                is_l = (custom_target_bone.lower() in ('breast.l', 'l') or (bone_info.get("L") and bone_info["L"]["bname"] == custom_target_bone))
-                is_r = (custom_target_bone.lower() in ('breast.r', 'r') or (bone_info.get("R") and bone_info["R"]["bname"] == custom_target_bone))
-                vg_target_name = VG_BREAST_L if is_l else (
-                    VG_BREAST_R if is_r else f"XXMI_{custom_target_bone}"
-                )
-                vg_c = robj.vertex_groups.get(vg_target_name) or robj.vertex_groups.new(name=vg_target_name)
-                vg_c.add(vis, custom_bone_w, 'REPLACE')
-            else:
-                if slot_wl > 0.0001:
-                    vg_l.add(vis, slot_wl, 'REPLACE')
-                else:
-                    vg_l.remove(vis)
+            vg_target.add(vis, final_rigid_w, 'REPLACE')
 
-                if slot_wr > 0.0001:
-                    vg_r.add(vis, slot_wr, 'REPLACE')
-                else:
-                    vg_r.remove(vis)
-                vg_r.remove(vis)
+            # 다른 모핑 본 그룹에서는 제외하여 강체가 왜곡되지 않도록 보장
+            for obn in active_bones:
+                if obn != best_bname:
+                    o_vg = robj.vertex_groups.get(f"XXMI_{obn}")
+                    if o_vg:
+                        o_vg.remove(vis)
 
         applied_slots += 1
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"
+
 

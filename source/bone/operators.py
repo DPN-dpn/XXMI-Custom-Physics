@@ -159,8 +159,8 @@ class XXMI_OT_register_breast_selection(bpy.types.Operator):
 
 class XXMI_OT_generate_breast_rig(bpy.types.Operator):
     bl_idname = "object.xxmi_generate_breast_rig"
-    bl_label = "모핑 본(스켈레톤) 자동 생성 및 배치"
-    bl_description = "등록된 모핑 본 슬롯들의 3D 기하학적 형태 중심을 정밀 분석하여 모핑 본(Armature)을 자동 생성 및 배치합니다"
+    bl_label = "모든 모핑 본 위치/크기 일괄 재배치"
+    bl_description = "등록된 모든 모핑 본 슬롯의 정점 3D 기하학적 형태 중심을 정밀 분석하여 물리 본(XXMI_Physics_Rig)을 자동 배치합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -169,278 +169,36 @@ class XXMI_OT_generate_breast_rig(bpy.types.Operator):
         if props and any(it.vert_count > 0 for it in props.bone_items):
             return True
         return any(
-            o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
+            o.type == 'MESH' and any(vg.name.startswith("XXMI_") for vg in o.vertex_groups)
             for o in bpy.data.objects
         )
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
-        target_objs = []
-        for it in props.bone_items:
-            it_dict = get_bone_data(it)
-            for oname in it_dict.keys():
-                o = bpy.data.objects.get(oname)
-                if o and o.type == 'MESH' and o not in target_objs:
-                    target_objs.append(o)
 
-        if not target_objs:
-            target_objs = [
-                o for o in bpy.data.objects
-                if o.type == 'MESH' and (o.vertex_groups.get(VG_BREAST_L) or o.vertex_groups.get(VG_BREAST_R))
-            ]
-
-        if not target_objs:
-            self.report({'ERROR'}, "등록된 모핑 정점이 없습니다. 모핑 본 슬롯에 정점을 먼저 할당해주세요.")
+        if not props.bone_items:
+            self.report({'ERROR'}, "등록된 모핑 본 슬롯이 없습니다. 먼저 [+] 버튼을 눌러 슬롯을 생성하세요.")
             return {'CANCELLED'}
 
-        if context.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+        synced_count = 0
+        for item in props.bone_items:
+            res = sync_slot_bone_to_rig(context, item)
+            if res:
+                synced_count += 1
 
-        for obj in target_objs:
-            ensure_object_visible(context, obj)
-
-        all_left_pts = []
-        all_right_pts = []
-        soft_left_pts = []
-        soft_right_pts = []
-        total_rigid_count = 0
-
-        for obj in target_objs:
-            vg_l = obj.vertex_groups.get(VG_BREAST_L)
-            vg_r = obj.vertex_groups.get(VG_BREAST_R)
-            vg_rigid = obj.vertex_groups.get(VG_RIGID)
-
-            group_map = {}
-            if vg_l: group_map[vg_l.index] = "l"
-            if vg_r: group_map[vg_r.index] = "r"
-            if vg_rigid: group_map[vg_rigid.index] = "rigid"
-
-            arrs = read_vertex_group_arrays(obj, group_map)
-            world = world_vertex_positions(obj)
-
-            rigid_mask = (arrs["rigid"] > 0.5) if "rigid" in arrs else np.zeros(len(world), dtype=bool)
-            total_rigid_count += int(np.count_nonzero(rigid_mask))
-
-            if "l" in arrs:
-                l_mask = arrs["l"] > 0.0001
-                l_idx = np.nonzero(l_mask)[0]
-                for vi in l_idx.tolist():
-                    pt = Vector(world[vi])
-                    all_left_pts.append(pt)
-                    if not rigid_mask[vi]:
-                        soft_left_pts.append(pt)
-
-            if "r" in arrs:
-                r_mask = arrs["r"] > 0.0001
-                r_idx = np.nonzero(r_mask)[0]
-                for vi in r_idx.tolist():
-                    pt = Vector(world[vi])
-                    all_right_pts.append(pt)
-                    if not rigid_mask[vi]:
-                        soft_right_pts.append(pt)
-
-        raw_pts = soft_left_pts + soft_right_pts
-        if not raw_pts:
-            raw_pts = all_left_pts + all_right_pts
-
-        # 중복 정점 제거하여 깨끗한 점군 구성
-        pts_seen = set()
-        unique_pts = []
-        for p in raw_pts:
-            key = (round(p.x, 4), round(p.y, 4), round(p.z, 4))
-            if key not in pts_seen:
-                pts_seen.add(key)
-                unique_pts.append(p)
-
-        if len(unique_pts) < 10:
-            self.report({'ERROR'}, "유효한 가슴 정점을 찾을 수 없습니다. [1. 가슴 영역 선택 등록]을 다시 진행해주세요.")
+        if synced_count == 0:
+            self.report({'WARNING'}, "본 슬롯에 할당된 정점이 부족하여 본을 배치하지 못했습니다. 에디트 모드에서 정점을 선택 후 [선택 정점 할당]을 진행하세요.")
             return {'CANCELLED'}
 
-        pts_arr = np.array([p[:] for p in unique_pts], dtype=np.float64)
-        x_min, x_max = float(np.min(pts_arr[:, 0])), float(np.max(pts_arr[:, 0]))
-        x_mid = 0.0
-
-        pts_l = pts_arr[pts_arr[:, 0] > (x_mid + 0.005)]
-        pts_r = pts_arr[pts_arr[:, 0] < (x_mid - 0.005)]
-
-        # 1. 사용자가 슬롯별로 정점을 지정해 둔 것이 있는지 확인
-        slot_bones_data = []
-        for it in props.bone_items:
-            it_dict = get_bone_data(it)
-            if it_dict and sum(len(v) for v in it_dict.values()) >= 6:
-                it_pts = []
-                for oname, v_indices in it_dict.items():
-                    o = bpy.data.objects.get(oname)
-                    if o and o.type == 'MESH':
-                        w_arr = world_vertex_positions(o)
-                        for vi in v_indices:
-                            if vi < len(w_arr):
-                                it_pts.append(w_arr[vi])
-                if len(it_pts) >= 6:
-                    slot_bones_data.append((it.name, it_pts))
-
-        anchor_info = {}
-
-        if slot_bones_data and len(slot_bones_data) >= 1:
-            # 사용자가 슬롯별로 직접 모핑 영역을 지정한 경우: 각 영역의 기하학적 형태 중심에 본 생성
-            for bname, s_pts in slot_bones_data:
-                center, bmin, bmax = compute_density_invariant_geometric_center(s_pts)
-                depth = max(0.04, bmax.y - bmin.y)
-                span_x = bmax.x - bmin.x
-                span_z = bmax.z - bmin.z
-                bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
-
-                dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
-                head = Vector((center.x, bmax.y, center.z))
-                tail = Vector((center.x + dx_out, bmin.y, center.z))
-                b_vec = tail - head
-                u = b_vec.normalized() if b_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-                anchor_info[bname] = {
-                    "bname": bname,
-                    "centroid": Vector(((head.x + tail.x) * 0.5, (head.y + tail.y) * 0.5, center.z)),
-                    "tip": tail,
-                    "head": head,
-                    "tail": tail,
-                    "fwd_unit": u,
-                    "radius": bone_radius,
-                }
-
-            # 모핑 본 2개가 좌우 대칭으로 배치된 경우 신체 대칭성 보정
-            if len(anchor_info) == 2:
-                _items = list(anchor_info.values())
-                al = _items[0]
-                ar = _items[1]
-                if al["head"].x < ar["head"].x:
-                    al, ar = ar, al
-                z_mid = (al["head"].z + ar["head"].z) * 0.5
-                x_dist = max(0.03, (abs(al["head"].x) + abs(ar["head"].x)) * 0.5)
-                y_base = max(al["head"].y, ar["head"].y)
-                y_front = min(al["tip"].y, ar["tip"].y)
-                al["head"] = Vector((x_dist, y_base, z_mid))
-                al["tail"] = Vector((x_dist * 1.05, y_front, z_mid))
-                al["fwd_unit"] = (al["tail"] - al["head"]).normalized()
-                ar["head"] = Vector((-x_dist, y_base, z_mid))
-                ar["tail"] = Vector((-x_dist * 1.05, y_front, z_mid))
-                ar["fwd_unit"] = (ar["tail"] - ar["head"]).normalized()
-        else:
-            # 기본 모핑 영역 클러스터링: 정점 밀도 편향을 배제하고 전체적인 형태의 중심을 계산
-            if len(pts_l) >= 15 and len(pts_r) >= 15:
-                # 양측 모핑 본: 각 형태의 기하학적 중심 계산
-                center_l, bmin_l, bmax_l = compute_density_invariant_geometric_center(pts_l)
-                center_r, bmin_r, bmax_r = compute_density_invariant_geometric_center(pts_r)
-
-                y_front = min(bmin_l.y, bmin_r.y)
-                y_base = max(bmax_l.y, bmax_r.y)
-                depth = max(0.04, y_base - y_front)
-
-                # 형태 중심 기반 높이(Z) 및 좌우 거리(X) 정밀 정렬
-                z_mid = (center_l.z + center_r.z) * 0.5
-                x_dist = max(0.03, (abs(center_l.x) + abs(center_r.x)) * 0.5)
-
-                span_l = bmax_l.x - bmin_l.x
-                span_r = bmax_r.x - bmin_r.x
-                bone_radius = max(0.06, x_dist * 0.95, depth * 0.80, (span_l + span_r) * 0.25)
-
-                # 좌측 모핑 본 (Breast.L)
-                head_l = Vector((x_dist, y_base, z_mid))
-                tail_l = Vector((1.05 * x_dist, y_front, z_mid))
-                bone_vec_l = tail_l - head_l
-                u_l = bone_vec_l.normalized() if bone_vec_l.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-                bname_l = props.bone_items[0].name if len(props.bone_items) > 0 else "모핑 본 1"
-                bname_r = props.bone_items[1].name if len(props.bone_items) > 1 else "모핑 본 2"
-
-                anchor_info["L"] = {
-                    "bname": bname_l,
-                    "centroid": Vector(((head_l.x + tail_l.x) * 0.5, (head_l.y + tail_l.y) * 0.5, z_mid)),
-                    "tip": tail_l,
-                    "head": head_l,
-                    "tail": tail_l,
-                    "fwd_unit": u_l,
-                    "radius": bone_radius,
-                }
-
-                # 우측 모핑 본
-                head_r = Vector((-x_dist, y_base, z_mid))
-                tail_r = Vector((-1.05 * x_dist, y_front, z_mid))
-                bone_vec_r = tail_r - head_r
-                u_r = bone_vec_r.normalized() if bone_vec_r.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-                anchor_info["R"] = {
-                    "bname": bname_r,
-                    "centroid": Vector(((head_r.x + tail_r.x) * 0.5, (head_r.y + tail_r.y) * 0.5, z_mid)),
-                    "tip": tail_r,
-                    "head": head_r,
-                    "tail": tail_r,
-                    "fwd_unit": u_r,
-                    "radius": bone_radius,
-                }
-            else:
-                # 단일 모핑 영역 (한쪽만 지정한 경우)
-                side = "L" if len(pts_l) > len(pts_r) else "R"
-                target_pts = pts_l if side == "L" else pts_r
-                if len(target_pts) < 10:
-                    target_pts = pts_arr
-
-                center, bmin, bmax = compute_density_invariant_geometric_center(target_pts)
-                depth = max(0.04, bmax.y - bmin.y)
-                span_x = bmax.x - bmin.x
-                span_z = bmax.z - bmin.z
-                bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
-
-                dx_out = (0.05 * abs(center.x)) if side == "L" else (-0.05 * abs(center.x))
-                head = Vector((center.x, bmax.y, center.z))
-                tail = Vector((center.x + dx_out, bmin.y, center.z))
-                bone_vec = tail - head
-                u = bone_vec.normalized() if bone_vec.length > 1e-4 else Vector((0.0, -1.0, 0.0))
-
-                bname = f"모핑 본 {props.bone_item_index + 1}"
-                if len(props.bone_items) > 0 and 0 <= props.bone_item_index < len(props.bone_items):
-                    bname = props.bone_items[props.bone_item_index].name
-
-                anchor_info[side] = {
-                    "bname": bname,
-                    "centroid": Vector(((head.x + tail.x) * 0.5, (head.y + tail.y) * 0.5, center.z)),
-                    "tip": tail,
-                    "head": head,
-                    "tail": tail,
-                    "fwd_unit": u,
-                    "radius": bone_radius,
-                }
-
-        if not anchor_info:
-            self.report({'ERROR'}, "충분한 수의 가슴 정점을 찾을 수 없습니다. [1. 가슴 영역 선택 등록]을 다시 진행해주세요.")
-            return {'CANCELLED'}
-
-        ref_obj = target_objs[0]
-        rig = get_or_create_breast_rig(context, props, ref_obj)
-        ensure_object_visible(context, rig)
-        context.view_layer.objects.active = rig
-        bpy.ops.object.mode_set(mode='EDIT')
-
-        ebones = rig.data.edit_bones
-        for eb in list(ebones):
-            ebones.remove(eb)
-
-        for side, d in anchor_info.items():
-            eb = ebones.new(d["bname"])
-            eb.head = d["head"]
-            eb.tail = d["tail"]
-            eb.head_radius = d["radius"]
-            eb.tail_radius = d["radius"] * 0.7
-            eb.envelope_distance = d["radius"] * 1.4
-            eb["xxmi_bone_type"] = "BREAST"
-            eb["xxmi_side"] = side
-
-        bpy.ops.object.mode_set(mode='OBJECT')
-        rig.show_in_front = True
-        context.view_layer.objects.active = rig
-        rig.select_set(True)
+        rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
+        if rig:
+            rig.show_in_front = True
+            context.view_layer.objects.active = rig
+            rig.select_set(True)
 
         self.report(
             {'INFO'},
-            "모핑 본 생성 완료! 뷰포트에서 본의 위치/각도를 확인하고 필요시 [2. 강체(액세서리) 설정] 또는 [3. 가중치 계산 & 물리 프리뷰]로 이동하세요."
+            f"총 {synced_count}개 모핑 본 위치 및 크기 배치 완료! 뷰포트에서 본의 위치를 확인하고 필요시 에디트 모드에서 미세 조정한 뒤 3패널에서 가중치를 계산하세요."
         )
         return {'FINISHED'}
 
@@ -587,8 +345,10 @@ def sync_slot_bone_to_rig(context, item):
     bone_radius = max(0.05, span_x * 0.5, span_z * 0.5, depth * 0.75)
 
     dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
-    head = Vector((center.x, bmax.y, center.z - span_z * 0.2))
-    tail = Vector((center.x + dx_out, bmin.y, center.z + span_z * 0.1))
+    head = Vector((center.x, bmax.y, center.z))
+    tail = Vector((center.x + dx_out, bmin.y, center.z))
+    if (tail - head).length < 0.04:
+        tail = Vector((center.x + dx_out, head.y - 0.04, center.z))
 
     was_mode = context.mode
     active_obj = context.view_layer.objects.active
@@ -709,10 +469,7 @@ def subtract_rigid_from_bone_slot_data(item, rigid_verts_by_obj, keep_boundary=T
         kept_boundary_count += len(boundary_verts)
 
         # 오브젝트의 버텍스 그룹에서도 제거된 정점 제외
-        vg_target_name = (
-            VG_BREAST_L if item.name.lower() in ('breast.l', 'l')
-            else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
-        )
+        vg_target_name = f"XXMI_{item.name}"
         vg = obj.vertex_groups.get(vg_target_name)
         if vg and to_remove:
             vg.remove(list(to_remove))
@@ -755,7 +512,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         data = {}
-        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
+        vg_target_name = f"XXMI_{item.name}"
         if target_objs:
             for obj in target_objs:
                 mesh = obj.data
@@ -846,7 +603,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         assigned_any = False
-        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
+        vg_target_name = f"XXMI_{item.name}"
 
         for obj in target_objs:
             mesh = obj.data
@@ -1049,7 +806,7 @@ class XXMI_OT_bone_item_remove_verts(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         removed_any = False
-        vg_target_name = VG_BREAST_L if item.name.lower() in ('breast.l', 'l') else (VG_BREAST_R if item.name.lower() in ('breast.r', 'r') else f"XXMI_{item.name}")
+        vg_target_name = f"XXMI_{item.name}"
 
         for obj in target_objs:
             if obj.name not in data:
@@ -1117,14 +874,14 @@ class XXMI_OT_copy_bone_weights_to_all(bpy.types.Operator):
 
 class XXMI_OT_clear_breast_physics(bpy.types.Operator):
     bl_idname = "object.xxmi_clear_breast_physics"
-    bl_label = "가슴 물리 설정 전체 초기화"
-    bl_description = "생성된 물리 본과 가슴 가중치 설정을 모두 지우고 초기화합니다"
+    bl_label = "모핑 본 & 물리 전체 초기화"
+    bl_description = "생성된 물리 본과 모핑 가중치 설정을 모두 지우고 초기화합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        props = context.scene.xxmi_custom_physics_props
-        return props.anchor_obj is not None or bpy.data.objects.get(BREAST_RIG_NAME) is not None
+        props = getattr(context.scene, "xxmi_custom_physics_props", None)
+        return props is not None and (props.anchor_obj is not None or bpy.data.objects.get(BREAST_RIG_NAME) is not None or len(props.bone_items) > 0)
 
     def execute(self, context):
         if context.mode != 'OBJECT':
@@ -1135,24 +892,30 @@ class XXMI_OT_clear_breast_physics(bpy.types.Operator):
         if props.is_preview_running:
             stop_physics_preview(context)
 
-        rig = props.anchor_obj or bpy.data.objects.get(BREAST_RIG_NAME)
-        if rig:
-            bpy.data.objects.remove(rig, do_unlink=True)
-            props.anchor_obj = None
+        for r_name in (BREAST_RIG_NAME, "XXMI_Physics_Rig", "XXMI_Breast_Rig"):
+            rig = bpy.data.objects.get(r_name)
+            if rig:
+                bpy.data.objects.remove(rig, do_unlink=True)
+        props.anchor_obj = None
+
+        bone_names = [it.name for it in props.bone_items]
+        target_vgs = [f"XXMI_{bn}" for bn in bone_names] + [VG_BREAST_L, VG_BREAST_R, VG_RIGID, "XXMI_Physics"]
 
         cleared_objs = 0
         for obj in bpy.data.objects:
             if obj.type == 'MESH':
                 removed_any = False
-                for vg_name in (VG_BREAST_L, VG_BREAST_R, VG_RIGID):
-                    vg = obj.vertex_groups.get(vg_name)
-                    if vg:
+                for vg in list(obj.vertex_groups):
+                    if vg.name.startswith("XXMI_") or vg.name in target_vgs:
                         obj.vertex_groups.remove(vg)
                         removed_any = True
                 if removed_any:
                     cleared_objs += 1
 
-        self.report({'INFO'}, f"가슴 물리 설정 초기화 완료 ({cleared_objs}개 메쉬 오브젝트 가중치 제거됨).")
+        props.bone_items.clear()
+        props.bone_item_index = 0
+
+        self.report({'INFO'}, f"모핑 물리 설정 초기화 완료 ({cleared_objs}개 메쉬 오브젝트 가중치 제거됨).")
         return {'FINISHED'}
 
 

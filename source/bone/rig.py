@@ -2,33 +2,38 @@ import bpy
 from mathutils import Vector
 from ..utils import ensure_object_visible
 
-BREAST_RIG_NAME = "XXMI_Breast_Rig"
+PHYSICS_RIG_NAME = "XXMI_Physics_Rig"
+BREAST_RIG_NAME = PHYSICS_RIG_NAME
 VG_BREAST_L = "XXMI_Breast_L"
 VG_BREAST_R = "XXMI_Breast_R"
 
 
-def get_or_create_breast_rig(context, props, ref_obj):
-    """가슴 물리 앵커 역할을 하는 Armature(XXMI_Breast_Rig)를 가져오거나 새로 생성합니다."""
+def get_or_create_physics_rig(context, props, ref_obj):
+    """물리 앵커 역할을 하는 Armature(XXMI_Physics_Rig)를 가져오거나 새로 생성합니다."""
     rig = props.anchor_obj
     if rig and rig.name in bpy.data.objects and rig.type == 'ARMATURE':
         ensure_object_visible(context, rig)
         return rig
 
-    existing = bpy.data.objects.get(BREAST_RIG_NAME)
-    if existing and existing.type == 'ARMATURE':
-        props.anchor_obj = existing
-        ensure_object_visible(context, existing)
-        return existing
+    for r_name in (PHYSICS_RIG_NAME, "XXMI_Breast_Rig"):
+        existing = bpy.data.objects.get(r_name)
+        if existing and existing.type == 'ARMATURE':
+            props.anchor_obj = existing
+            ensure_object_visible(context, existing)
+            return existing
 
-    arm_data = bpy.data.armatures.new(BREAST_RIG_NAME)
+    arm_data = bpy.data.armatures.new(PHYSICS_RIG_NAME)
     arm_data.display_type = 'OCTAHEDRAL'
 
-    rig = bpy.data.objects.new(BREAST_RIG_NAME, arm_data)
+    rig = bpy.data.objects.new(PHYSICS_RIG_NAME, arm_data)
     rig.show_in_front = True
     col = ref_obj.users_collection[0] if (ref_obj and ref_obj.users_collection) else context.scene.collection
     col.objects.link(rig)
     props.anchor_obj = rig
     return rig
+
+
+get_or_create_breast_rig = get_or_create_physics_rig
 
 
 def get_rig_bone_info(rig):
