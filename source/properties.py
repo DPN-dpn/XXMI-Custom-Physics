@@ -154,49 +154,12 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     )
 
 
-def get_target_bone_enum_items(self, context):
-    items = [
-        ('AUTO', "자동 (최근접 모핑 본)", "3D 위치에 따라 가장 가까운 모핑 본을 자동으로 추종합니다"),
-    ]
-    seen_ids = {'AUTO'}
-
-    # 1. 씬의 bone_items에 등록된 모핑 본들 동적 추가
-    if context and hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
-        props = context.scene.xxmi_custom_physics_props
-        for it in props.bone_items:
-            if it.name and it.name not in seen_ids:
-                seen_ids.add(it.name)
-                items.append((it.name, f"{it.name} (모핑 본)", f"'{it.name}' 모핑 본에 100% 고정되어 따라 움직입니다"))
-
-    # 2. 씬 내 가상 물리 스켈레톤(XXMI_Physics_Rig)에 실제 존재하는 본들 추가
-    rig = None
-    if context and hasattr(context, "scene") and hasattr(context.scene, "xxmi_custom_physics_props"):
-        rig = context.scene.xxmi_custom_physics_props.anchor_obj
-    if not rig:
-        rig = bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
-    if rig and rig.type == 'ARMATURE':
-        for b in rig.data.bones:
-            if b.name not in seen_ids:
-                seen_ids.add(b.name)
-                items.append((b.name, f"{b.name} (모핑 본)", f"스켈레톤 내 '{b.name}' 본에 100% 고정됩니다"))
-
-    if 'CENTER' not in seen_ids:
-        items.append(('CENTER', "중앙 일체화 (모핑 본 중첩)", "양쪽 모핑 본의 움직임을 균일하게 공유하여 매듭/버클이 찢어지지 않습니다"))
-
-    return items
-
-
 class XXMI_PG_rigid_item(bpy.types.PropertyGroup):
     """개별 강체 부품(단추, 무전기, 리본 등)을 독립 슬롯으로 관리하는 데이터 구조입니다."""
     name: bpy.props.StringProperty(
         name="강체 이름",
         default="새 강체",
         description="강체 부품의 식별 이름입니다"
-    )
-    target_bone: bpy.props.StringProperty(
-        name="목표 본",
-        default="",
-        description="특정 본에 강제 고정할 경우 지정합니다 (비워두면 표면 위치를 기반으로 자동 간접 추종)"
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(

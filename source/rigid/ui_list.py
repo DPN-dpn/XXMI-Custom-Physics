@@ -8,14 +8,9 @@ class XXMI_UL_rigid_items(bpy.types.UIList):
             row = layout.row(align=True)
             row.label(text="", icon='PINNED')
             row.prop(item, "name", text="", emboss=False)
-            bone_label = "자동"
-            if item.target_bone == 'CENTER':
-                bone_label = "중앙일체화"
-            elif item.target_bone != 'AUTO':
-                bone_label = item.target_bone
             sub = row.row()
             sub.alignment = 'RIGHT'
-            sub.label(text=f"[{bone_label} | {item.vert_count}개]")
+            sub.label(text=f"[{item.vert_count}개 | x{item.weight_scale:.2f}]")
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text="", icon='PINNED')

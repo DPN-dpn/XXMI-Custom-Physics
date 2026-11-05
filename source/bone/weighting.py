@@ -713,7 +713,8 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             kd.balance()
             bone_kd_map[bname] = (kd, soft_weights)
 
-    # 다중 강체 슬롯 가중치 계산 및 할당 (통합 표면 간접 추종 / Surface Proximity Transfer)
+    # 다중 강체 슬롯 가중치 계산 및 할당 (통합 표면 간접 추종 / Universal Surface Proximity Transfer)
+    # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭) 모두 자동 지원
     applied_slots = 0
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -721,56 +722,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             continue
 
         w_scale = getattr(item, "weight_scale", 1.0)
-        t_bone = getattr(item, "target_bone", "").strip()
 
-        # 사용자가 특정 본을 명시적으로 지정한 경우: 단일 본 완전 고정 오버라이드
-        if t_bone and t_bone != 'AUTO' and (t_bone in active_bones or f"XXMI_{t_bone}" in [f"XXMI_{b}" for b in active_bones]):
-            target_bname = t_bone if t_bone in active_bones else t_bone.replace("XXMI_", "")
-            target_vg_name = f"XXMI_{target_bname}"
-
-            slot_pts = []
-            for oname, vis in rdata.items():
-                robj = bpy.data.objects.get(oname)
-                if robj and robj.type == 'MESH':
-                    r_world = world_vertex_positions(robj)
-                    for vi in vis:
-                        if vi < len(r_world):
-                            slot_pts.append(Vector(r_world[vi]))
-            c_cent = Vector(np.mean([p[:] for p in slot_pts], axis=0)) if slot_pts else Vector((0.0, 0.0, 0.0))
-
-            surf_w = 0.0
-            if target_bname in bone_kd_map and slot_pts:
-                kd, s_weights = bone_kd_map[target_bname]
-                hits = kd.find_range(c_cent, 0.08)
-                if not hits:
-                    hits = [kd.find(c_cent)]
-                valid_hits = [h for h in hits if h is not None and h[0] is not None]
-                if valid_hits:
-                    ws = [s_weights[h[1]] for h in valid_hits if s_weights[h[1]] > 0.001]
-                    if ws:
-                        surf_w = float(np.mean(ws))
-            anat_w = eval_bone_weight_at_point(c_cent, target_bname, bone_info, props)
-            base_w = surf_w if surf_w > 0.01 else anat_w
-            final_rigid_w = min(1.0, max(0.02, base_w * w_scale))
-
-            for oname, vis in rdata.items():
-                robj = bpy.data.objects.get(oname)
-                if not robj or robj.type != 'MESH' or not vis:
-                    continue
-                vg_target = robj.vertex_groups.get(target_vg_name) or robj.vertex_groups.new(name=target_vg_name)
-                vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
-                vg_rigid.add(vis, 1.0, 'REPLACE')
-                vg_target.add(vis, final_rigid_w, 'REPLACE')
-                for obn in active_bones:
-                    if obn != target_bname:
-                        o_vg = robj.vertex_groups.get(f"XXMI_{obn}")
-                        if o_vg:
-                            o_vg.remove(vis)
-            applied_slots += 1
-            continue
-
-        # ── [표면 간접 추종 (기본값 / Universal Surface Proximity Transfer)] ──
-        # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭) 모두 자동 지원
         for oname, vis in rdata.items():
             robj = bpy.data.objects.get(oname)
             if not robj or robj.type != 'MESH' or not vis:

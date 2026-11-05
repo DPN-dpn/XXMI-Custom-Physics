@@ -15,8 +15,7 @@ def handle_bone_item_rename(item, context=None):
     모핑 본 슬롯의 이름(item.name)이 변경되었을 때:
     1. 관련 메쉬들의 버텍스 그룹 이름을 XXMI_<이전이름>에서 XXMI_<새이름>으로 일괄 변경
     2. 물리 리그(XXMI_Physics_Rig / XXMI_Breast_Rig) 내의 본 이름 변경
-    3. 강체 슬롯(props.rigid_items)의 target_bone 참조 변경
-    4. item.prev_name 갱신
+    3. item.prev_name 갱신
     """
     if not item:
         return
@@ -76,12 +75,6 @@ def handle_bone_item_rename(item, context=None):
                     bpy.ops.object.mode_set(mode='EDIT')
             except Exception:
                 pass
-
-    # 3. 강체 슬롯의 target_bone 참조 갱신
-    if props:
-        for r_item in props.rigid_items:
-            if r_item.target_bone == prev_name:
-                r_item.target_bone = new_name
 
     item.prev_name = new_name
 
