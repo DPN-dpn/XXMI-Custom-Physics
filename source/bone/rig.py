@@ -29,7 +29,7 @@ def get_or_create_physics_rig(context, props, ref_obj):
             return existing
 
     arm_data = bpy.data.armatures.new(PHYSICS_RIG_NAME)
-    arm_data.display_type = 'OCTAHEDRAL'
+    arm_data.display_type = 'ENVELOPE' if getattr(props, "show_envelope_gizmo", False) else 'OCTAHEDRAL'
 
     rig = bpy.data.objects.new(PHYSICS_RIG_NAME, arm_data)
     rig.show_in_front = True
@@ -79,7 +79,17 @@ def get_rig_bone_info(rig):
         if pb:
             scale_factor = max(abs(pb.scale.x), abs(pb.scale.y), abs(pb.scale.z))
 
-        if db.envelope_distance > 0.005:
+        base_r = db.get("xxmi_base_radius", None)
+        if base_r is not None:
+            r_scale = 1.15
+            props = getattr(bpy.context.scene, "xxmi_custom_physics_props", None) if bpy.context else None
+            if props and hasattr(props, "bone_items"):
+                for it in props.bone_items:
+                    if it.name.lower() == bname.lower():
+                        r_scale = max(0.2, float(getattr(it, "radius_scale", 1.15)))
+                        break
+            radius = float(base_r) * r_scale * scale_factor
+        elif db.envelope_distance > 0.005:
             radius = db.envelope_distance * scale_factor
         elif db.head_radius > 0.005:
             radius = db.head_radius * scale_factor
@@ -154,7 +164,9 @@ def sync_slot_bone_to_rig(context, item):
     depth = max(0.04, bmax.y - bmin.y)
     span_x = max(0.04, bmax.x - bmin.x)
     span_z = max(0.04, bmax.z - bmin.z)
-    bone_radius = max(0.045, span_x * 0.50, span_z * 0.50)
+    base_radius = max(0.045, span_x * 0.50, span_z * 0.50)
+    r_scale = max(0.2, float(getattr(item, "radius_scale", 1.15)))
+    bone_radius = base_radius * r_scale
 
     dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
     head = Vector((center.x, bmax.y, center.z))
@@ -186,10 +198,12 @@ def sync_slot_bone_to_rig(context, item):
             s_tail = head + vec_delta * (si + 1)
             eb.head = s_head
             eb.tail = s_tail
-            seg_radius = bone_radius * (1.0 - 0.4 * (si / max(1, n_segs)))
+            seg_base = base_radius * (1.0 - 0.4 * (si / max(1, n_segs)))
+            seg_radius = seg_base * r_scale
+            eb["xxmi_base_radius"] = float(seg_base)
             eb.head_radius = seg_radius
             eb.tail_radius = seg_radius * 0.8
-            eb.envelope_distance = seg_radius * 1.3
+            eb.envelope_distance = seg_radius * 1.05
             eb["xxmi_bone_type"] = btype
             if prev_bone:
                 eb.parent = prev_bone
@@ -203,8 +217,9 @@ def sync_slot_bone_to_rig(context, item):
 
         eb.head = head
         eb.tail = tail
+        eb["xxmi_base_radius"] = float(base_radius)
         eb.head_radius = bone_radius
-        eb.tail_radius = bone_radius * 0.7
+        eb.tail_radius = bone_radius * 0.75
         eb.envelope_distance = bone_radius * 1.05
         eb["xxmi_bone_type"] = btype
 
@@ -219,6 +234,47 @@ def sync_slot_bone_to_rig(context, item):
         bpy.ops.object.mode_set(mode='EDIT')
 
     return bone_out_name
+
+
+def update_rig_bone_radius_from_slot(context, item):
+    """
+    1번 패널에서 본 반경 배율(radius_scale) 슬라이더를 조절할 때
+    실시간으로 XXMI_Physics_Rig 내 해당 본의 head_radius, tail_radius, envelope_distance를 갱신합니다.
+    """
+    if not item:
+        return
+    props = getattr(context.scene, "xxmi_custom_physics_props", None) if context else None
+    rig = (getattr(props, "anchor_obj", None) if props else None) or bpy.data.objects.get(PHYSICS_RIG_NAME)
+    if not rig or rig.type != 'ARMATURE':
+        return
+
+    r_scale = max(0.2, float(getattr(item, "radius_scale", 1.15)))
+    bname_low = item.name.strip().lower()
+
+    if rig.mode == 'EDIT':
+        for eb in rig.data.edit_bones:
+            eb_low = eb.name.lower()
+            if eb_low == bname_low or eb_low.startswith(f"{bname_low}."):
+                base_r = eb.get("xxmi_base_radius", None)
+                if base_r is None:
+                    base_r = max(0.045, eb.head_radius / 1.15)
+                    eb["xxmi_base_radius"] = float(base_r)
+                seg_r = float(base_r) * r_scale
+                eb.head_radius = seg_r
+                eb.tail_radius = seg_r * 0.75
+                eb.envelope_distance = seg_r * 1.05
+    else:
+        for db in rig.data.bones:
+            db_low = db.name.lower()
+            if db_low == bname_low or db_low.startswith(f"{bname_low}."):
+                base_r = db.get("xxmi_base_radius", None)
+                if base_r is None:
+                    base_r = max(0.045, db.head_radius / 1.15)
+                    db["xxmi_base_radius"] = float(base_r)
+                seg_r = float(base_r) * r_scale
+                db.head_radius = seg_r
+                db.tail_radius = seg_r * 0.75
+                db.envelope_distance = seg_r * 1.05
 
 
 def reposition_all_slot_bones(context, props):

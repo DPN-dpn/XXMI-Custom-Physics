@@ -124,6 +124,123 @@ def calculate_anatomical_weights_with_anti_clipping(world_pts, head, tail_or_fwd
     return w_arr
 
 
+def dilate_mask_topological(mask, e0, e1, steps=2):
+    """메쉬 엣지 연결성을 따라 불리언 마스크를 지정된 링(step) 수만큼 확장합니다."""
+    out = mask.copy()
+    if len(e0) == 0 or steps <= 0:
+        return out
+    for _ in range(steps):
+        nxt = out.copy()
+        nxt[e0] |= out[e1]
+        nxt[e1] |= out[e0]
+        out = nxt
+    return out
+
+
+def calculate_bridged_pair_weights(
+    world_pts,
+    head_a, tail_a, radius_a, falloff_a, peak_a,
+    head_b, tail_b, radius_b, falloff_b, peak_b,
+):
+    """
+    인접한 두 모핑 본(예: 좌/우 가슴) 사이의 중첩/브릿지 영역에서
+    3D Lofted Capsule(리본 엔벨로프)과 Raised-Cosine Partition of Unity를 결합하여
+    가슴 중앙이 꺼지거나 부자연스럽게 꺾이지 않고 일체감 있게 연동되도록 (w_a, w_b)를 계산합니다.
+    """
+    if len(world_pts) == 0:
+        empty = np.array([], dtype=np.float64)
+        return empty, empty
+
+    w_a_indiv = calculate_anatomical_weights_with_anti_clipping(
+        world_pts, head_a, tail_a, radius_a, falloff_a, peak_a
+    )
+    w_b_indiv = calculate_anatomical_weights_with_anti_clipping(
+        world_pts, head_b, tail_b, radius_b, falloff_b, peak_b
+    )
+
+    ha = np.array(head_a, dtype=np.float64)
+    ta = np.array(tail_a, dtype=np.float64)
+    hb = np.array(head_b, dtype=np.float64)
+    tb = np.array(tail_b, dtype=np.float64)
+
+    u_ab = hb - ha
+    d_ab = float(np.linalg.norm(u_ab))
+    if d_ab < 1e-4:
+        return w_a_indiv, w_b_indiv
+
+    u_dir = u_ab / d_ab
+    ra = max(0.02, float(radius_a))
+    rb = max(0.02, float(radius_b))
+
+    # 1. 두 본을 잇는 축 상의 정규화 위치 s (s=0: 본 A 중심, s=0.5: 중앙선, s=1: 본 B 중심)
+    s = ((world_pts - ha) @ u_dir) / d_ab
+    s_c = np.clip(s, 0.0, 1.0)
+
+    # 2. s_c 위치에서의 보간된 브릿지 본 세그먼트 [H(s_c) -> T(s_c)]
+    h_s = (1.0 - s_c)[:, None] * ha[None, :] + s_c[:, None] * hb[None, :]
+    t_s = (1.0 - s_c)[:, None] * ta[None, :] + s_c[:, None] * tb[None, :]
+    r_s = (1.0 - s_c) * ra + s_c * rb
+    peak_s = (1.0 - s_c) * float(peak_a) + s_c * float(peak_b)
+    falloff_s = (1.0 - s_c) * float(falloff_a) + s_c * float(falloff_b)
+
+    vec_s = t_s - h_s
+    len_s = np.linalg.norm(vec_s, axis=1)
+    safe_len_s = np.maximum(1e-5, len_s)
+    unit_s = vec_s / safe_len_s[:, None]
+
+    # 전방 깊이 감쇠 (맨살 가슴골처럼 흉벽에 붙어 있으면 t_proj ~ 0 이 되어 자동으로 0 유지,
+    # 일체형 셔츠처럼 앞으로 떠 있으면 t_proj > 0 이 되어 자연스러운 볼륨 유지)
+    pts_rel = world_pts - h_s
+    t_proj = np.sum(pts_rel * unit_s, axis=1)
+    t_clamped = np.clip(t_proj / safe_len_s, 0.0, 1.0)
+    w_depth = np.where(t_proj > 0.0, 0.5 * (1.0 - np.cos(np.pi * t_clamped)), 0.0)
+
+    # 브릿지 리본 표면으로부터의 3D 수직 거리 및 방사형 Hann 코사인 감쇠
+    proj_pts = h_s + t_clamped[:, None] * vec_s
+    d_perp = np.linalg.norm(world_pts - proj_pts, axis=1)
+    max_r_s = r_s * 1.30
+    rho_norm = np.clip(d_perp / np.maximum(1e-5, max_r_s), 0.0, 1.0)
+    w_radial = np.where(d_perp < max_r_s, 0.5 * (1.0 + np.cos(np.pi * rho_norm)), 0.0)
+
+    eff_power = 0.35 * np.maximum(0.05, falloff_s)
+    w_loft = peak_s * np.power(np.maximum(0.0, w_depth * w_radial), eff_power)
+    w_loft = np.where((w_radial > 0.0) & (w_depth > 0.0), np.clip(w_loft, 0.0, 1.0), 0.0)
+
+    # 3. 본 반경(radius_a + radius_b)에 비례하는 브릿지 장력 보존 및 크로스 블렌딩 폭 결정
+    reach_ratio = (1.30 * (ra + rb)) / d_ab
+    bridge_strength = float(np.clip((reach_ratio - 0.85) / 0.55, 0.0, 1.0))
+
+    w_indiv_sum = np.minimum(peak_s, w_a_indiv + w_b_indiv)
+    w_total = (1.0 - bridge_strength) * w_indiv_sum + bridge_strength * np.maximum(w_indiv_sum, w_loft)
+
+    # 중앙(s=0.5) 기준 좌/우 Raised-Cosine Partition of Unity (alpha_a + alpha_b == 1.0)
+    sigma = float(np.clip(0.42 * ((ra + rb) / d_ab), 0.12, 0.90))
+    tau = np.clip((s - (0.5 - sigma)) / max(1e-4, 2.0 * sigma), 0.0, 1.0)
+    alpha_b = 0.5 * (1.0 - np.cos(np.pi * tau))
+    alpha_a = 1.0 - alpha_b
+
+    w_a_out = np.where(w_total > 0.0005, alpha_a * w_total, 0.0)
+    w_b_out = np.where(w_total > 0.0005, alpha_b * w_total, 0.0)
+
+    # 동일 3D 좌표(UV 심/하드 엣지) 0.5mm 이내 정점 동기화
+    if len(world_pts) > 1:
+        kd = KDTree(len(world_pts))
+        for k, pt in enumerate(world_pts.tolist()):
+            kd.insert(Vector(pt), k)
+        kd.balance()
+        for idx in range(len(world_pts)):
+            co = Vector(world_pts[idx])
+            hits = kd.find_range(co, 0.0005)
+            if len(hits) > 1:
+                max_wa = max(w_a_out[h_idx] for _, h_idx, _ in hits)
+                max_wb = max(w_b_out[h_idx] for _, h_idx, _ in hits)
+                for _, h_idx, _ in hits:
+                    w_a_out[h_idx] = max_wa
+                    w_b_out[h_idx] = max_wb
+
+    return w_a_out, w_b_out
+
+
 def eval_bone_weight_at_point(pt, bname, bone_info, props=None, falloff_p=1.0, peak_w=0.40):
     """
     3D 월드 상의 한 점(강체의 중심점 등)에서 해당 물리 본(bname)에 의한
@@ -891,7 +1008,9 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
     updated_obj_count = len(obj_data)
 
-    # 3. 각 모핑 본별 독립 가중치 계산 (슬롯별 설정 및 본 위치 반영)
+    # 3.0. 활성 본 메타데이터 수집 및 오브젝트별 통합 물리 허용 풀(Union Pool) 구축
+    resolved_bones = {}
+    slot_verts_by_bone = {}
     for bname in active_bones:
         bentry = bone_info.get(bname)
         if not bentry:
@@ -902,8 +1021,166 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                     break
         if not bentry:
             continue
+        b_item = get_bone_item(props, bname)
+        b_type = getattr(b_item, "bone_type", "MORPH") if b_item else "MORPH"
+        resolved_bones[bname] = {
+            "entry": bentry,
+            "params": get_bone_params(props, bname),
+            "item": b_item,
+            "bone_type": b_type,
+        }
+        slot_verts_by_bone[bname] = get_bone_data(b_item) if b_item else {}
 
-        b_params = get_bone_params(props, bname)
+    for obj, odata in obj_data.items():
+        n_v = len(odata["world"])
+        rigid_mask = odata["rigid_mask"]
+        e0, e1 = mesh_edge_arrays(obj.data)
+
+        per_bone_masks = {}
+        union_mask = np.zeros(n_v, dtype=bool)
+        for bname in resolved_bones.keys():
+            vis = slot_verts_by_bone.get(bname, {}).get(obj.name, [])
+            if vis:
+                bm = np.zeros(n_v, dtype=bool)
+                valid_vis = [v for v in vis if v < n_v]
+                if valid_vis:
+                    bm[valid_vis] = True
+                    per_bone_masks[bname] = bm
+                    union_mask |= bm
+
+        # 인접 슬롯 간 선택 경계에 1~2엣지 미세 틈이 있을 경우 외곽은 넓히지 않고 내부 사잇길만 자동 연결
+        if len(per_bone_masks) >= 2 and len(e0) > 0:
+            dilated_map = {
+                bn: dilate_mask_topological(bm, e0, e1, steps=2)
+                for bn, bm in per_bone_masks.items()
+            }
+            bn_list = list(dilated_map.keys())
+            for i in range(len(bn_list)):
+                for j in range(i + 1, len(bn_list)):
+                    union_mask |= (dilated_map[bn_list[i]] & dilated_map[bn_list[j]])
+
+        union_mask &= ~rigid_mask
+        odata["union_mask"] = union_mask
+        odata["has_registered_union"] = bool(np.any(union_mask))
+        odata["per_bone_masks"] = per_bone_masks
+
+    # 3.1. 인접/대칭 모핑 본 쌍(예: 좌/우 가슴) 자동 감지
+    paired_bones = set()
+    bridge_pairs = []
+    morph_bnames = [bn for bn, info in resolved_bones.items() if info["bone_type"] == "MORPH"]
+    for i in range(len(morph_bnames)):
+        bn_a = morph_bnames[i]
+        if bn_a in paired_bones:
+            continue
+        ea = resolved_bones[bn_a]["entry"]
+        ha = np.array(ea["head"], dtype=np.float64)
+        ra = max(0.02, float(ea["radius"]))
+
+        best_partner = None
+        best_dist = 1e9
+        for j in range(i + 1, len(morph_bnames)):
+            bn_b = morph_bnames[j]
+            if bn_b in paired_bones:
+                continue
+            eb = resolved_bones[bn_b]["entry"]
+            hb = np.array(eb["head"], dtype=np.float64)
+            rb = max(0.02, float(eb["radius"]))
+
+            d_ab = float(np.linalg.norm(hb - ha))
+            dz = abs(float(ha[2] - hb[2]))
+            if 0.015 < d_ab <= (ra + rb) * 2.5 and dz < 0.12 and d_ab < best_dist:
+                best_dist = d_ab
+                best_partner = bn_b
+
+        if best_partner is not None:
+            paired_bones.add(bn_a)
+            paired_bones.add(best_partner)
+            bridge_pairs.append((bn_a, best_partner))
+
+    # 3.2. 인접 모핑 본 쌍에 대한 통합 풀(Union Pool) & 브릿지 크로스 블렌딩 가중치 계산
+    for bn_a, bn_b in bridge_pairs:
+        info_a = resolved_bones[bn_a]
+        info_b = resolved_bones[bn_b]
+        ea, pa = info_a["entry"], info_a["params"]
+        eb, pb = info_b["entry"], info_b["params"]
+
+        ha = np.array(ea["head"], dtype=np.float64)
+        ta = np.array(ea["tail"], dtype=np.float64)
+        ca = np.array(ea["centroid"], dtype=np.float64)
+        fa = np.array(ea["fwd_unit"], dtype=np.float64)
+        ra = max(0.02, float(ea["radius"]))
+
+        hb = np.array(eb["head"], dtype=np.float64)
+        tb = np.array(eb["tail"], dtype=np.float64)
+        cb = np.array(eb["centroid"], dtype=np.float64)
+        fb = np.array(eb["fwd_unit"], dtype=np.float64)
+        rb = max(0.02, float(eb["radius"]))
+
+        vg_name_a = f"XXMI_{bn_a}"
+        vg_name_b = f"XXMI_{bn_b}"
+        lock_reg = pa["lock_registered_verts"] and pb["lock_registered_verts"]
+
+        pair_cand = []
+        for obj, odata in obj_data.items():
+            vg_a = obj.vertex_groups.get(vg_name_a) or obj.vertex_groups.new(name=vg_name_a)
+            vg_b = obj.vertex_groups.get(vg_name_b) or obj.vertex_groups.new(name=vg_name_b)
+            world = odata["world"]
+            rigid_mask = odata["rigid_mask"]
+            n_v = len(world)
+
+            # 비강체 정점들의 기존 가중치 초기화 (반경 축소 시 잔여 가중치 완전 제거)
+            non_rig_list = np.nonzero(~rigid_mask)[0].tolist()
+            if non_rig_list:
+                vg_a.remove(non_rig_list)
+                vg_b.remove(non_rig_list)
+
+            if odata["has_registered_union"] and lock_reg:
+                cand_mask = odata["union_mask"]
+            else:
+                dist_a = np.linalg.norm(world - ca, axis=1)
+                front_a = ((world - ha) @ fa) >= -ra * 0.25
+                dist_b = np.linalg.norm(world - cb, axis=1)
+                front_b = ((world - hb) @ fb) >= -rb * 0.25
+                env_mask = ((dist_a <= ra * 1.30) & front_a) | ((dist_b <= rb * 1.30) & front_b)
+                if odata["has_registered_union"]:
+                    cand_mask = (odata["union_mask"] | env_mask) & ~rigid_mask
+                else:
+                    cand_mask = env_mask & ~rigid_mask
+
+            cand_idx = np.nonzero(cand_mask)[0]
+            for vi in cand_idx.tolist():
+                pair_cand.append((obj, vg_a, vg_b, vi, world[vi]))
+
+        if not pair_cand:
+            continue
+
+        cand_pts = np.array([c[4] for c in pair_cand], dtype=np.float64)
+        w_a_arr, w_b_arr = calculate_bridged_pair_weights(
+            cand_pts,
+            ha, ta, ra, pa["falloff_power"], pa["peak_weight"],
+            hb, tb, rb, pb["falloff_power"], pb["peak_weight"],
+        )
+
+        for (obj, vg_a, vg_b, vi, _), wa, wb in zip(pair_cand, w_a_arr.tolist(), w_b_arr.tolist()):
+            if wa > 0.0005:
+                vg_a.add([vi], max(0.0, min(1.0, wa)), 'REPLACE')
+                total_recomputed_verts += 1
+            else:
+                vg_a.remove([vi])
+
+            if wb > 0.0005:
+                vg_b.add([vi], max(0.0, min(1.0, wb)), 'REPLACE')
+                total_recomputed_verts += 1
+            else:
+                vg_b.remove([vi])
+
+    # 3.3. 단독 물리 본별 가중치 계산
+    for bname, info in resolved_bones.items():
+        if bname in paired_bones:
+            continue
+
+        bentry = info["entry"]
+        b_params = info["params"]
         side_falloff_p = b_params["falloff_power"]
         side_peak_w = b_params["peak_weight"]
         side_lock_registered = b_params["lock_registered_verts"]
@@ -916,43 +1193,32 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         eff_radius = max(0.02, radius)
 
         vg_target_name = f"XXMI_{bname}"
-
-        # 해당 슬롯의 정점 사전 데이터 가져오기
-        b_item = get_bone_item(props, bname)
-        b_item_verts = get_bone_data(b_item) if b_item else {}
+        b_item_verts = slot_verts_by_bone.get(bname, {})
 
         side_cand = []
-        zero_entries = []
-
         for obj, odata in obj_data.items():
             vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
             world = odata["world"]
             rigid_mask = odata["rigid_mask"]
             n_v = len(world)
 
+            non_rig_list = np.nonzero(~rigid_mask)[0].tolist()
+            if non_rig_list:
+                vg.remove(non_rig_list)
+
             slot_obj_verts = set(b_item_verts.get(obj.name, []))
-
-            cur_vg = obj.vertex_groups.get(vg_target_name)
-            cur_arr = read_vertex_group_arrays(obj, {cur_vg.index: "cur"})["cur"] if cur_vg else np.zeros(n_v)
-            is_registered_b = (cur_arr > 0.0001)
-            for vi in slot_obj_verts:
-                if vi < n_v:
-                    is_registered_b[vi] = True
-
-            if slot_obj_verts:
-                # 사용자가 등록한 정점 목록이 있을 경우 해당 정점들을 엄격히 존중 (주변 메쉬로의 무단 번짐 차단)
-                cand_mask = np.zeros(n_v, dtype=bool)
-                for vi in slot_obj_verts:
-                    if vi < n_v:
-                        cand_mask[vi] = True
-                cand_mask &= ~rigid_mask
+            if slot_obj_verts and side_lock_registered:
+                cand_mask = odata["union_mask"] if odata["has_registered_union"] else np.zeros(n_v, dtype=bool)
             else:
-                # 사용자가 별도 등록하지 않은 연관 오브젝트(겉옷/장신구 등)의 경우 본 기하학 반경 내 정점 자동 후보군 포함
                 dist = np.linalg.norm(world - cent, axis=1)
-                in_radius = (dist <= eff_radius)
+                in_radius = (dist <= eff_radius * 1.30)
                 dot_fwd = (world - head) @ fwd_u
                 front_ok = (dot_fwd >= -eff_radius * 0.25)
                 cand_mask = (in_radius & front_ok) & ~rigid_mask
+                if slot_obj_verts:
+                    for vi in slot_obj_verts:
+                        if vi < n_v and not rigid_mask[vi]:
+                            cand_mask[vi] = True
 
             cand_idx = np.nonzero(cand_mask)[0]
             for vi in cand_idx.tolist():
@@ -973,26 +1239,20 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             else:
                 vg.remove([vi])
 
-        for vg, z_list in zero_entries:
-            vg.remove(z_list)
-
-    # 4. 라플라시안 스무딩 (모든 활성 모핑 본 버텍스 그룹 대상)
+    # 4. 라플라시안 스무딩 (통합 허용 풀 내부에서는 중앙 경계 제약 없이 부드럽게 블렌딩)
     for bname in active_bones:
         b_params = get_bone_params(props, bname)
         s_iters = b_params["smooth_iterations"]
         if s_iters > 0:
-            b_item = get_bone_item(props, bname)
-            b_item_verts = get_bone_data(b_item) if b_item else {}
             vg_name = f"XXMI_{bname}"
             for obj, odata in obj_data.items():
                 vg = obj.vertex_groups.get(vg_name)
                 if vg:
-                    slot_obj_verts = set(b_item_verts.get(obj.name, []))
                     n_v = len(odata["world"])
-                    allowed_m = np.zeros(n_v, dtype=bool)
-                    for vi in slot_obj_verts:
-                        if vi < n_v:
-                            allowed_m[vi] = True
+                    if odata.get("has_registered_union", False):
+                        allowed_m = odata["union_mask"].copy()
+                    else:
+                        allowed_m = np.zeros(n_v, dtype=bool)
                     cur_arr = read_vertex_group_arrays(obj, {vg.index: "w"}).get("w", np.zeros(n_v))
                     allowed_m |= (cur_arr > 0.0001)
 

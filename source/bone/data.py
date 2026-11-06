@@ -136,6 +136,7 @@ def get_bone_params(props, bname):
     if item:
         return {
             "name": getattr(item, "name", bname),
+            "radius_scale": float(getattr(item, "radius_scale", getattr(props, "radius_scale", 1.15))),
             "peak_weight": float(getattr(item, "peak_weight", getattr(props, "peak_weight", 0.40))),
             "falloff_power": float(getattr(item, "falloff_power", getattr(props, "falloff_power", 1.0))),
             "smooth_iterations": int(getattr(item, "smooth_iterations", getattr(props, "smooth_iterations", 2))),
@@ -149,6 +150,7 @@ def get_bone_params(props, bname):
 
     return {
         "name": bname,
+        "radius_scale": float(getattr(props, "radius_scale", 1.15)),
         "peak_weight": float(getattr(props, "peak_weight", 0.40)),
         "falloff_power": float(getattr(props, "falloff_power", 1.0)),
         "smooth_iterations": int(getattr(props, "smooth_iterations", 2)),

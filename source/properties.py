@@ -18,6 +18,24 @@ def on_bone_item_name_update(self, context):
         pass
 
 
+def on_bone_radius_update(self, context):
+    try:
+        from .bone.rig import update_rig_bone_radius_from_slot
+        update_rig_bone_radius_from_slot(context, self)
+    except Exception:
+        pass
+
+
+def on_show_envelope_update(self, context):
+    try:
+        from .bone.rig import PHYSICS_RIG_NAME
+        rig = getattr(self, "anchor_obj", None) or bpy.data.objects.get(PHYSICS_RIG_NAME)
+        if rig and rig.type == 'ARMATURE':
+            rig.data.display_type = 'ENVELOPE' if self.show_envelope_gizmo else 'OCTAHEDRAL'
+    except Exception:
+        pass
+
+
 class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     """개별 물리/모핑 본을 독립 슬롯으로 관리하며 고유한 가중치 및 파라미터를 보관합니다."""
     name: bpy.props.StringProperty(
@@ -75,6 +93,16 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     )
 
     # ── 개별 본 가중치(웨이트) 설정 ──
+    radius_scale: bpy.props.FloatProperty(
+        name="본 반경 배율 (영역/겹침 크기)",
+        description="스켈레톤 본의 반경(원통 두께) 및 인접 본과의 가중치 중첩 범위를 조절합니다. 값을 키우면 두 본 사이의 중앙 경계가 넓게 겹쳐 일체형 의상이 자연스럽게 움직입니다 (기본값: 1.15)",
+        default=1.15,
+        min=0.3,
+        max=3.0,
+        step=5,
+        precision=2,
+        update=on_bone_radius_update
+    )
     peak_weight: bpy.props.FloatProperty(
         name="최대 가중치 (끝단 강도)",
         description="이 본의 꼭짓점 최대 가중치입니다 (기본값: 0.40)",
@@ -228,6 +256,23 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     # ── 2. 물리 가중치 감쇠 옵션 ──
+    radius_scale: bpy.props.FloatProperty(
+        name="본 반경 배율 (영역/겹침 크기)",
+        description="새로 생성할 물리 본의 기본 반경 배율입니다 (기본값: 1.15)",
+        default=1.15,
+        min=0.3,
+        max=3.0,
+        step=5,
+        precision=2
+    )
+
+    show_envelope_gizmo: bpy.props.BoolProperty(
+        name="뷰포트 본 반경(Envelope) 기즈모 표시",
+        description="3D 뷰포트에서 물리 본의 실제 원통/캡슐 반경(Envelope)을 눈으로 보면서 조절할 수 있도록 표시 방식을 전환합니다",
+        default=False,
+        update=on_show_envelope_update
+    )
+
     peak_weight: bpy.props.FloatProperty(
         name="최대 가중치 (끝단 강도)",
         description="물리 본 끝단의 최대 가중치입니다. 0.35~0.45(초록~파란색)으로 유지하면 부드럽고 유연하게 움직입니다 (기본값: 0.40)",

@@ -5,6 +5,8 @@ from ..utils import (
     ensure_object_visible,
     ensure_all_objects_in_object_mode,
     get_target_mesh_objects,
+    world_vertex_positions,
+    compute_density_invariant_geometric_center,
 )
 from .rig import (
     PHYSICS_RIG_NAME,
@@ -55,7 +57,9 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         }
         type_prefix = type_names.get(selected_type, "물리 본")
         item.name = f"{type_prefix} {n_items}"
+        item.prev_name = item.name
 
+        item.radius_scale = getattr(props, "radius_scale", 1.15)
         item.peak_weight = getattr(props, "peak_weight", 0.40)
         item.falloff_power = getattr(props, "falloff_power", 1.0)
         item.smooth_iterations = getattr(props, "smooth_iterations", 2)
@@ -102,6 +106,130 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         else:
             self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}'이 추가되었습니다.")
 
+        return {'FINISHED'}
+
+
+class XXMI_OT_bone_item_add_split_lr(bpy.types.Operator):
+    bl_idname = "object.xxmi_bone_item_add_split_lr"
+    bl_label = "선택 영역 절반 분할하여 본 2개 추가"
+    bl_description = "가슴 전체 등 좌/우가 합쳐진 선택 영역을 중앙(X축) 기준으로 절반으로 나누어 독립된 물리 본 슬롯 2개를 한 번에 생성하고 배치합니다"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.xxmi_custom_physics_props
+        was_edit = (context.mode == 'EDIT_MESH')
+        target_objs = get_target_mesh_objects(context)
+        if not target_objs:
+            self.report({'ERROR'}, "선택된 메쉬 오브젝트가 없습니다.")
+            return {'CANCELLED'}
+
+        if was_edit:
+            ensure_all_objects_in_object_mode(context)
+
+        # 1. 선택된 모든 정점 및 3D 월드 좌표 수집
+        obj_sel_map = {}
+        all_sel_pts = []
+        for obj in target_objs:
+            mesh = obj.data
+            n_verts = len(mesh.vertices)
+            if n_verts == 0:
+                continue
+            sel_mask = np.zeros(n_verts, dtype=bool)
+            mesh.vertices.foreach_get("select", sel_mask)
+            sel_indices = np.nonzero(sel_mask)[0].tolist()
+            if sel_indices:
+                w_arr = world_vertex_positions(obj)
+                obj_sel_map[obj] = (sel_indices, w_arr)
+                for vi in sel_indices:
+                    if vi < len(w_arr):
+                        all_sel_pts.append(w_arr[vi])
+
+        if len(all_sel_pts) < 8:
+            if was_edit:
+                for obj in target_objs:
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+            self.report({'WARNING'}, "에디트 모드에서 좌/우로 분할할 영역(예: 가슴 전체)의 정점들을 먼저 선택해주세요.")
+            return {'CANCELLED'}
+
+        # 2. 선택 영역의 수평(X축) 중앙 분할 기준선 산출
+        center, bmin, bmax = compute_density_invariant_geometric_center(all_sel_pts)
+        if bmin.x < -0.01 and bmax.x > 0.01 and abs(center.x) < 0.03:
+            x_mid = 0.0
+        else:
+            x_mid = float(center.x)
+
+        # 중앙 경계선(0.5mm 이내) 정점은 양쪽 모두에 포함시켜 빈틈 방지
+        seam_margin = 0.0005
+        data_l = {}
+        data_r = {}
+        for obj, (sel_indices, w_arr) in obj_sel_map.items():
+            vis_l = [vi for vi in sel_indices if vi < len(w_arr) and w_arr[vi][0] >= x_mid - seam_margin]
+            vis_r = [vi for vi in sel_indices if vi < len(w_arr) and w_arr[vi][0] <= x_mid + seam_margin]
+            if vis_l:
+                data_l[obj.name] = vis_l
+            if vis_r:
+                data_r[obj.name] = vis_r
+
+        if not data_l or not data_r:
+            if was_edit:
+                for obj in target_objs:
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+            self.report({'WARNING'}, "선택 영역을 좌/우 절반으로 나눌 수 없습니다. 양쪽 영역이 모두 포함되도록 선택해주세요.")
+            return {'CANCELLED'}
+
+        selected_type = getattr(props, "bone_type", 'MORPH')
+        type_names = {
+            'MORPH': "모핑 본",
+            'TAIL': "꼬리 본",
+            'HAIR': "헤어 본",
+            'SKIRT': "스커트 본",
+            'WING': "날개 본",
+        }
+        type_prefix = type_names.get(selected_type, "물리 본")
+
+        def _create_independent_slot(slot_data):
+            item = props.bone_items.add()
+            idx_num = len(props.bone_items)
+            item.bone_type = selected_type
+            item.name = f"{type_prefix} {idx_num}"
+            item.prev_name = item.name
+            item.radius_scale = getattr(props, "radius_scale", 1.15)
+            item.peak_weight = getattr(props, "peak_weight", 0.40)
+            item.falloff_power = getattr(props, "falloff_power", 1.0)
+            item.smooth_iterations = getattr(props, "smooth_iterations", 2)
+            item.lock_registered_verts = getattr(props, "lock_registered_verts", True)
+            item.strength = getattr(props, "strength", 1.0)
+            item.speed = getattr(props, "speed", 1.1)
+            item.damping = getattr(props, "damping", 0.85)
+            item.inertia = getattr(props, "inertia", 1.2)
+            item.idle_motion = getattr(props, "idle_motion", 0.4)
+
+            vg_target_name = f"XXMI_{item.name}"
+            for oname, vis in slot_data.items():
+                o = bpy.data.objects.get(oname)
+                if o and o.type == 'MESH' and vis:
+                    vg = o.vertex_groups.get(vg_target_name) or o.vertex_groups.new(name=vg_target_name)
+                    vg.add(vis, 0.05, 'REPLACE')
+
+            set_bone_data(item, slot_data)
+            sync_slot_bone_to_rig(context, item)
+            return item
+
+        item_l = _create_independent_slot(data_l)
+        item_r = _create_independent_slot(data_r)
+        props.bone_item_index = len(props.bone_items) - 1
+
+        if was_edit:
+            for obj in target_objs:
+                context.view_layer.objects.active = obj
+                bpy.ops.object.mode_set(mode='EDIT')
+
+        self.report(
+            {'INFO'},
+            f"선택 영역을 절반으로 나누어 독립 본 '{item_l.name}'({item_l.vert_count}개), '{item_r.name}'({item_r.vert_count}개) 2개를 추가했습니다!"
+        )
         return {'FINISHED'}
 
 
@@ -600,6 +728,7 @@ class XXMI_OT_copy_bone_weights_to_all(bpy.types.Operator):
         count = 0
         for i, item in enumerate(props.bone_items):
             if i != props.bone_item_index:
+                item.radius_scale = curr.radius_scale
                 item.peak_weight = curr.peak_weight
                 item.falloff_power = curr.falloff_power
                 item.smooth_iterations = curr.smooth_iterations
@@ -754,6 +883,7 @@ XXMI_OT_clear_breast_physics = XXMI_OT_clear_physics
 
 classes = (
     XXMI_OT_bone_item_add,
+    XXMI_OT_bone_item_add_split_lr,
     XXMI_OT_bone_item_remove,
     XXMI_OT_bone_item_assign,
     XXMI_OT_bone_item_select_verts,
