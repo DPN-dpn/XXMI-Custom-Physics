@@ -11,36 +11,34 @@ from .ini_parser import (
 from ..bone.data import get_bone_params
 
 
-def export_physics_motion_hlsl_zzz(export_dir, idx, root_vert_idx_l, root_vert_idx_r, props):
+def export_physics_motion_hlsl_zzz(export_dir, idx, root_vert_indices, props):
     active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-    b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
-    b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
-    params_l = get_bone_params(props, b0_name)
-    params_r = get_bone_params(props, b1_name)
+    if not active_bones:
+        active_bones = ["Physics_Bone_0"]
+    num_bones = len(active_bones)
 
-    speed_l = max(0.2, float(params_l["speed"]))
-    damping_l = max(0.1, float(params_l["damping"]))
-    inertia_l = max(0.0, float(params_l["inertia"]))
-    idle_l = max(0.0, float(params_l["idle_motion"]))
+    bone_configs = []
+    for b_i, bn in enumerate(active_bones):
+        params = get_bone_params(props, bn)
+        sp = max(0.2, float(params["speed"]))
+        damp = max(0.1, float(params["damping"]))
+        ine = max(0.0, float(params["inertia"]))
+        idl = max(0.0, float(params["idle_motion"]))
+        omg = 12.0 * sp
+        stiff_k = omg * omg
+        damp_c = 2.0 * omg * (damp * 0.55)
+        rt = root_vert_indices[b_i] if (root_vert_indices and b_i < len(root_vert_indices) and root_vert_indices[b_i] is not None and root_vert_indices[b_i] > 0) else 0
+        bone_configs.append((rt, stiff_k, damp_c, ine, idl, sp))
 
-    speed_r = max(0.2, float(params_r["speed"]))
-    damping_r = max(0.1, float(params_r["damping"]))
-    inertia_r = max(0.0, float(params_r["inertia"]))
-    idle_r = max(0.0, float(params_r["idle_motion"]))
-
-    omega_l = 12.0 * speed_l
-    stiff_k_l = omega_l * omega_l
-    damp_c_l = 2.0 * omega_l * (damping_l * 0.55)
-
-    omega_r = 12.0 * speed_r
-    stiff_k_r = omega_r * omega_r
-    damp_c_r = 2.0 * omega_r * (damping_r * 0.55)
-
-    root_l = root_vert_idx_l if (root_vert_idx_l is not None and root_vert_idx_l > 0) else 0
-    root_r = root_vert_idx_r if (root_vert_idx_r is not None and root_vert_idx_r > 0) else root_l
+    bone_config_entries = []
+    for rt, sk, dc, ine, idl, sp in bone_configs:
+        bone_config_entries.append(
+            f"    {{ {rt}, {sk:.4f}, {dc:.4f}, {ine:.4f}, {idl:.4f}, {sp:.4f} }}"
+        )
+    bone_configs_str = ",\n".join(bone_config_entries)
 
     hlsl_code = f"""// ============================================================================
-// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics)
+// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics, N-Bones)
 // ============================================================================
 struct Vertex {{
     float3 position;
@@ -53,119 +51,86 @@ Texture1D<float4> IniParams : register(t120);
 
 RWStructuredBuffer<float4> PhysState : register(u6);
 
-static const uint ROOT_VERTEX_IDX_L = {root_l};
-static const uint ROOT_VERTEX_IDX_R = {root_r};
+static const uint NUM_BONES = {num_bones};
 
-static const float STIFF_K_L = {stiff_k_l:.4f};
-static const float DAMP_C_L = {damp_c_l:.4f};
-static const float INERTIA_SCALE_L = {inertia_l:.4f};
-static const float IDLE_SCALE_L = {idle_l:.4f};
-static const float SPEED_L = {speed_l:.4f};
+struct BoneConfig {{
+    uint root_idx;
+    float stiff_k;
+    float damp_c;
+    float inertia_scale;
+    float idle_scale;
+    float speed;
+}};
 
-static const float STIFF_K_R = {stiff_k_r:.4f};
-static const float DAMP_C_R = {damp_c_r:.4f};
-static const float INERTIA_SCALE_R = {inertia_r:.4f};
-static const float IDLE_SCALE_R = {idle_r:.4f};
-static const float SPEED_R = {speed_r:.4f};
+static const BoneConfig BONES[NUM_BONES] = {{
+{bone_configs_str}
+}};
 
 [numthreads(1, 1, 1)]
 void main() {{
     float time = IniParams.Load(int2(87, 0)).x;
 
-    float4 s0 = PhysState[0];
-    float4 s1 = PhysState[1];
-    float4 s2 = PhysState[2];
-    float4 s3 = PhysState[3];
-    float4 s4 = PhysState[4];
-    float4 s5 = PhysState[5];
+    for (uint b = 0; b < NUM_BONES; b++) {{
+        uint base_slot = b * 3;
+        float4 s0 = PhysState[base_slot + 0];
+        float4 s1 = PhysState[base_slot + 1];
+        float4 s2 = PhysState[base_slot + 2];
 
-    float3 prev_disp_l  = s0.xyz;
-    float3 prev_disp_r  = s1.xyz;
-    float3 spring_vel_l = s2.xyz;
-    float  prev_time    = s2.w;
-    float3 spring_vel_r = s3.xyz;
-    float  init_flag    = s3.w;
-    float3 prev_root_l  = s4.xyz;
-    float3 prev_root_r  = s5.xyz;
+        float3 prev_disp  = s0.xyz;
+        float3 spring_vel = s1.xyz;
+        float  prev_time  = s1.w;
+        float3 prev_root  = s2.xyz;
+        float  init_flag  = s2.w;
 
-    float3 curr_root_l = LiveMesh[ROOT_VERTEX_IDX_L].position;
-    float3 curr_root_r = LiveMesh[ROOT_VERTEX_IDX_R].position;
-    if (isnan(curr_root_l.x) || isinf(curr_root_l.x) || length(curr_root_l) < 1e-4) {{
-        curr_root_l = prev_root_l;
+        BoneConfig cfg = BONES[b];
+        float3 curr_root = LiveMesh[cfg.root_idx].position;
+        if (isnan(curr_root.x) || isinf(curr_root.x) || length(curr_root) < 1e-4) {{
+            curr_root = prev_root;
+        }}
+
+        if (init_flag < 0.5) {{
+            prev_disp = float3(0, 0, 0);
+            spring_vel = float3(0, 0, 0);
+            prev_root = curr_root;
+            prev_time = time;
+            init_flag = 1.0;
+        }} else {{
+            float raw_dt = time - prev_time;
+            if (abs(raw_dt) > 0.0005) {{
+                float dt = clamp(raw_dt, 0.002, 0.04);
+                float3 delta = curr_root - prev_root;
+
+                if (length(delta) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
+                    delta = float3(0, 0, 0);
+                    spring_vel = float3(0, 0, 0);
+                }}
+
+                float3 raw_vel = delta / dt;
+                float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
+                float3 ext_force = -anim_vel * (12.0 * cfg.inertia_scale);
+
+                if (cfg.idle_scale > 0.001) {{
+                    float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
+                    ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
+                }}
+
+                float sub_dt = dt * 0.25;
+                [unroll]
+                for (int step = 0; step < 4; step++) {{
+                    float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
+                    spring_vel = clamp(spring_vel + accel * sub_dt, -2.5, 2.5);
+                    prev_disp = clamp(prev_disp + spring_vel * sub_dt, -0.035, 0.035);
+                }}
+
+                prev_root = curr_root;
+                prev_time = time;
+            }}
+        }}
+
+        PhysState[base_slot + 0] = float4(prev_disp, length(spring_vel));
+        PhysState[base_slot + 1] = float4(spring_vel, prev_time);
+        PhysState[base_slot + 2] = float4(prev_root, init_flag);
     }}
-    if (isnan(curr_root_r.x) || isinf(curr_root_r.x) || length(curr_root_r) < 1e-4) {{
-        curr_root_r = prev_root_r;
-    }}
-
-    if (init_flag < 0.5) {{
-        prev_disp_l = float3(0, 0, 0);
-        prev_disp_r = float3(0, 0, 0);
-        spring_vel_l = float3(0, 0, 0);
-        spring_vel_r = float3(0, 0, 0);
-        prev_root_l = curr_root_l;
-        prev_root_r = curr_root_r;
-        prev_time = time;
-        init_flag = 1.0;
-    }} else {{
-        float raw_dt = time - prev_time;
-        if (abs(raw_dt) <= 0.0005) {{
-            return;
-        }}
-
-        float dt = clamp(raw_dt, 0.002, 0.04);
-        float3 delta_l = curr_root_l - prev_root_l;
-        float3 delta_r = curr_root_r - prev_root_r;
-
-        if (length(delta_l) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
-            delta_l = float3(0, 0, 0);
-            spring_vel_l = float3(0, 0, 0);
-        }}
-        if (length(delta_r) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
-            delta_r = float3(0, 0, 0);
-            spring_vel_r = float3(0, 0, 0);
-        }}
-
-        float3 raw_vel_l = delta_l / dt;
-        float3 raw_vel_r = delta_r / dt;
-        float3 anim_vel_l = raw_vel_l / (1.0 + length(raw_vel_l) * 0.5);
-        float3 anim_vel_r = raw_vel_r / (1.0 + length(raw_vel_r) * 0.5);
-
-        float3 ext_force_l = -anim_vel_l * (12.0 * INERTIA_SCALE_L);
-        float3 ext_force_r = -anim_vel_r * (12.0 * INERTIA_SCALE_R);
-
-        if (IDLE_SCALE_L > 0.001) {{
-            float breath_t_l = time * (2.8 * SPEED_L);
-            ext_force_l += float3(0.0, sin(breath_t_l) * 1.5, cos(breath_t_l) * 1.0) * IDLE_SCALE_L;
-        }}
-        if (IDLE_SCALE_R > 0.001) {{
-            float breath_t_r = time * (2.8 * SPEED_R);
-            ext_force_r += float3(0.0, sin(breath_t_r) * 1.5, cos(breath_t_r) * 1.0) * IDLE_SCALE_R;
-        }}
-
-        float sub_dt = dt * 0.25;
-        [unroll]
-        for (int step = 0; step < 4; step++) {{
-            float3 accel_l = ext_force_l - STIFF_K_L * prev_disp_l - DAMP_C_L * spring_vel_l;
-            float3 accel_r = ext_force_r - STIFF_K_R * prev_disp_r - DAMP_C_R * spring_vel_r;
-
-            spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -2.5, 2.5);
-            spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -2.5, 2.5);
-
-            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.035, 0.035);
-            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.035, 0.035);
-        }}
-
-        prev_root_l = curr_root_l;
-        prev_root_r = curr_root_r;
-        prev_time = time;
-    }}
-
-    PhysState[0] = float4(prev_disp_l, length(spring_vel_l));
-    PhysState[1] = float4(prev_disp_r, length(spring_vel_r));
-    PhysState[2] = float4(spring_vel_l, prev_time);
-    PhysState[3] = float4(spring_vel_r, init_flag);
-    PhysState[4] = float4(prev_root_l, 0);
-    PhysState[5] = float4(prev_root_r, 0);
 }}
 """
     out_path = os.path.join(export_dir, f"CustomPhysicsMotion_{idx}.hlsl")
@@ -177,25 +142,24 @@ void main() {{
 
 def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_weight=1.0):
     active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-    b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
-    b1_name = active_bones[1] if len(active_bones) > 1 else "Breast.R"
-    params_l = get_bone_params(props, b0_name)
-    params_r = get_bone_params(props, b1_name)
+    if not active_bones:
+        active_bones = ["Physics_Bone_0"]
+    num_bones = len(active_bones)
 
-    strength_l = max(0.0, float(params_l["strength"]))
-    strength_r = max(0.0, float(params_r["strength"]))
-
-    peak_w_l = float(params_l["peak_weight"])
-    peak_w_r = float(params_r["peak_weight"])
-    norm_l = (1.0 / peak_w_l) if peak_w_l > 0.05 else 1.0
-    norm_r = (1.0 / peak_w_r) if peak_w_r > 0.05 else 1.0
-
-    scale_l = norm_l * strength_l
-    scale_r = norm_r * strength_r
-    max_disp = 0.035 * max(0.1, max(strength_l, strength_r))
+    bone_scales = []
+    max_str = 0.0
+    for bn in active_bones:
+        params = get_bone_params(props, bn)
+        st = max(0.0, float(params["strength"]))
+        pw = float(params["peak_weight"])
+        norm = (1.0 / pw) if pw > 0.05 else 1.0
+        bone_scales.append(norm * st)
+        max_str = max(max_str, st)
+    global_max_disp = 0.035 * max(0.1, max_str)
+    scales_str = ", ".join(f"{s:.4f}" for s in bone_scales)
 
     hlsl_code = f"""// ============================================================================
-// XXMI Custom Physics - Breast Skinning Compute Shader (Displacement Pass)
+// XXMI Custom Physics - Vertex Skinning Compute Shader (Displacement Pass, N-Bones)
 // ============================================================================
 struct Vertex {{
     float3 position;
@@ -203,15 +167,20 @@ struct Vertex {{
     float4 tangent;
 }};
 
+struct WeightData {{
+    float weights[{num_bones}];
+    float is_rigid;
+}};
+
 StructuredBuffer<Vertex> BaseMesh : register(t52);
-StructuredBuffer<float4> BreastWeights : register(t53);
+StructuredBuffer<WeightData> BoneWeights : register(t53);
 StructuredBuffer<float4> PhysState : register(t54);
 RWStructuredBuffer<Vertex> Output : register(u5);
 
 static const uint VERTEX_COUNT = {vertex_count};
-static const float SCALE_L = {scale_l:.4f};
-static const float SCALE_R = {scale_r:.4f};
-static const float MAX_DISP = {max_disp:.4f};
+static const uint NUM_BONES = {num_bones};
+static const float BONE_SCALE[NUM_BONES] = {{ {scales_str} }};
+static const float GLOBAL_MAX_DISP = {global_max_disp:.4f};
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -219,31 +188,36 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     if (i >= VERTEX_COUNT) return;
 
     Vertex v = BaseMesh[i];
-    float4 bw = BreastWeights[i];
-    float wl = bw.x;
-    float wr = bw.y;
-    float total_w = wl + wr;
+    WeightData wd = BoneWeights[i];
 
-    if (total_w > 0.0001 && (SCALE_L > 0.0001 || SCALE_R > 0.0001)) {{
-        float3 disp_l = PhysState[0].xyz * (wl * SCALE_L);
-        float3 disp_r = PhysState[1].xyz * (wr * SCALE_R);
+    float3 total_disp = float3(0, 0, 0);
+    float sum_w = 0.0;
+    float max_w = 0.0;
 
-        // 좌우 본 영향이 겹치는 부위(가슴골 등)에서 변위가 무작정 2배로 폭발하지 않도록 가중 평균 볼록 결합 (Convex Combination)
-        float max_w = max(wl, wr);
-        float sum_w = wl + wr;
-        float3 total_disp = (disp_l + disp_r);
+    for (uint b = 0; b < NUM_BONES; b++) {{
+        float w = wd.weights[b];
+        if (w > 0.0001) {{
+            float3 b_disp = PhysState[b * 3 + 0].xyz * (w * BONE_SCALE[b]);
+            total_disp += b_disp;
+            sum_w += w;
+            max_w = max(max_w, w);
+        }}
+    }}
+
+    if (sum_w > 0.0001) {{
+        // 다중 본 영향이 겹치는 부위에서 변위 과도 폭발 방지 (Convex Combination)
         if (sum_w > max_w && sum_w > 1e-5) {{
             total_disp *= (max_w / sum_w);
         }}
 
         float d_len = length(total_disp);
-        if (d_len > MAX_DISP && d_len > 1e-5) {{
-            total_disp = (total_disp / d_len) * MAX_DISP;
+        if (d_len > GLOBAL_MAX_DISP && d_len > 1e-5) {{
+            total_disp = (total_disp / d_len) * GLOBAL_MAX_DISP;
         }}
 
         v.position += total_disp;
 
-        if (bw.z < 0.5) {{
+        if (wd.is_rigid < 0.5) {{
             v.normal = normalize(v.normal + total_disp * 2.5);
         }}
     }}
@@ -375,6 +349,10 @@ filename = CustomPhysics\\CustomPhysicsState_{master_idx}.buf
 
 """
 
+    active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
+    num_bones = max(1, len(active_bones))
+    map_stride = (num_bones + 1) * 4
+
     # 각 메쉬별 변위 적용 쉐이더 (모든 메쉬가 Master PhysicsState를 함께 참조하여 100% 동기화)
     for entry in breast_entries:
         idx, res_name, buf_filename, v_count, has_breast = entry[:5]
@@ -397,7 +375,7 @@ cs-t54 = null
 
 [ResourcePhysicsMap_{idx}]
 type = StructuredBuffer
-stride = 16
+stride = {map_stride}
 filename = CustomPhysics\\CustomPhysicsMap_{idx}.buf
 
 [ResourceCustomPhysicsExtracted_{idx}]

@@ -72,17 +72,20 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
         # 1. 물리 가중치를 가진 모든 메쉬 오브젝트 수집 및 가중치 캐시 구축
         active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
-        b0_name = active_bones[0] if len(active_bones) > 0 else None
-        b1_name = active_bones[1] if len(active_bones) > 1 else None
+        num_bones = max(1, len(active_bones))
 
         from ..bone.rig import get_rig_bone_info
         bone_info = get_rig_bone_info(rig) if rig else {}
-        b0_head = bone_info.get(b0_name, {}).get("head") if b0_name else None
-        b1_head = bone_info.get(b1_name, {}).get("head") if b1_name else None
-        if not b0_head and "L" in bone_info:
-            b0_head = bone_info["L"].get("head")
-        if not b1_head and "R" in bone_info:
-            b1_head = bone_info["R"].get("head")
+
+        bone_heads_world = []
+        for bi in range(num_bones):
+            bn = active_bones[bi] if bi < len(active_bones) else None
+            h = bone_info.get(bn, {}).get("head") if bn else None
+            if h is None and bi == 0 and "L" in bone_info:
+                h = bone_info["L"].get("head")
+            elif h is None and bi == 1 and "R" in bone_info:
+                h = bone_info["R"].get("head")
+            bone_heads_world.append(Vector(h) if h is not None else None)
 
         all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
         target_vgs = all_bone_vgs | {"XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
@@ -97,6 +100,10 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             return {'CANCELLED'}
 
         mesh_caches = []
+        all_world_pts = []
+        all_bone_weights = [[] for _ in range(num_bones)]
+        all_rigid_weights = []
+
         for obj in physics_objs:
             ensure_object_visible(context, obj)
             n_verts = len(obj.data.vertices)
@@ -104,56 +111,84 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 continue
 
             group_map = {}
-            if b0_name:
-                vg0 = obj.vertex_groups.get(f"XXMI_{b0_name}")
-                if vg0:
-                    group_map[vg0.index] = "slot0"
-            if b1_name:
-                vg1 = obj.vertex_groups.get(f"XXMI_{b1_name}")
-                if vg1:
-                    group_map[vg1.index] = "slot1"
+            for bi, bn in enumerate(active_bones):
+                vg = obj.vertex_groups.get(f"XXMI_{bn}")
+                if vg:
+                    group_map[vg.index] = f"bone_{bi}"
 
             # 레거시 버텍스 그룹 호환
-            for gname, key in (("XXMI_Breast_L", "slot0"), ("XXMI_Breast_R", "slot1"), ("XXMI_Role_Rigid", "rigid")):
-                vg = obj.vertex_groups.get(gname)
-                if vg and vg.index not in group_map:
-                    group_map[vg.index] = key
+            if 0 < num_bones and "bone_0" not in group_map.values():
+                vg_l = obj.vertex_groups.get("XXMI_Breast_L")
+                if vg_l:
+                    group_map[vg_l.index] = "bone_0"
+            if 1 < num_bones and "bone_1" not in group_map.values():
+                vg_r = obj.vertex_groups.get("XXMI_Breast_R")
+                if vg_r:
+                    group_map[vg_r.index] = "bone_1"
+
+            vg_rig = obj.vertex_groups.get("XXMI_Role_Rigid")
+            if vg_rig:
+                group_map[vg_rig.index] = "rigid"
 
             arrs = read_vertex_group_arrays(obj, group_map)
             zeros = np.zeros(n_verts, dtype=np.float32)
-            w_0 = arrs.get("slot0", zeros)
-            w_1 = arrs.get("slot1", zeros)
+
+            w_bones_list = [arrs.get(f"bone_{bi}", zeros) for bi in range(num_bones)]
             is_rigid = (arrs.get("rigid", zeros) > 0.5).astype(np.float32)
 
-            weighted = np.nonzero((w_0 > 1e-5) | (w_1 > 1e-5) | (is_rigid > 0.5))[0]
+            # 유효 가중치가 있는 정점 필터링
+            active_any = (is_rigid > 0.5)
+            for wb in w_bones_list:
+                active_any = active_any | (wb > 1e-5)
+            weighted = np.nonzero(active_any)[0]
             if len(weighted) == 0:
                 continue
 
             co = np.empty(n_verts * 3, dtype=np.float32)
             obj.data.vertices.foreach_get("co", co)
             co = co.reshape(-1, 3).astype(np.float64)
-            wco = co[weighted]
 
-            n_sample = min(300, len(wco))
-            sample_idx = np.linspace(0, len(wco) - 1, n_sample).astype(np.int64)
-            sample_obj = [Vector(p) for p in wco[sample_idx].tolist()]
+            # 오브젝트 로컬 -> 월드 좌표 변환
+            mw = np.array(obj.matrix_world, dtype=np.float64)
+            co_h = np.column_stack([co, np.ones(n_verts, dtype=np.float64)])
+            co_world = (co_h @ mw.T)[:, :3]
+
+            wco_world = co_world[weighted]
+            w_bones_filtered = [wb[weighted] for wb in w_bones_list]
+            rigid_filtered = is_rigid[weighted]
+
+            all_world_pts.append(wco_world)
+            for bi in range(num_bones):
+                all_bone_weights[bi].append(w_bones_filtered[bi])
+            all_rigid_weights.append(rigid_filtered)
+
+            n_sample = min(300, len(weighted))
+            sample_idx = np.linspace(0, len(weighted) - 1, n_sample).astype(np.int64)
+            sample_obj = [Vector(p) for p in co[weighted[sample_idx]].tolist()]
 
             mesh_caches.append({
                 "obj": obj,
-                "wco": wco,
-                "w_l": w_0[weighted],
-                "w_r": w_1[weighted],
-                "rigid": is_rigid[weighted],
                 "sample_obj": sample_obj,
             })
 
-        if not mesh_caches:
+        if not all_world_pts:
             self.report({'ERROR'}, "물리 가중치가 계산되지 않았습니다. 먼저 3패널에서 [본 & 강체 가중치 자동 계산 & 블렌딩]을 진행해주세요.")
             return {'CANCELLED'}
 
+        unified_world_pts = np.vstack(all_world_pts)
+        unified_bone_weights = [np.concatenate(all_bone_weights[bi]) for bi in range(num_bones)]
+        unified_rigid_weights = np.concatenate(all_rigid_weights)
+
+        # 블렌더 월드 정점 기반 통합 KD-Tree 구축
+        kd_unified = KDTree(len(unified_world_pts))
+        for vi, p in enumerate(unified_world_pts):
+            kd_unified.insert(Vector(p), vi)
+        kd_unified.balance()
+
         global_peak_weight = 0.0
-        for mcache in mesh_caches:
-            global_peak_weight = max(global_peak_weight, float(mcache["w_l"].max()), float(mcache["w_r"].max()))
+        for wb in unified_bone_weights:
+            if len(wb) > 0:
+                global_peak_weight = max(global_peak_weight, float(wb.max()))
         if global_peak_weight < 0.05:
             global_peak_weight = 1.0
 
@@ -232,160 +267,123 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     matched_in_ini.append((idx, res_name, raw_fname, n_buf, False, 0, 0, blend_sec, draw_sec))
                     continue
 
-                # KD-Tree 기반 정점 가중치 보간
+                # KD-Tree 기반 정점 가중치 보간 (통합 KD-Tree 활용)
                 inv_mat = best_mat.inverted()
-                buf_in_obj = np.empty_like(buf_np)
+                buf_in_world = np.empty_like(buf_np)
                 for vi in range(n_buf):
-                    buf_in_obj[vi] = (inv_mat @ Vector(buf_np[vi]))[:]
+                    buf_in_world[vi] = (inv_mat @ Vector(buf_np[vi]))[:]
 
-                wco = best_cache["wco"]
-                kd_mesh = KDTree(len(wco))
-                for vi, p in enumerate(wco):
-                    kd_mesh.insert(Vector(p), vi)
-                kd_mesh.balance()
-
-                w_l_src = best_cache["w_l"]
-                w_r_src = best_cache["w_r"]
-                rigid_src = best_cache["rigid"]
-
-                wl_out = np.zeros(n_buf, dtype=np.float32)
-                wr_out = np.zeros(n_buf, dtype=np.float32)
+                w_out_list = [np.zeros(n_buf, dtype=np.float32) for _ in range(num_bones)]
                 rig_out = np.zeros(n_buf, dtype=np.float32)
 
-                tol = 0.008
                 for vi in range(n_buf):
-                    pt = Vector(buf_in_obj[vi])
-                    hits = kd_mesh.find_range(pt, tol)
-                    if hits:
-                        min_d = hits[0][2]
-                        if min_d < 1e-5:
-                            hi = hits[0][1]
-                            wl_out[vi] = w_l_src[hi]
-                            wr_out[vi] = w_r_src[hi]
-                            rig_out[vi] = rigid_src[hi]
-                        else:
-                            inv_d_sum = sum(1.0 / max(h[2], 1e-5) for h in hits)
-                            wl_out[vi] = sum(w_l_src[h[1]] * (1.0 / max(h[2], 1e-5)) for h in hits) / inv_d_sum
-                            wr_out[vi] = sum(w_r_src[h[1]] * (1.0 / max(h[2], 1e-5)) for h in hits) / inv_d_sum
-                            rig_out[vi] = 1.0 if any(rigid_src[h[1]] > 0.5 for h in hits) else 0.0
+                    pt = Vector(buf_in_world[vi])
+                    res = kd_unified.find_nearest(pt)
+                    if res is not None:
+                        near_p, near_idx, near_d = res
+                        if near_d < 0.02:  # 2cm 이내 정점만 가중치 매칭 (찢어짐 방지)
+                            if near_d < 0.0002:  # 0.2mm 이내 정확 일치
+                                for bi in range(num_bones):
+                                    w_out_list[bi][vi] = unified_bone_weights[bi][near_idx]
+                                rig_out[vi] = unified_rigid_weights[near_idx]
+                            else:
+                                r_search = min(0.012, max(0.003, near_d * 1.5))
+                                hits = kd_unified.find_range(pt, r_search)
+                                if hits:
+                                    inv_d_sum = sum(1.0 / max(h[2], 1e-5) for h in hits)
+                                    for bi in range(num_bones):
+                                        w_out_list[bi][vi] = sum(unified_bone_weights[bi][h[1]] * (1.0 / max(h[2], 1e-5)) for h in hits) / inv_d_sum
+                                    rig_out[vi] = 1.0 if any(unified_rigid_weights[h[1]] > 0.5 for h in hits) else 0.0
+                                else:
+                                    for bi in range(num_bones):
+                                        w_out_list[bi][vi] = unified_bone_weights[bi][near_idx]
+                                    rig_out[vi] = unified_rigid_weights[near_idx]
 
-                # 1. 좌우 본 영향이 겹치는 중앙 정점 가중치 정규화 (변위 2배 폭발 방지 및 자연스러운 블렌딩)
-                sum_w = wl_out + wr_out
-                overlap_mask = (wl_out > 0.001) & (wr_out > 0.001) & (sum_w > global_peak_weight)
+                # 1. 인접 본 영향이 겹치는 부위 가중치 정규화 (변위 폭발 방지 및 자연스러운 블렌딩)
+                sum_w = sum(w_out_list)
+                overlap_mask = (sum_w > global_peak_weight)
                 if np.any(overlap_mask):
                     scale = global_peak_weight / np.maximum(1e-5, sum_w[overlap_mask])
-                    wl_out[overlap_mask] *= scale
-                    wr_out[overlap_mask] *= scale
+                    for bi in range(num_bones):
+                        w_out_list[bi][overlap_mask] *= scale
 
                 # 2. Position.buf 3D 버퍼 공간 방사형 다층 비침투 (Strict Radial Non-Penetration)
                 # "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)"
-                # 표면 법선(Normal) 오차를 완전히 배제하고, 본 중심에서의 방사형 거리 r 및 방사선(Ray) 방향을 기준으로
-                # 속살 가중치가 겉옷을 초과하는 역전 현상을 100% 원천 차단
-                phys_indices = np.nonzero((wl_out > 0.005) | (wr_out > 0.005))[0]
+                phys_indices = np.nonzero((sum_w > 0.005) | (rig_out > 0.5))[0]
                 if len(phys_indices) > 1:
                     kd_phys = KDTree(len(phys_indices))
                     for k, bi in enumerate(phys_indices):
                         kd_phys.insert(Vector(buf_np[bi]), k)
                     kd_phys.balance()
 
-                    # 본 앵커(Head)의 버퍼 공간 좌표 추정
-                    anchor_heads = []
-                    for b_head_w in (b0_head, b1_head):
-                        if b_head_w is not None and best_mat is not None:
-                            anchor_heads.append(np.array((best_mat @ Vector(b_head_w))[:], dtype=np.float64))
-                        else:
-                            anchor_heads.append(None)
-
-                    for slot_idx, w_arr in enumerate((wl_out, wr_out)):
+                    for bi_idx in range(num_bones):
+                        w_arr = w_out_list[bi_idx]
                         if w_arr.max() <= 0.005:
                             continue
+
+                        # 본 앵커 좌표 버퍼 변환
+                        b_head_w = bone_heads_world[bi_idx] if bi_idx < len(bone_heads_world) else None
+                        if b_head_w is not None:
+                            b_head_buf = np.array((best_mat @ b_head_w)[:], dtype=np.float64)
+                        else:
+                            active_pts = buf_np[phys_indices]
+                            b_head_buf = active_pts.mean(axis=0)
+                            b_head_buf[2] -= 0.02
+
                         sub_indices = [k for k in range(len(phys_indices)) if w_arr[phys_indices[k]] > 0.005]
                         if len(sub_indices) < 2:
                             continue
-
-                        b_head_buf = anchor_heads[slot_idx] if slot_idx < len(anchor_heads) else None
-                        if b_head_buf is None:
-                            # 앵커가 없으면 활성 정점들의 기하학적 중심보다 약간 안쪽을 앵커로 추정
-                            sub_pts = buf_np[phys_indices[sub_indices]]
-                            b_head_buf = sub_pts.mean(axis=0)
-                            b_head_buf[2] -= 0.02  # 깊이 방향 후퇴
 
                         sub_pts = buf_np[phys_indices[sub_indices]]
                         vecs = sub_pts - b_head_buf
                         dists = np.linalg.norm(vecs, axis=1)
                         uvecs = vecs / np.maximum(dists[:, None], 1e-6)
 
-                        for _ in range(2):
-                            orig_w = w_arr.copy()
-                            promotions = {}
-                            clamps = {}
+                        orig_w = w_arr.copy()
+                        for local_k, k in enumerate(sub_indices):
+                            v_idx = phys_indices[k]
+                            cur_w = float(orig_w[v_idx])
+                            if cur_w <= 0.005:
+                                continue
+                            cur_p = sub_pts[local_k]
+                            cur_d = dists[local_k]
+                            cur_u = uvecs[local_k]
 
-                            for local_k, k in enumerate(sub_indices):
-                                bi = phys_indices[k]
-                                cur_w = float(orig_w[bi])
-                                if cur_w <= 0.005:
+                            hits = kd_phys.find_range(Vector(cur_p), 0.015)
+                            for _, hit_k, _ in hits:
+                                if hit_k == k:
                                     continue
-                                cur_p = sub_pts[local_k]
-                                cur_d = dists[local_k]
-                                cur_u = uvecs[local_k]
+                                hit_v_idx = phys_indices[hit_k]
+                                hit_w = float(orig_w[hit_v_idx])
+                                if hit_w <= 0.001:
+                                    continue
 
-                                hits = kd_phys.find_range(Vector(cur_p), 0.015)
-                                for _, hit_k, _ in hits:
-                                    if hit_k == k:
-                                        continue
-                                    hit_bi = phys_indices[hit_k]
-                                    hit_w = float(orig_w[hit_bi])
-                                    if hit_w <= 0.001:
-                                        continue
+                                hit_p = buf_np[hit_v_idx]
+                                hit_v = hit_p - b_head_buf
+                                hit_d = float(np.linalg.norm(hit_v))
+                                diff_d = hit_d - cur_d
 
-                                    hit_p = buf_np[hit_bi]
-                                    hit_v = hit_p - b_head_buf
-                                    hit_d = float(np.linalg.norm(hit_v))
-                                    diff_d = hit_d - cur_d
-                                    abs_diff_d = abs(diff_d)
+                                # 서로 다른 층(Shell, 2mm ~ 15mm)이며 동일 방사선(내적 >= 0.985)
+                                if abs(diff_d) < 0.002 or abs(diff_d) > 0.015:
+                                    continue
+                                hit_u = hit_v / max(hit_d, 1e-6)
+                                if float(np.dot(cur_u, hit_u)) < 0.985:
+                                    continue
 
-                                    # 1. 서로 다른 층(Shell) 사이인지 확인 (0.8mm ~ 15mm)
-                                    if abs_diff_d < 0.0008 or abs_diff_d > 0.015:
-                                        continue
-
-                                    # 2. 동일한 방사선(Ray) 선상인지 확인 (내적 >= 0.985)
-                                    hit_u = hit_v / max(hit_d, 1e-6)
-                                    dot_u = float(np.dot(cur_u, hit_u))
-                                    if dot_u < 0.985:
-                                        continue
-
-                                    if diff_d > 0:
-                                        # hit_bi가 cur_p보다 바깥쪽(겉옷): cur_p(살) <= hit_bi(옷)
-                                        if cur_w > hit_w:
-                                            promotions[hit_bi] = max(promotions.get(hit_bi, hit_w), cur_w)
-                                            clamps[bi] = min(clamps.get(bi, cur_w), hit_w)
-                                    else:
-                                        # hit_bi가 cur_p보다 안쪽(속살): hit_bi(살) <= cur_p(옷)
-                                        if hit_w > cur_w:
-                                            promotions[bi] = max(promotions.get(bi, cur_w), hit_w)
-                                            clamps[hit_bi] = min(clamps.get(hit_bi, hit_w), cur_w)
-
-                            changed = False
-                            for bi, u_w in promotions.items():
-                                if u_w > w_arr[bi]:
-                                    w_arr[bi] = u_w
-                                    changed = True
-                            for bi, u_w in clamps.items():
-                                if u_w < w_arr[bi]:
-                                    w_arr[bi] = u_w
-                                    changed = True
-
-                            if not changed:
-                                break
+                                # 안쪽 메쉬(속살)는 바깥쪽 메쉬(겉옷) 가중치를 초과하지 못하도록 엄격 클램프
+                                if diff_d > 0:  # hit이 바깥쪽(겉옷), cur이 안쪽(속살)
+                                    if cur_w > hit_w:
+                                        w_arr[v_idx] = min(w_arr[v_idx], hit_w)
+                                else:  # cur이 바깥쪽(겉옷), hit이 안쪽(속살)
+                                    if hit_w > cur_w:
+                                        w_arr[hit_v_idx] = min(w_arr[hit_v_idx], cur_w)
 
                 # 3. .ib 인덱스 버퍼 기반 삼각망 찢어짐(Tearing) 완천 차단 (Boundary Gradient Taper):
-                # 단일 메쉬 폴리곤 엣지 상에서 가중치가 0.35 -> 0.00으로 급락하여 발생하는 인게임 메쉬 찢어짐 원천 소멸
                 ib_candidates = [
                     os.path.splitext(buf_path)[0] + ".ib",
                     os.path.join(mod_folder, raw_fname.replace("Position.buf", ".ib")),
                     os.path.join(mod_folder, raw_fname.replace("Position", ".ib")),
                 ]
-                # 파일명 유사도 및 모드 폴더 전체에서 관련 .ib 파일 검색
                 base_stem = os.path.splitext(raw_fname)[0].replace("Position", "").replace("Blend", "").replace("TexCoord", "").lower()
                 for root, _, files in os.walk(mod_folder):
                     for f in files:
@@ -418,7 +416,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         adj_buf[t1].append(t0); adj_buf[t1].append(t2)
                         adj_buf[t2].append(t0); adj_buf[t2].append(t1)
 
-                    for w_arr in (wl_out, wr_out):
+                    for w_arr in w_out_list:
                         for _ in range(5):
                             active_b = np.nonzero(w_arr > 0.005)[0]
                             for vi in active_b:
@@ -427,8 +425,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                     continue
                                 min_nb = min(w_arr[nb] for nb in nbrs)
                                 diff = w_arr[vi] - min_nb
-                                if diff > 0.06:
-                                    w_arr[vi] -= (diff - 0.06) * 0.50
+                                if diff > 0.08:
+                                    w_arr[vi] -= (diff - 0.08) * 0.50
 
                 # 4. [절대 최종 단계]: Position.buf 내 모든 동일 위치(UV 심/하드 엣지 분리점) 100% 완전 동기화
                 # 3DMigoto 버퍼 상의 분리 정점(Coincident Vertices) 가중치 불일치로 인한 구멍 및 찢어짐 원천 차단
@@ -451,9 +449,13 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     if pi != pj:
                         parent[pi] = pj
 
-                active_buf_idx = np.nonzero((wl_out > 0.0001) | (wr_out > 0.0001) | (rig_out > 0.0001))[0]
+                active_any_buf = (rig_out > 0.0001)
+                for wb in w_out_list:
+                    active_any_buf = active_any_buf | (wb > 0.0001)
+                active_buf_idx = np.nonzero(active_any_buf)[0]
+
                 for vi in active_buf_idx:
-                    hits = kd_co.find_range(Vector(buf_np[vi]), 0.0008)
+                    hits = kd_co.find_range(Vector(buf_np[vi]), 0.0015)
                     for _, hit_k, _ in hits:
                         union_p(vi, hit_k)
 
@@ -463,103 +465,64 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     co_groups_map.setdefault(root, []).append(vi)
 
                 for root, g_list in co_groups_map.items():
-                    if len(g_list) > 1 and any(wl_out[v] > 0.0001 or wr_out[v] > 0.0001 or rig_out[v] > 0.0001 for v in g_list):
-                        max_l = max(float(wl_out[v]) for v in g_list)
-                        max_r = max(float(wr_out[v]) for v in g_list)
-                        max_rg = max(float(rig_out[v]) for v in g_list)
+                    if len(g_list) > 1 and any(active_any_buf[v] for v in g_list):
+                        max_rig = max(float(rig_out[v]) for v in g_list)
+                        max_w = [max(float(w_out_list[bi][v]) for v in g_list) for bi in range(num_bones)]
                         for v in g_list:
-                            wl_out[v] = max_l
-                            wr_out[v] = max_r
-                            rig_out[v] = max_rg
+                            rig_out[v] = max_rig
+                            for bi in range(num_bones):
+                                w_out_list[bi][v] = max_w[bi]
 
-                max_wl = float(wl_out.max())
-                max_wr = float(wr_out.max())
-                max_rig = float(rig_out.max())
-                peak_l_idx = int(wl_out.argmax()) if max_wl > 1e-4 else 0
-                peak_r_idx = int(wr_out.argmax()) if max_wr > 1e-4 else 0
-
-                # CustomPhysicsMap.buf (stride 16: float4 -> wl, wr, is_rigid, root_dist) 바이너리 빌드
-                map_bytes = np.column_stack(
-                    [wl_out, wr_out, rig_out, np.zeros(n_buf, dtype=np.float32)]
-                ).astype('<f4').tobytes()
-
-                has_physics = (max_wl > 0.001 or max_wr > 0.001 or max_rig > 0.001)
+                max_bone_weights = [float(wb.max()) for wb in w_out_list]
+                has_physics = any(mw > 0.001 for mw in max_bone_weights) or (float(rig_out.max()) > 0.001)
 
                 if has_physics:
+                    # CustomPhysicsMap_{idx}.buf 바이너리 빌드 (stride: (num_bones + 1) * 4)
+                    map_cols = [*w_out_list, rig_out]
+                    map_bytes = np.column_stack(map_cols).astype('<f4').tobytes()
                     map_buf_path = os.path.join(custom_physics_dir, f"CustomPhysicsMap_{idx}.buf")
                     with open(map_buf_path, 'wb') as f:
                         f.write(map_bytes)
 
-                    # 슬롯별(본 0, 본 1) 개별 신체 앵커 정점 독립 탐색
-                    # - 각 본의 뿌리(Head/흉벽) 위치를 기준으로 뒤쪽 흉곽/갈비뼈의 비물리 정점을 각각 탐색
-                    # - 걷기/달리기/회전 시 각 본이 100% 독립된 관성력과 교차 바운스를 생성
-                    root_idx_0 = 0
-                    root_idx_1 = 0
-                    non_phys_mask = (wl_out < 0.01) & (wr_out < 0.01)
+                    # 슬롯별(본 0 ~ 본 N-1) 독립 신체 앵커 정점 탐색
+                    non_phys_mask = (sum(w_out_list) < 0.01)
+                    root_indices = []
 
-                    # 리그 본 정보가 있을 경우 Head 좌표 우선 활용
-                    rig_obj = getattr(props, "anchor_obj", None) or bpy.data.objects.get("XXMI_Physics_Rig") or bpy.data.objects.get("XXMI_Breast_Rig")
-                    bone_heads_buf = {}
-                    if rig_obj and best_cache and best_mat:
-                        try:
-                            from ..bone.rig import get_rig_bone_info
-                            binfo = get_rig_bone_info(rig_obj)
-                            m_obj = best_cache["obj"]
-                            inv_m = m_obj.matrix_world.inverted()
-                            for bn_key in (b0_name, b1_name):
-                                if bn_key in binfo:
-                                    hw = Vector(binfo[bn_key]["head"])
-                                    h_obj = inv_m @ hw
-                                    h_buf = best_mat @ h_obj
-                                    bone_heads_buf[bn_key] = np.array([h_buf.x, h_buf.y, h_buf.z], dtype=np.float64)
-                        except Exception:
-                            pass
+                    for bi in range(num_bones):
+                        root_idx = 0
+                        wb = w_out_list[bi]
+                        b_head_w = bone_heads_world[bi] if bi < len(bone_heads_world) else None
 
-                    # 1. 본 0의 독립 앵커
-                    if wl_out.max() > 0.005:
-                        if b0_name in bone_heads_buf:
-                            c0 = bone_heads_buf[b0_name]
-                        elif (wl_out > 0.05).any():
-                            c0 = buf_np[wl_out > 0.05].mean(axis=0)
+                        if b_head_w is not None:
+                            c = np.array((best_mat @ b_head_w)[:], dtype=np.float64)
+                        elif (wb > 0.05).any():
+                            c = buf_np[wb > 0.05].mean(axis=0)
+                        elif wb.max() > 1e-4:
+                            c = buf_np[wb.argmax()]
                         else:
-                            c0 = buf_np[wl_out.argmax()]
-                        d0 = np.linalg.norm(buf_np - c0, axis=1)
-                        d0[~non_phys_mask] = np.inf
-                        if np.isfinite(d0).any():
-                            root_idx_0 = int(d0.argmin())
+                            c = buf_np.mean(axis=0)
 
-                    # 2. 본 1의 독립 앵커
-                    if wr_out.max() > 0.005:
-                        if b1_name in bone_heads_buf:
-                            c1 = bone_heads_buf[b1_name]
-                        elif (wr_out > 0.05).any():
-                            c1 = buf_np[wr_out > 0.05].mean(axis=0)
-                        else:
-                            c1 = buf_np[wr_out.argmax()]
-                        d1 = np.linalg.norm(buf_np - c1, axis=1)
-                        d1[~non_phys_mask] = np.inf
-                        if np.isfinite(d1).any():
-                            root_idx_1 = int(d1.argmin())
+                        dists = np.linalg.norm(buf_np - c, axis=1)
+                        dists[~non_phys_mask] = np.inf
+                        if np.isfinite(dists).any():
+                            root_idx = int(dists.argmin())
+                        root_indices.append(root_idx)
 
-                    # 폴백: 한쪽만 발견되었거나 단일 본일 경우
-                    if root_idx_0 == 0 and root_idx_1 > 0:
-                        root_idx_0 = root_idx_1
-                    elif root_idx_1 == 0 and root_idx_0 > 0:
-                        root_idx_1 = root_idx_0
-
-                    # 런타임 물리 상태 버퍼 초기화 (.buf, 6개 float4 = 96바이트)
-                    _export_physics_state_buf(custom_physics_dir, idx)
+                    # 런타임 물리 상태 버퍼 초기화 (.buf, num_bones * 3 * 16 바이트)
+                    _export_physics_state_buf(custom_physics_dir, idx, num_bones)
 
                     # 게임별 분기 쉐이더 내보내기 (ZZZ vs HSR)
                     if target_game == 'HSR':
-                        export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_idx_0, root_idx_1)
+                        export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_indices)
                     else:
-                        export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_idx_0, root_idx_1, props)
+                        export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_indices, props)
                         export_vertex_physics_hlsl_zzz(custom_physics_dir, idx, n_buf, props, global_peak_weight)
 
                     total_injected_buffers += 1
 
-                matched_in_ini.append((idx, res_name, raw_fname, n_buf, has_physics, peak_l_idx, peak_r_idx, blend_sec, draw_sec))
+                peak_0 = int(w_out_list[0].argmax()) if max_bone_weights[0] > 1e-4 else 0
+                peak_1 = int(w_out_list[1].argmax()) if (num_bones > 1 and max_bone_weights[1] > 1e-4) else peak_0
+                matched_in_ini.append((idx, res_name, raw_fname, n_buf, has_physics, peak_0, peak_1, blend_sec, draw_sec))
 
             if matched_in_ini:
                 physics_entries = [e for e in matched_in_ini if e[4]]
@@ -571,9 +534,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     master_idx = master_entry[0]
 
                 if target_game == 'HSR':
-                    inject_physics_hsr(ini_path, matched_in_ini, props, master_idx)
+                    inject_physics_hsr(ini_path, matched_in_ini, props, master_idx, num_bones)
                 else:
-                    inject_physics_zzz(ini_path, matched_in_ini, props, master_idx)
+                    inject_physics_zzz(ini_path, matched_in_ini, props, master_idx, num_bones)
                 total_modified_inis += 1
 
         if total_injected_buffers == 0:

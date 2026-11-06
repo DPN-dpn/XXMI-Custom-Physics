@@ -102,10 +102,11 @@ def _find_best_transform_for_object(kd_buf, sample_obj, obj):
     return best_mat, best_score
 
 
-def _export_physics_state_buf(export_dir, idx):
+def _export_physics_state_buf(export_dir, idx, num_bones=1):
     out_path = os.path.join(export_dir, f"CustomPhysicsState_{idx}.buf")
+    total_slots = max(1, num_bones) * 3
     with open(out_path, 'wb') as f:
-        f.write(bytearray(6 * 16))
+        f.write(bytearray(total_slots * 16))
 
 
 def _export_physics_config_json(export_dir, props, context):
