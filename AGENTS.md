@@ -17,13 +17,24 @@
 
 ---
 
-## 2. 프로젝트 구조 (Architecture)
+## 2. 프로젝트 구조 (Architecture) 및 세부 기술 문서
 이 애드온은 독립된 단일 목적 블렌더 애드온으로 동작하며, 모든 소스코드는 `source/` 패키지 내부에 작업 흐름별 패널 단위로 모듈화되어 있습니다 (**`standalones/` 스크립트는 사용하지 않으며 오직 애드온으로만 동작합니다**).
 - **공식 GitHub 저장소**: https://github.com/DPN-dpn/XXMI-Custom-Physics
+- **세부 기술 문서 (상세 구현 및 수학적 알고리즘)**: [docs/README.md](docs/README.md)
+  - [아키텍처 및 4단계 파이프라인](docs/ARCHITECTURE.md)
+  - [해부학적 가중치 및 비침투 수학 알고리즘](docs/WEIGHTING_ALGORITHM.md)
+  - [4-Substep ODE 및 인게임 HLSL 셰이더](docs/PHYSICS_AND_SHADERS.md)
+  - [3DMigoto 버퍼 매칭 및 INI 주입 파이프라인](docs/INJECTOR_PIPELINE.md)
 
 ```text
 XXMI-Custom-Physics/
 ├── __init__.py                 # 블렌더 애드온 메인 진입점 (bl_info 및 source 패키지 등록/해제)
+├── docs/                       # [세부 기술 문서] 신규 에이전트 및 개발자를 위한 기술 설명서
+│   ├── README.md               # 문서 메인 색인
+│   ├── ARCHITECTURE.md         # 전체 아키텍처 및 모듈 연계
+│   ├── WEIGHTING_ALGORITHM.md  # 가중치 계산, 비침투 배리어, 심 동기화
+│   ├── PHYSICS_AND_SHADERS.md  # 물리 ODE 적분 및 인게임 HLSL 셰이더
+│   └── INJECTOR_PIPELINE.md    # 3DMigoto 버퍼 매칭 및 INI 주입
 └── source/
     ├── __init__.py             # 하위 모듈/패널 통합 레지스트리
     ├── utils.py                # 공통 상수, 좌표계/기하학 유틸리티, 공통 도움말 툴팁 오퍼레이터
