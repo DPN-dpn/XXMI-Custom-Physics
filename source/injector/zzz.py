@@ -132,14 +132,12 @@ void main() {{
         float3 ext_force_r = -anim_vel_r * (12.0 * INERTIA_SCALE_R);
 
         if (IDLE_SCALE_L > 0.001) {{
-            float breath_t = time * 2.5;
-            float3 idle_f_l = float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_L;
-            ext_force_l += idle_f_l;
+            float breath_t_l = time * (2.8 * SPEED_L);
+            ext_force_l += float3(0.0, sin(breath_t_l) * 1.5, cos(breath_t_l) * 1.0) * IDLE_SCALE_L;
         }}
         if (IDLE_SCALE_R > 0.001) {{
-            float breath_t = time * 2.5;
-            float3 idle_f_r = float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 0.9) * IDLE_SCALE_R;
-            ext_force_r += idle_f_r;
+            float breath_t_r = time * (2.8 * SPEED_R);
+            ext_force_r += float3(0.0, sin(breath_t_r) * 1.5, cos(breath_t_r) * 1.0) * IDLE_SCALE_R;
         }}
 
         float sub_dt = dt * 0.25;
@@ -151,8 +149,8 @@ void main() {{
             spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -2.5, 2.5);
             spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -2.5, 2.5);
 
-            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.025, 0.025);
-            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.025, 0.025);
+            prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.035, 0.035);
+            prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.035, 0.035);
         }}
 
         prev_root_l = curr_root_l;
@@ -192,7 +190,7 @@ def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_we
 
     scale_l = norm_l * strength_l
     scale_r = norm_r * strength_r
-    max_disp = 0.030 * max(0.1, max(strength_l, strength_r))
+    max_disp = 0.035 * max(0.1, max(strength_l, strength_r))
 
     hlsl_code = f"""// ============================================================================
 // XXMI Custom Physics - Breast Skinning Compute Shader (Displacement Pass)

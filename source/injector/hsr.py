@@ -10,11 +10,6 @@ from .ini_parser import (
 from ..bone.data import get_bone_params
 
 
-def export_physics_motion_hlsl_hsr(export_dir, idx, root_vert_idx_l, root_vert_idx_r, props):
-    """[단일 통합 Compute Shader 파이프라인으로 일원화되어 별도 모션 파일 미사용]"""
-    pass
-
-
 def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_weight=1.0, root_vert_idx_l=0, root_vert_idx_r=0):
     active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
     b0_name = active_bones[0] if len(active_bones) > 0 else "Breast.L"
@@ -87,7 +82,7 @@ static const float SPEED_R = {speed_r:.4f};
 
 static const float SCALE_L = {scale_l:.4f};
 static const float SCALE_R = {scale_r:.4f};
-static const float MAX_DISP = {0.045 * max(0.1, max(strength_l, strength_r)):.4f};
+static const float MAX_DISP = {0.035 * max(0.1, max(strength_l, strength_r)):.4f};
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -161,8 +156,8 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                 float3 anim_vel_l = raw_vel_l / (1.0 + length(raw_vel_l) * 0.35);
                 float3 anim_vel_r = raw_vel_r / (1.0 + length(raw_vel_r) * 0.35);
 
-                float3 ext_force_l = -anim_vel_l * (14.0 * INERTIA_SCALE_L);
-                float3 ext_force_r = -anim_vel_r * (14.0 * INERTIA_SCALE_R);
+                float3 ext_force_l = -anim_vel_l * (12.0 * INERTIA_SCALE_L);
+                float3 ext_force_r = -anim_vel_r * (12.0 * INERTIA_SCALE_R);
 
                 // 부드러운 자연 호흡 바운스 중첩
                 if (IDLE_SCALE_L > 0.001) {{
@@ -180,11 +175,11 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                     float3 accel_l = ext_force_l - STIFF_K_L * prev_disp_l - DAMP_C_L * spring_vel_l;
                     float3 accel_r = ext_force_r - STIFF_K_R * prev_disp_r - DAMP_C_R * spring_vel_r;
 
-                    spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -3.0, 3.0);
-                    spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -3.0, 3.0);
+                    spring_vel_l = clamp(spring_vel_l + accel_l * sub_dt, -2.5, 2.5);
+                    spring_vel_r = clamp(spring_vel_r + accel_r * sub_dt, -2.5, 2.5);
 
-                    prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.040, 0.040);
-                    prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.040, 0.040);
+                    prev_disp_l = clamp(prev_disp_l + spring_vel_l * sub_dt, -0.035, 0.035);
+                    prev_disp_r = clamp(prev_disp_r + spring_vel_r * sub_dt, -0.035, 0.035);
                 }}
 
                 prev_root_l = curr_root_l;

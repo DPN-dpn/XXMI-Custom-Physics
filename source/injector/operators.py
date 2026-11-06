@@ -33,7 +33,6 @@ from .zzz import (
 )
 
 from .hsr import (
-    export_physics_motion_hlsl_hsr,
     export_vertex_physics_hlsl_hsr,
     inject_physics_hsr,
 )
@@ -496,7 +495,6 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                     # 게임별 분기 쉐이더 내보내기 (ZZZ vs HSR)
                     if target_game == 'HSR':
-                        export_physics_motion_hlsl_hsr(custom_physics_dir, idx, root_idx_0, root_idx_1, props)
                         export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_idx_0, root_idx_1)
                     else:
                         export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_idx_0, root_idx_1, props)

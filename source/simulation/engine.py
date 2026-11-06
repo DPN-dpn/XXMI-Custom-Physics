@@ -44,19 +44,23 @@ def _step_preview_ode(t, props, active_bones):
 
     state["prev_t"] = t
 
-    # 3.0초 주기의 인게임 표준 몸통 모션 시뮬레이션
+    # 3.0초 주기의 인게임 표준 몸통 모션 시뮬레이션 (선형 이동 + 토르소 회전 요/롤 복합)
     cycle = t % 3.0
-    if cycle < 1.2:
-        ph = (cycle / 1.2) * math.pi * 2.0
+    if cycle < 1.4:
+        ph = (cycle / 1.4) * math.pi * 2.0
         raw_vel = Vector((
             math.cos(ph) * 0.14,
             math.sin(ph) * 0.15,
             math.sin(ph * 2.0) * 0.20,
         ))
+        yaw_rate = math.sin(ph) * 0.12
+        roll_rate = math.cos(ph) * 0.08
     else:
         raw_vel = Vector((0.0, 0.0, 0.0))
+        yaw_rate = 0.0
+        roll_rate = 0.0
 
-    anim_vel = raw_vel / (1.0 + raw_vel.length * 0.8)
+    anim_vel = raw_vel / (1.0 + raw_vel.length * 0.5)
 
     disps_out = {}
     sub_dt = dt * 0.25
@@ -75,19 +79,29 @@ def _step_preview_ode(t, props, active_bones):
 
         omega = 12.0 * speed
         stiff = omega * omega
-        damp = 2.0 * omega * (damping * 0.50)
+        damp = 2.0 * omega * (damping * 0.55)
 
-        # 정직한 뉴턴 관성력 (F = -m * a): 모든 본은 동일한 물리 법칙에 따라 정직하게 관성 수신
+        # 좌/우 본의 독립 3D 관성력: 몸통 비틀림(Yaw/Roll)에 의한 독립적 차동 가속도 반영
+        b_low = bn.lower()
+        is_right = ("r" in b_low or "오" in b_low or idx % 2 == 1)
+        side_sign = -1.0 if is_right else 1.0
+
+        bone_vel = Vector((
+            anim_vel.x,
+            anim_vel.y - side_sign * yaw_rate * 0.45,
+            anim_vel.z + side_sign * roll_rate * 0.35,
+        ))
+
         ext_force = Vector((
-            -anim_vel.x * 12.0 * inertia,
-            -anim_vel.y * 12.0 * inertia,
-            -anim_vel.z * 12.0 * inertia,
+            -bone_vel.x * 12.0 * inertia,
+            -bone_vel.y * 12.0 * inertia,
+            -bone_vel.z * 12.0 * inertia,
         ))
 
         if idle > 0.001:
-            breath_phase = t * 2.5
+            breath_phase = t * (2.8 * speed) + (0.10 if is_right else 0.0)
             ext_force.z += math.sin(breath_phase) * 1.5 * idle
-            ext_force.y += math.cos(breath_phase) * 1.1 * idle
+            ext_force.y += math.cos(breath_phase) * 1.0 * idle
 
         disp = b_st["disp"]
         vel = b_st["vel"]
@@ -95,13 +109,13 @@ def _step_preview_ode(t, props, active_bones):
         for _ in range(4):
             accel = ext_force - disp * stiff - vel * damp
 
-            vel.x = max(-1.5, min(1.5, vel.x + accel.x * sub_dt))
-            vel.y = max(-1.5, min(1.5, vel.y + accel.y * sub_dt))
-            vel.z = max(-1.5, min(1.5, vel.z + accel.z * sub_dt))
+            vel.x = max(-2.5, min(2.5, vel.x + accel.x * sub_dt))
+            vel.y = max(-2.5, min(2.5, vel.y + accel.y * sub_dt))
+            vel.z = max(-2.5, min(2.5, vel.z + accel.z * sub_dt))
 
-            disp.x = max(-0.024, min(0.024, disp.x + vel.x * sub_dt))
-            disp.y = max(-0.024, min(0.024, disp.y + vel.y * sub_dt))
-            disp.z = max(-0.024, min(0.024, disp.z + vel.z * sub_dt))
+            disp.x = max(-0.035, min(0.035, disp.x + vel.x * sub_dt))
+            disp.y = max(-0.035, min(0.035, disp.y + vel.y * sub_dt))
+            disp.z = max(-0.035, min(0.035, disp.z + vel.z * sub_dt))
 
         b_st["disp"] = disp
         b_st["vel"] = vel
@@ -132,7 +146,8 @@ def preview_frame_handler(scene):
         st = max(0.0, float(p["strength"]))
         bone_scales[bn] = norm_factor * st
 
-    max_disp = 0.024
+    max_strength = max([max(0.1, float(get_bone_params(props, bn)["strength"])) for bn in active_bones], default=1.0)
+    max_disp = 0.035 * max_strength
 
     for odata in objects_data:
         obj_name = odata["obj_name"]
