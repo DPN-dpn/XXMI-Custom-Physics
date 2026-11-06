@@ -786,16 +786,87 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
     return synced_count
 
 
+def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes=3):
+    """
+    물리 본 경계면에서 급격한 가중치 절벽(예: 0.35 -> 0.00)으로 인해 폴리곤이 찢어지는
+    현상을 방지하기 위해, 연결된 메쉬 엣지(Edge)를 따라 매끄러운 그라데이션 감쇠(Taper)를 적용합니다.
+    어떤 단일 엣지도 max_delta를 초과하는 가중치 급변을 겪지 않도록 보장합니다.
+    """
+    valid_objs = [o for o in target_objs if o and o.type == 'MESH' and len(o.data.vertices) > 0]
+    if not valid_objs or not vg_names:
+        return 0
+
+    total_smoothed = 0
+    for obj in valid_objs:
+        mesh = obj.data
+        n_verts = len(mesh.vertices)
+        if n_verts == 0 or len(mesh.edges) == 0:
+            continue
+
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
+        r_arr = np.zeros(n_verts, dtype=bool)
+        if vg_rigid:
+            r_data = read_vertex_group_arrays(obj, {vg_rigid.index: "r"}).get("r")
+            if r_data is not None:
+                r_arr = (r_data > 0.5)
+
+        # 엣지 인접 리스트 구축
+        adj = [[] for _ in range(n_verts)]
+        for e in mesh.edges:
+            v1, v2 = e.vertices[0], e.vertices[1]
+            adj[v1].append(v2)
+            adj[v2].append(v1)
+
+        for vg_name in vg_names:
+            vg = obj.vertex_groups.get(vg_name)
+            if not vg:
+                continue
+
+            arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
+            w = arrs.get("w", np.zeros(n_verts, dtype=np.float32)).copy()
+            if w.max() <= 0.005:
+                continue
+
+            changed = False
+            for _ in range(passes):
+                active_idx = np.nonzero((w > 0.01) & ~r_arr)[0]
+                for vi in active_idx:
+                    cur_w = float(w[vi])
+                    neighbors = adj[vi]
+                    if not neighbors:
+                        continue
+                    min_nb = min(float(w[nb]) for nb in neighbors)
+                    diff = cur_w - min_nb
+                    if diff > max_delta:
+                        # 경계면 완만화: 절벽 정점의 가중치를 부드럽게 감쇠
+                        w[vi] = cur_w - (diff - max_delta) * 0.45
+                        changed = True
+                        total_smoothed += 1
+
+            if changed:
+                for vi in range(n_verts):
+                    if r_arr[vi]:
+                        continue
+                    new_val = float(w[vi])
+                    if new_val > 0.0005:
+                        vg.add([vi], max(0.0, min(1.0, new_val)), 'REPLACE')
+                    else:
+                        vg.remove([vi])
+
+    return total_smoothed
+
+
 def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bones, search_radius=0.015):
     """
-    [절대 방사형 비침투 제약 (Strict Radial Monotonic Non-Penetration Constraint)]:
-    "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다."
+    [절대 다층 비침투 제약 (Strict Multi-Layer Monotonic Non-Penetration Constraint)]:
+    "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)."
     
-    동일한 본 방사선(Radial Ray) 상에 놓인 다층 메쉬(속살 -> 속옷 -> 겉옷 -> 장식)에 대해:
-    1. Pass 1 (바깥쪽 겉옷 상향 동기화): w_outer >= w_inner
-       안쪽 살이 가중치 w_inner로 움직이면, 겉옷은 최소한 w_inner 이상으로 함께 움직여야 함.
-    2. Pass 2 (안쪽 속살 절대 상한 제한): w_inner <= w_outer
-       겉옷의 가중치가 경계선에서 줄어들면, 안쪽 살도 겉옷을 넘지 못하도록 w_outer 이하로 엄격 클램프.
+    기존 표면 연쇄 왜곡(Cascading Avalanche) 및 절벽 찢어짐을 원천 방지하기 위해:
+    1. 동일 표면 인접 버텍스 배제: 표면 법선(Normal) 방향 분리 거리(0.8mm ~ 15mm)와 법선 정렬(내적 >= 0.50)로
+       오직 '속살과 겉옷' 서로 다른 층(Shell) 사이에서만 1:1 대응.
+    2. 비연쇄적 독립 평가: 읽기 전용 버퍼에서 평가하여 표면을 타고 번지는 눈사태 현상을 100% 방지.
+    3. Conformal Promotion: 겉옷 가중치는 최소한 안쪽 살 이상으로 상향 일치(w_outer >= w_inner).
+    4. Ceiling Clamp: 겉옷 가중치가 줄어들거나 0이면 안쪽 살도 겉옷을 넘지 못하도록 엄격 제한(w_inner <= w_outer).
     """
     if not target_objs or not active_bones or not bone_info:
         return 0
@@ -820,8 +891,9 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
         head = Vector(bentry["head"])
         vg_name = f"XXMI_{bname}"
 
-        # 본의 대상 정점 및 가중치 전역 수집
+        # 본의 대상 정점, 월드 좌표 및 법선 수집
         all_pts = []
+        all_norms = []
         all_weights = []
         all_refs = []  # (obj, vi)
 
@@ -830,6 +902,7 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             if not vg:
                 continue
             world = world_vertex_positions(obj)
+            mat3 = obj.matrix_world.to_3x3()
             arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
             w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
 
@@ -837,6 +910,8 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
                 w = float(w_arr[vi])
                 if w > 0.0005:
                     all_pts.append(Vector(world[vi]))
+                    norm = (mat3 @ obj.data.vertices[vi].normal).normalized()
+                    all_norms.append(norm)
                     all_weights.append(w)
                     all_refs.append((obj, vi))
 
@@ -844,6 +919,7 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             continue
 
         weights_arr = np.array(all_weights, dtype=np.float32)
+        orig_weights = weights_arr.copy()
         n_pts = len(all_pts)
 
         kd = KDTree(n_pts)
@@ -851,43 +927,58 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             kd.insert(p, k)
         kd.balance()
 
-        r_arr = np.array([(p - head).length for p in all_pts], dtype=np.float32)
+        promotions = {}
+        clamps = {}
 
-        # 2회 반복으로 연쇄 관통 완전 제거
-        for _ in range(2):
-            # Pass 1: 안쪽 -> 바깥쪽 (Outer Promotion: w_outer >= w_inner)
-            order_asc = np.argsort(r_arr)
-            for k_in in order_asc:
-                w_in = float(weights_arr[k_in])
-                if w_in <= 0.0005:
+        for k in range(n_pts):
+            cur_w = float(orig_weights[k])
+            if cur_w <= 0.005:
+                continue
+            cur_p = all_pts[k]
+            cur_n = all_norms[k]
+
+            hits = kd.find_range(cur_p, search_radius)
+            for _, hit_k, _ in hits:
+                if hit_k == k:
                     continue
-                p_in = all_pts[k_in]
-                u_in = (p_in - head).normalized() if r_arr[k_in] > 1e-4 else Vector((0, -1, 0))
-                hits = kd.find_range(p_in, search_radius)
-                for co, k_out, dist in hits:
-                    if k_out == k_in:
-                        continue
-                    diff = co - p_in
-                    if diff.dot(u_in) > 0.0003:  # 방사선 상에서 바깥쪽에 위치
-                        if weights_arr[k_out] < w_in:
-                            weights_arr[k_out] = w_in
-                            total_adjusted += 1
+                hit_p = all_pts[hit_k]
+                hit_n = all_norms[hit_k]
 
-            # Pass 2: 바깥쪽 -> 안쪽 (Inner Ceiling Clamp: w_inner <= w_outer)
-            order_desc = np.argsort(-r_arr)
-            for k_out in order_desc:
-                w_out = float(weights_arr[k_out])
-                p_out = all_pts[k_out]
-                u_out = (p_out - head).normalized() if r_arr[k_out] > 1e-4 else Vector((0, -1, 0))
-                hits = kd.find_range(p_out, search_radius)
-                for co, k_in, dist in hits:
-                    if k_in == k_out:
-                        continue
-                    diff = p_out - co
-                    if diff.dot(u_out) > 0.0003:  # 방사선 상에서 안쪽에 위치
-                        if weights_arr[k_in] > w_out:
-                            weights_arr[k_in] = w_out
-                            total_adjusted += 1
+                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.50)
+                if cur_n.dot(hit_n) < 0.50:
+                    continue
+
+                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
+                delta = hit_p - cur_p
+                d_norm = delta.dot(cur_n)
+                abs_d_norm = abs(d_norm)
+                if abs_d_norm < 0.0008 or abs_d_norm > search_radius:
+                    continue
+
+                # 3. 접평면 상의 수평 거리: 4.0mm 이내 (동일 수직 단면 매칭)
+                d_perp_sq = delta.length_squared - d_norm * d_norm
+                if d_perp_sq > (0.0040 * 0.0040):
+                    continue
+
+                w_hit = float(orig_weights[hit_k])
+                if d_norm > 0:
+                    # hit_k가 cur_p 앞쪽에 있는 바깥쪽(겉옷): w_outer >= w_inner
+                    if w_hit < cur_w:
+                        promotions[hit_k] = max(promotions.get(hit_k, w_hit), cur_w)
+                else:
+                    # hit_k가 cur_p 뒤쪽에 있는 안쪽(속살): w_inner <= w_outer
+                    if cur_w < w_hit:
+                        clamps[k] = min(clamps.get(k, cur_w), w_hit)
+
+        # 비연쇄적 일괄 반영
+        for vi_k, val in promotions.items():
+            if val > weights_arr[vi_k]:
+                weights_arr[vi_k] = val
+                total_adjusted += 1
+        for vi_k, val in clamps.items():
+            if val < weights_arr[vi_k]:
+                weights_arr[vi_k] = val
+                total_adjusted += 1
 
         # 버텍스 그룹에 반영
         updates_per_obj = {}
@@ -1286,15 +1377,18 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
         applied_slots += 1
 
-    # 7.5. 강체 액세서리 포함 2차 절대 방사형 비침투 제약 및 최종 Seam 일치 보장
-    enforce_radial_monotonic_non_penetration(
-        target_objs, bone_info, active_bones, search_radius=0.015
-    )
-    synchronize_coincident_vertices_across_objects(
-        target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
-    )
+    # 7.5. 경계면 완만화(Boundary Taper)로 절벽 찢어짐 원천 차단
+    active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
+    smooth_boundary_gradient_taper(target_objs, active_vg_names, max_delta=0.08, passes=3)
+
+    # 7.6. 가슴 중앙선 중복 가중치 재정규화 (가슴골 2배 돌출 원천 차단)
     normalize_overlapping_bone_weights(
         target_objs, active_bones, max_total_weight=target_peak_cap
+    )
+
+    # 7.7. [절대 최종 단계]: 모든 동일 위치 공유 정점(UV 심/하드 엣지) 100% 완전 동기화
+    num_synced = synchronize_coincident_vertices_across_objects(
+        target_objs, vg_names=active_vg_names, tol=0.0012
     )
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"

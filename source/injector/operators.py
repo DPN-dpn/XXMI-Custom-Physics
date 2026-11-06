@@ -338,6 +338,84 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         for bi, u_w in updates_inj.items():
                             w_arr[bi] = u_w
 
+                # 3. .ib 인덱스 버퍼 기반 경계면 완만화 (Boundary Taper):
+                # 단일 메쉬 폴리곤 엣지 상에서 가중치가 0.35 -> 0.00으로 급락하여 발생하는 인게임 메쉬 찢어짐 원천 차단
+                ib_candidates = [
+                    os.path.splitext(buf_path)[0] + ".ib",
+                    os.path.join(mod_folder, raw_fname.replace("Position.buf", ".ib")),
+                    os.path.join(mod_folder, raw_fname.replace("Position", ".ib")),
+                ]
+                ib_found = next((p for p in ib_candidates if os.path.exists(p)), None)
+                if ib_found:
+                    try:
+                        with open(ib_found, 'rb') as f_ib:
+                            ib_raw = f_ib.read()
+                        ib_tris = np.frombuffer(ib_raw, dtype=np.uint32)
+                        if len(ib_tris) == 0 or ib_tris.max() >= n_buf:
+                            ib_tris = np.frombuffer(ib_raw, dtype=np.uint16)
+                        if len(ib_tris) >= 3 and ib_tris.max() < n_buf:
+                            tris = ib_tris.reshape(-1, 3)
+                            adj_buf = [[] for _ in range(n_buf)]
+                            for t0, t1, t2 in tris:
+                                adj_buf[t0].append(t1); adj_buf[t0].append(t2)
+                                adj_buf[t1].append(t0); adj_buf[t1].append(t2)
+                                adj_buf[t2].append(t0); adj_buf[t2].append(t1)
+                            for w_arr in (wl_out, wr_out):
+                                for _ in range(3):
+                                    active_b = np.nonzero(w_arr > 0.01)[0]
+                                    for vi in active_b:
+                                        nbrs = adj_buf[vi]
+                                        if not nbrs:
+                                            continue
+                                        min_nb = min(w_arr[nb] for nb in nbrs)
+                                        diff = w_arr[vi] - min_nb
+                                        if diff > 0.08:
+                                            w_arr[vi] -= (diff - 0.08) * 0.45
+                    except Exception as e:
+                        pass
+
+                # 4. [절대 최종 단계]: Position.buf 내 모든 동일 위치(UV 심/하드 엣지 분리점) 100% 완전 동기화
+                # 3DMigoto 버퍼 상의 분리 정점(Coincident Vertices) 가중치 불일치로 인한 구멍 및 찢어짐 원천 차단
+                kd_co = KDTree(n_buf)
+                for vi, p in enumerate(buf_np):
+                    kd_co.insert(Vector(p), vi)
+                kd_co.balance()
+
+                parent = list(range(n_buf))
+                def find_p(i):
+                    path = []
+                    while parent[i] != i:
+                        path.append(i)
+                        i = parent[i]
+                    for node in path:
+                        parent[node] = i
+                    return i
+                def union_p(i, j):
+                    pi, pj = find_p(i), find_p(j)
+                    if pi != pj:
+                        parent[pi] = pj
+
+                active_buf_idx = np.nonzero((wl_out > 0.0001) | (wr_out > 0.0001) | (rig_out > 0.0001))[0]
+                for vi in active_buf_idx:
+                    hits = kd_co.find_range(Vector(buf_np[vi]), 0.0008)
+                    for _, hit_k, _ in hits:
+                        union_p(vi, hit_k)
+
+                co_groups_map = {}
+                for vi in range(n_buf):
+                    root = find_p(vi)
+                    co_groups_map.setdefault(root, []).append(vi)
+
+                for root, g_list in co_groups_map.items():
+                    if len(g_list) > 1 and any(wl_out[v] > 0.0001 or wr_out[v] > 0.0001 or rig_out[v] > 0.0001 for v in g_list):
+                        max_l = max(float(wl_out[v]) for v in g_list)
+                        max_r = max(float(wr_out[v]) for v in g_list)
+                        max_rg = max(float(rig_out[v]) for v in g_list)
+                        for v in g_list:
+                            wl_out[v] = max_l
+                            wr_out[v] = max_r
+                            rig_out[v] = max_rg
+
                 max_wl = float(wl_out.max())
                 max_wr = float(wr_out.max())
                 max_rig = float(rig_out.max())
