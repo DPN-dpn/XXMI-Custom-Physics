@@ -443,9 +443,9 @@ def normalize_overlapping_bone_weights(target_objs, active_bones, max_total_weig
     return total_clamped
 
 
-def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, tol=0.0012):
+def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, tol=0.0002):
     """
-    모든 대상 오브젝트에 걸쳐 3D 공간 상에서 동일한 위치(기본 1.2mm 이내)를 공유하는
+    모든 대상 오브젝트에 걸쳐 3D 공간 상에서 동일한 위치(기본 0.2mm 이내)를 공유하는
     모든 정점(UV 심, 하드 엣지 분리점 등)의 가중치를 100% 동일하게 동기화합니다.
     동적으로 등록된 모든 모핑 본 버텍스 그룹(XXMI_*)을 지원합니다.
     """
@@ -673,12 +673,15 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
             w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
 
+            e0, e1 = mesh_edge_arrays(obj.data)
+            comp_labels = label_components(len(world), e0, e1)
+
             for vi in range(len(world)):
                 w = float(w_arr[vi])
                 if w > 0.0005:
                     all_pts.append(Vector(world[vi]))
                     all_weights.append(w)
-                    all_refs.append((obj, vi))
+                    all_refs.append((obj, comp_labels[vi], vi))
 
         if len(all_pts) < 2:
             continue
@@ -714,9 +717,17 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
                 cur_u = uvecs[k]
 
                 hits = kd.find_range(cur_p, search_radius)
+                obj_k, comp_k, vi_k = all_refs[k]
+
                 for _, hit_k, _ in hits:
                     if hit_k == k:
                         continue
+                    obj_hit, comp_hit, vi_hit = all_refs[hit_k]
+
+                    # 동일 오브젝트의 동일 연결 컴포넌트(연속된 메쉬 표면) 내부의 정점끼리는 비교하지 않음 (표면 감쇠 보존)
+                    if obj_k == obj_hit and comp_k == comp_hit:
+                        continue
+
                     hit_d = dists[hit_k]
                     diff_d = hit_d - cur_d
                     abs_diff_d = abs(diff_d)
@@ -735,14 +746,14 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
 
                     if diff_d > 0:
                         # hit_k가 cur_p보다 바깥쪽(겉옷): cur_p(살) <= hit_k(옷)
+                        # 겉옷(outer)은 최소한 속살(inner) 이상으로 움직이도록 상향 일치
                         if cur_w > hit_w:
                             promotions[hit_k] = max(promotions.get(hit_k, hit_w), cur_w)
-                            clamps[k] = min(clamps.get(k, cur_w), hit_w)
                     else:
                         # hit_k가 cur_p보다 안쪽(속살): hit_k(살) <= cur_p(옷)
+                        # 겉옷(cur_p)은 최소한 속살(hit_k) 이상으로 움직이도록 상향 일치
                         if hit_w > cur_w:
                             promotions[k] = max(promotions.get(k, cur_w), hit_w)
-                            clamps[hit_k] = min(clamps.get(hit_k, hit_w), cur_w)
 
             # 비연쇄적 일괄 반영
             changed = False
@@ -763,7 +774,7 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
         # 버텍스 그룹에 반영
         updates_per_obj = {}
         for k in range(n_pts):
-            obj, vi = all_refs[k]
+            obj, comp_id, vi = all_refs[k]
             new_w = float(weights_arr[k])
             if abs(new_w - all_weights[k]) > 1e-4:
                 updates_per_obj.setdefault(obj, []).append((vi, new_w))
@@ -920,33 +931,20 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                 if vi < n_v:
                     is_registered_b[vi] = True
 
-            if side_lock_registered:
-                # 사용자가 등록한 정점 외에, 그 바로 위/앞에 얹힌 겉옷/액세서리 쉘 정점들을 자동 포함 (겉옷 0.000 방치로 인한 찢어짐 원천 차단)
-                expanded_cand = set(np.nonzero(is_registered_b)[0].tolist())
-                if expanded_cand:
-                    kd_obj = KDTree(n_v)
-                    for v_k in range(n_v):
-                        kd_obj.insert(Vector(world[v_k]), v_k)
-                    kd_obj.balance()
-                    for v_k in list(expanded_cand):
-                        p_k = Vector(world[v_k])
-                        for _, near_idx, dist in kd_obj.find_range(p_k, 0.018):
-                            expanded_cand.add(near_idx)
-                    cand_mask = np.zeros(n_v, dtype=bool)
-                    cand_mask[list(expanded_cand)] = True
-                    cand_mask &= ~rigid_mask
-                else:
-                    cand_mask = np.zeros(n_v, dtype=bool)
+            if slot_obj_verts:
+                # 사용자가 등록한 정점 목록이 있을 경우 해당 정점들을 엄격히 존중 (주변 메쉬로의 무단 번짐 차단)
+                cand_mask = np.zeros(n_v, dtype=bool)
+                for vi in slot_obj_verts:
+                    if vi < n_v:
+                        cand_mask[vi] = True
+                cand_mask &= ~rigid_mask
             else:
+                # 사용자가 별도 등록하지 않은 연관 오브젝트(겉옷/장신구 등)의 경우 본 기하학 반경 내 정점 자동 후보군 포함
                 dist = np.linalg.norm(world - cent, axis=1)
                 in_radius = (dist <= eff_radius)
                 dot_fwd = (world - head) @ fwd_u
-                front_ok = (dot_fwd >= -eff_radius * 0.35)
-                cand_mask = (is_registered_b | (in_radius & front_ok)) & ~rigid_mask
-
-                non_cand_prev = np.nonzero(is_registered_b & ~cand_mask)[0]
-                if len(non_cand_prev) > 0:
-                    zero_entries.append((vg, non_cand_prev.tolist()))
+                front_ok = (dot_fwd >= -eff_radius * 0.25)
+                cand_mask = (in_radius & front_ok) & ~rigid_mask
 
             cand_idx = np.nonzero(cand_mask)[0]
             for vi in cand_idx.tolist():
@@ -965,15 +963,10 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                 vg.add([vi], max(0.0, min(1.0, wi)), 'REPLACE')
                 total_recomputed_verts += 1
             else:
-                if not side_lock_registered:
-                    vg.remove([vi])
-                else:
-                    # 사용자가 등록한 정점은 경계선 찢어짐/스파이크 방지를 위해 최소 가중치를 유지하여 스무딩 연결성 보존
-                    vg.add([vi], 0.002, 'REPLACE')
+                vg.remove([vi])
 
-        if not side_lock_registered:
-            for vg, z_list in zero_entries:
-                vg.remove(z_list)
+        for vg, z_list in zero_entries:
+            vg.remove(z_list)
 
     # 4. 라플라시안 스무딩 (모든 활성 모핑 본 버텍스 그룹 대상)
     for bname in active_bones:
@@ -1144,7 +1137,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
     # 7.7. [절대 최종 단계]: 모든 동일 위치 공유 정점(UV 심/하드 엣지) 100% 완전 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
-        target_objs, vg_names=active_vg_names, tol=0.0012
+        target_objs, vg_names=active_vg_names, tol=0.0002
     )
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"
