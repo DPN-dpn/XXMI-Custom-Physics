@@ -4,11 +4,12 @@ import json
 import math
 import struct
 import bpy
-from mathutils import Vector
+from mathutils import Vector, Matrix
 from mathutils.kdtree import KDTree
 from ..utils import ensure_object_visible
 from ..bone.rig import get_or_create_breast_rig
 from ..bone.weighting import rebake_mesh_weights_from_rig
+from .buffer_io import _find_best_transform_for_object
 
 
 def _load_physics_from_mod(mod_folder, context, props):
@@ -266,6 +267,10 @@ def _load_physics_from_mod(mod_folder, context, props):
         all_b0_verts = {}
         all_b1_verts = {}
         all_rigid_verts = {}
+
+        b0 = props.bone_items[0] if len(props.bone_items) > 0 else None
+        b1 = props.bone_items[1] if len(props.bone_items) > 1 else None
+
         for mp, pp, n in pairs:
             with open(mp, 'rb') as f:
                 map_data = f.read()
@@ -289,33 +294,34 @@ def _load_physics_from_mod(mod_folder, context, props):
             if obj.type != 'MESH':
                 continue
             mesh = obj.data
-            mw = obj.matrix_world
             n_m = len(mesh.vertices)
             if n_m == 0:
                 continue
 
-            best_pcache = None
-            best_match_ratio = 0.0
             sample_size = min(30, n_m)
             step = (n_m - 1) / max(1, sample_size - 1)
-            sample_pts = [mw @ mesh.vertices[int(k * step)].co for k in range(sample_size)]
+            sample_obj = [mesh.vertices[int(k * step)].co for k in range(sample_size)]
+
+            best_pcache = None
+            best_mat = None
+            best_score = float('inf')
 
             for pcache in pair_caches:
                 kd = pcache["kd"]
-                matched_s = sum(1 for p in sample_pts if kd.find(p)[2] < 0.05)
-                ratio = matched_s / float(sample_size)
-                if ratio > best_match_ratio:
-                    best_match_ratio = ratio
+                mat, score = _find_best_transform_for_object(kd, sample_obj, obj)
+                if score < best_score:
+                    best_score = score
+                    best_mat = mat
                     best_pcache = pcache
+                if score < 1e-4:
+                    break
 
-            if not best_pcache or best_match_ratio < 0.5:
+            if not best_pcache or best_score > 0.10:
                 continue
 
             map_data = best_pcache["map_data"]
             kd = best_pcache["kd"]
 
-            b0 = props.bone_items[0] if len(props.bone_items) > 0 else None
-            b1 = props.bone_items[1] if len(props.bone_items) > 1 else None
             vg_0_name = f"XXMI_{b0.name}" if b0 else "XXMI_Bone_0"
             vg_1_name = f"XXMI_{b1.name}" if b1 else "XXMI_Bone_1"
 
@@ -330,8 +336,8 @@ def _load_physics_from_mod(mod_folder, context, props):
             rigid_vis = []
 
             for vi, v in enumerate(mesh.vertices):
-                p_w = mw @ v.co
-                _, b_idx, dist = kd.find(p_w)
+                p_buf = best_mat @ v.co
+                _, b_idx, dist = kd.find(p_buf)
                 if dist < 0.02:
                     w0, w1, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
                     if w0 > 0.0001:
@@ -354,8 +360,8 @@ def _load_physics_from_mod(mod_folder, context, props):
             if rigid_vis:
                 all_rigid_verts[obj.name] = rigid_vis
 
-            if non_zero_breast > 0 or rigid_count > 0:
-                restored_mesh_names.append(f"{obj.name} (물리본: {non_zero_breast}개, 강체: {rigid_count}개)")
+            if non_zero_phys > 0 or rigid_count > 0:
+                restored_mesh_names.append(f"{obj.name} (물리본: {non_zero_phys}개, 강체: {rigid_count}개)")
 
         if b0 and all_b0_verts and (not b0.data_json or b0.data_json == "{}"):
             from ..bone.data import set_bone_data

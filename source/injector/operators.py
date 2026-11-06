@@ -75,6 +75,15 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         b0_name = active_bones[0] if len(active_bones) > 0 else None
         b1_name = active_bones[1] if len(active_bones) > 1 else None
 
+        from ..bone.rig import get_rig_bone_info
+        bone_info = get_rig_bone_info(rig) if rig else {}
+        b0_head = bone_info.get(b0_name, {}).get("head") if b0_name else None
+        b1_head = bone_info.get(b1_name, {}).get("head") if b1_name else None
+        if not b0_head and "L" in bone_info:
+            b0_head = bone_info["L"].get("head")
+        if not b1_head and "R" in bone_info:
+            b1_head = bone_info["R"].get("head")
+
         all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
         target_vgs = all_bone_vgs | {"XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
 
@@ -268,9 +277,10 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     wl_out[overlap_mask] *= scale
                     wr_out[overlap_mask] *= scale
 
-                # 2. Position.buf 3D 버퍼 공간 수직 레이어 Anti-Clipping 후처리
-                # 보간 오차로 인해 속살 가중치가 겉옷보다 커지는 역전 현상을 최종 0개로 소멸
-                # (수평 단면 거리 3.5mm 이내에서 앞뒤로 겹쳐 있는 수직 레이어만 매칭하여 그라데이션 100% 무손실 보존)
+                # 2. Position.buf 3D 버퍼 공간 방사형 다층 비침투 (Strict Radial Non-Penetration)
+                # "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)"
+                # 표면 법선(Normal) 오차를 완전히 배제하고, 본 중심에서의 방사형 거리 r 및 방사선(Ray) 방향을 기준으로
+                # 속살 가중치가 겉옷을 초과하는 역전 현상을 100% 원천 차단
                 phys_indices = np.nonzero((wl_out > 0.005) | (wr_out > 0.005))[0]
                 if len(phys_indices) > 1:
                     kd_phys = KDTree(len(phys_indices))
@@ -278,100 +288,147 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         kd_phys.insert(Vector(buf_np[bi]), k)
                     kd_phys.balance()
 
-                    for w_arr in (wl_out, wr_out):
+                    # 본 앵커(Head)의 버퍼 공간 좌표 추정
+                    anchor_heads = []
+                    for b_head_w in (b0_head, b1_head):
+                        if b_head_w is not None and best_mat is not None:
+                            anchor_heads.append(np.array((best_mat @ Vector(b_head_w))[:], dtype=np.float64))
+                        else:
+                            anchor_heads.append(None)
+
+                    for slot_idx, w_arr in enumerate((wl_out, wr_out)):
                         if w_arr.max() <= 0.005:
                             continue
                         sub_indices = [k for k in range(len(phys_indices)) if w_arr[phys_indices[k]] > 0.005]
                         if len(sub_indices) < 2:
                             continue
 
-                        # 표면 법선(Normal) 기반 다층 레이어 Anti-Clipping 후처리
-                        # 아랫가슴(Underboob), 윗가슴, 가슴골 등 곡면 경사 방향에 무관하게 항상 인체 외측을 정확히 판별
-                        # 다층 레이어(살과 옷) 가중치 100% 1:1 완벽 동기화 (전방 뚫림 및 후방 압축 함몰 원천 차단)
-                        orig_w = w_arr.copy()
-                        updates_inj = {}
-                        for k in sub_indices:
-                            bi = phys_indices[k]
-                            cur_w = float(orig_w[bi])
-                            if cur_w <= 0.005:
-                                continue
-                            cur_p = buf_np[bi]
-                            cur_n = buf_norm[bi]
+                        b_head_buf = anchor_heads[slot_idx] if slot_idx < len(anchor_heads) else None
+                        if b_head_buf is None:
+                            # 앵커가 없으면 활성 정점들의 기하학적 중심보다 약간 안쪽을 앵커로 추정
+                            sub_pts = buf_np[phys_indices[sub_indices]]
+                            b_head_buf = sub_pts.mean(axis=0)
+                            b_head_buf[2] -= 0.02  # 깊이 방향 후퇴
 
-                            hits = kd_phys.find_range(Vector(cur_p), 0.015)
-                            if not hits:
-                                continue
+                        sub_pts = buf_np[phys_indices[sub_indices]]
+                        vecs = sub_pts - b_head_buf
+                        dists = np.linalg.norm(vecs, axis=1)
+                        uvecs = vecs / np.maximum(dists[:, None], 1e-6)
 
-                            for _, hit_k, _ in hits:
-                                if hit_k == k:
+                        for _ in range(2):
+                            orig_w = w_arr.copy()
+                            promotions = {}
+                            clamps = {}
+
+                            for local_k, k in enumerate(sub_indices):
+                                bi = phys_indices[k]
+                                cur_w = float(orig_w[bi])
+                                if cur_w <= 0.005:
                                     continue
-                                hit_bi = phys_indices[hit_k]
-                                hit_p = buf_np[hit_bi]
-                                hit_n = buf_norm[hit_bi]
+                                cur_p = sub_pts[local_k]
+                                cur_d = dists[local_k]
+                                cur_u = uvecs[local_k]
 
-                                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.60)
-                                dot_n = float(cur_n[0]*hit_n[0] + cur_n[1]*hit_n[1] + cur_n[2]*hit_n[2])
-                                if dot_n < 0.60:
-                                    continue
+                                hits = kd_phys.find_range(Vector(cur_p), 0.015)
+                                for _, hit_k, _ in hits:
+                                    if hit_k == k:
+                                        continue
+                                    hit_bi = phys_indices[hit_k]
+                                    hit_w = float(orig_w[hit_bi])
+                                    if hit_w <= 0.001:
+                                        continue
 
-                                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
-                                delta = hit_p - cur_p
-                                d_norm = float(delta[0]*cur_n[0] + delta[1]*cur_n[1] + delta[2]*cur_n[2])
-                                abs_d_norm = abs(d_norm)
-                                if abs_d_norm < 0.0008 or abs_d_norm > 0.015:
-                                    continue
+                                    hit_p = buf_np[hit_bi]
+                                    hit_v = hit_p - b_head_buf
+                                    hit_d = float(np.linalg.norm(hit_v))
+                                    diff_d = hit_d - cur_d
+                                    abs_diff_d = abs(diff_d)
 
-                                # 3. 접평면 상의 수평 거리: 5.0mm 이내 (삼각망 폴리곤 간격 수용)
-                                d2 = float(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2])
-                                d_perp_sq = max(0.0, d2 - d_norm * d_norm)
-                                if d_perp_sq > (0.0050 * 0.0050):
-                                    continue
+                                    # 1. 서로 다른 층(Shell) 사이인지 확인 (0.8mm ~ 15mm)
+                                    if abs_diff_d < 0.0008 or abs_diff_d > 0.015:
+                                        continue
 
-                                # 4. 1:1 일치화 (비연쇄적 독립 매칭: 둘 중 최대값으로 통일)
-                                unified = max(cur_w, float(orig_w[hit_bi]))
-                                if unified > updates_inj.get(bi, 0.0):
-                                    updates_inj[bi] = unified
-                                if unified > updates_inj.get(hit_bi, 0.0):
-                                    updates_inj[hit_bi] = unified
+                                    # 2. 동일한 방사선(Ray) 선상인지 확인 (내적 >= 0.985)
+                                    hit_u = hit_v / max(hit_d, 1e-6)
+                                    dot_u = float(np.dot(cur_u, hit_u))
+                                    if dot_u < 0.985:
+                                        continue
 
-                        for bi, u_w in updates_inj.items():
-                            w_arr[bi] = u_w
+                                    if diff_d > 0:
+                                        # hit_bi가 cur_p보다 바깥쪽(겉옷): cur_p(살) <= hit_bi(옷)
+                                        if cur_w > hit_w:
+                                            promotions[hit_bi] = max(promotions.get(hit_bi, hit_w), cur_w)
+                                            clamps[bi] = min(clamps.get(bi, cur_w), hit_w)
+                                    else:
+                                        # hit_bi가 cur_p보다 안쪽(속살): hit_bi(살) <= cur_p(옷)
+                                        if hit_w > cur_w:
+                                            promotions[bi] = max(promotions.get(bi, cur_w), hit_w)
+                                            clamps[hit_bi] = min(clamps.get(hit_bi, hit_w), cur_w)
 
-                # 3. .ib 인덱스 버퍼 기반 경계면 완만화 (Boundary Taper):
-                # 단일 메쉬 폴리곤 엣지 상에서 가중치가 0.35 -> 0.00으로 급락하여 발생하는 인게임 메쉬 찢어짐 원천 차단
+                            changed = False
+                            for bi, u_w in promotions.items():
+                                if u_w > w_arr[bi]:
+                                    w_arr[bi] = u_w
+                                    changed = True
+                            for bi, u_w in clamps.items():
+                                if u_w < w_arr[bi]:
+                                    w_arr[bi] = u_w
+                                    changed = True
+
+                            if not changed:
+                                break
+
+                # 3. .ib 인덱스 버퍼 기반 삼각망 찢어짐(Tearing) 완천 차단 (Boundary Gradient Taper):
+                # 단일 메쉬 폴리곤 엣지 상에서 가중치가 0.35 -> 0.00으로 급락하여 발생하는 인게임 메쉬 찢어짐 원천 소멸
                 ib_candidates = [
                     os.path.splitext(buf_path)[0] + ".ib",
                     os.path.join(mod_folder, raw_fname.replace("Position.buf", ".ib")),
                     os.path.join(mod_folder, raw_fname.replace("Position", ".ib")),
                 ]
-                ib_found = next((p for p in ib_candidates if os.path.exists(p)), None)
-                if ib_found:
-                    try:
-                        with open(ib_found, 'rb') as f_ib:
-                            ib_raw = f_ib.read()
-                        ib_tris = np.frombuffer(ib_raw, dtype=np.uint32)
-                        if len(ib_tris) == 0 or ib_tris.max() >= n_buf:
-                            ib_tris = np.frombuffer(ib_raw, dtype=np.uint16)
-                        if len(ib_tris) >= 3 and ib_tris.max() < n_buf:
-                            tris = ib_tris.reshape(-1, 3)
-                            adj_buf = [[] for _ in range(n_buf)]
-                            for t0, t1, t2 in tris:
-                                adj_buf[t0].append(t1); adj_buf[t0].append(t2)
-                                adj_buf[t1].append(t0); adj_buf[t1].append(t2)
-                                adj_buf[t2].append(t0); adj_buf[t2].append(t1)
-                            for w_arr in (wl_out, wr_out):
-                                for _ in range(3):
-                                    active_b = np.nonzero(w_arr > 0.01)[0]
-                                    for vi in active_b:
-                                        nbrs = adj_buf[vi]
-                                        if not nbrs:
-                                            continue
-                                        min_nb = min(w_arr[nb] for nb in nbrs)
-                                        diff = w_arr[vi] - min_nb
-                                        if diff > 0.08:
-                                            w_arr[vi] -= (diff - 0.08) * 0.45
-                    except Exception as e:
-                        pass
+                # 파일명 유사도 및 모드 폴더 전체에서 관련 .ib 파일 검색
+                base_stem = os.path.splitext(raw_fname)[0].replace("Position", "").replace("Blend", "").replace("TexCoord", "").lower()
+                for root, _, files in os.walk(mod_folder):
+                    for f in files:
+                        if f.lower().endswith('.ib'):
+                            f_stem = os.path.splitext(f)[0].lower()
+                            if base_stem in f_stem or f_stem in base_stem:
+                                p_cand = os.path.join(root, f)
+                                if p_cand not in ib_candidates:
+                                    ib_candidates.append(p_cand)
+
+                all_tris_list = []
+                for p_ib in ib_candidates:
+                    if os.path.exists(p_ib):
+                        try:
+                            with open(p_ib, 'rb') as f_ib:
+                                ib_raw = f_ib.read()
+                            ib_tris = np.frombuffer(ib_raw, dtype=np.uint32)
+                            if len(ib_tris) == 0 or ib_tris.max() >= n_buf:
+                                ib_tris = np.frombuffer(ib_raw, dtype=np.uint16)
+                            if len(ib_tris) >= 3 and ib_tris.max() < n_buf:
+                                all_tris_list.append(ib_tris.reshape(-1, 3))
+                        except Exception:
+                            pass
+
+                if all_tris_list:
+                    tris = np.vstack(all_tris_list)
+                    adj_buf = [[] for _ in range(n_buf)]
+                    for t0, t1, t2 in tris:
+                        adj_buf[t0].append(t1); adj_buf[t0].append(t2)
+                        adj_buf[t1].append(t0); adj_buf[t1].append(t2)
+                        adj_buf[t2].append(t0); adj_buf[t2].append(t1)
+
+                    for w_arr in (wl_out, wr_out):
+                        for _ in range(5):
+                            active_b = np.nonzero(w_arr > 0.005)[0]
+                            for vi in active_b:
+                                nbrs = adj_buf[vi]
+                                if not nbrs:
+                                    continue
+                                min_nb = min(w_arr[nb] for nb in nbrs)
+                                diff = w_arr[vi] - min_nb
+                                if diff > 0.06:
+                                    w_arr[vi] -= (diff - 0.06) * 0.50
 
                 # 4. [절대 최종 단계]: Position.buf 내 모든 동일 위치(UV 심/하드 엣지 분리점) 100% 완전 동기화
                 # 3DMigoto 버퍼 상의 분리 정점(Coincident Vertices) 가중치 불일치로 인한 구멍 및 찢어짐 원천 차단

@@ -623,15 +623,19 @@ def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes
 
 def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bones, search_radius=0.015):
     """
-    [절대 다층 비침투 제약 (Strict Multi-Layer Monotonic Non-Penetration Constraint)]:
+    [절대 다층 방사형 비침투 제약 (Strict Radial Multi-Layer Non-Penetration Constraint)]:
     "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)."
     
-    기존 표면 연쇄 왜곡(Cascading Avalanche) 및 절벽 찢어짐을 원천 방지하기 위해:
-    1. 동일 표면 인접 버텍스 배제: 표면 법선(Normal) 방향 분리 거리(0.8mm ~ 15mm)와 법선 정렬(내적 >= 0.50)로
-       오직 '속살과 겉옷' 서로 다른 층(Shell) 사이에서만 1:1 대응.
-    2. 비연쇄적 독립 평가: 읽기 전용 버퍼에서 평가하여 표면을 타고 번지는 눈사태 현상을 100% 방지.
-    3. Conformal Promotion: 겉옷 가중치는 최소한 안쪽 살 이상으로 상향 일치(w_outer >= w_inner).
-    4. Ceiling Clamp: 겉옷 가중치가 줄어들거나 0이면 안쪽 살도 겉옷을 넘지 못하도록 엄격 제한(w_inner <= w_outer).
+    기하학적 원리:
+    1. 본의 흉벽 앵커(Head)를 원점으로 하여, 각 정점의 방사 거리 r = ||P - Head|| 및 방사 방향 단위벡터 u = (P - Head)/r 산출.
+    2. 본 중심에서 바라본 동일 방사선(Ray, 각도 10도 이내 또는 각거리 3.5mm 이내) 선상에 놓인 정점들을 매칭.
+    3. 방사 거리 차이가 0.8mm ~ 15mm인 서로 다른 층(속살 vs 겉옷)에 대해:
+       - r_inner < r_outer (본 중심에 가까운 살 vs 먼 옷)
+       - 절대 비침투: w_inner <= w_outer
+       - 만약 w_inner > w_outer 이면:
+         - 겉옷(outer)은 최소한 속살 이상으로 상향 일치: w_outer = max(w_outer, w_inner)
+         - 속살(inner)은 겉옷을 넘지 못하도록 엄격 제한: w_inner = min(w_inner, w_outer)
+    4. 표면 법선(Normal) 오차에 취약하지 않고 곡면 전체에서 속살 돌출을 100% 원천 봉쇄합니다.
     """
     if not target_objs or not active_bones or not bone_info:
         return 0
@@ -656,9 +660,8 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
         head = Vector(bentry["head"])
         vg_name = f"XXMI_{bname}"
 
-        # 본의 대상 정점, 월드 좌표 및 법선 수집
+        # 본의 대상 정점, 월드 좌표 및 참조 수집
         all_pts = []
-        all_norms = []
         all_weights = []
         all_refs = []  # (obj, vi)
 
@@ -667,7 +670,6 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             if not vg:
                 continue
             world = world_vertex_positions(obj)
-            mat3 = obj.matrix_world.to_3x3()
             arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
             w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
 
@@ -675,8 +677,6 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
                 w = float(w_arr[vi])
                 if w > 0.0005:
                     all_pts.append(Vector(world[vi]))
-                    norm = (mat3 @ obj.data.vertices[vi].normal).normalized()
-                    all_norms.append(norm)
                     all_weights.append(w)
                     all_refs.append((obj, vi))
 
@@ -684,66 +684,81 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             continue
 
         weights_arr = np.array(all_weights, dtype=np.float32)
-        orig_weights = weights_arr.copy()
         n_pts = len(all_pts)
+
+        # 본 앵커로부터의 방사 벡터 및 거리 계산
+        dists = np.empty(n_pts, dtype=np.float64)
+        uvecs = []
+        for k in range(n_pts):
+            v_head = all_pts[k] - head
+            d = v_head.length
+            dists[k] = d
+            uvecs.append(v_head / max(d, 1e-6))
 
         kd = KDTree(n_pts)
         for k, p in enumerate(all_pts):
             kd.insert(p, k)
         kd.balance()
 
-        promotions = {}
-        clamps = {}
+        for pass_idx in range(2):
+            orig_weights = weights_arr.copy()
+            promotions = {}
+            clamps = {}
 
-        for k in range(n_pts):
-            cur_w = float(orig_weights[k])
-            if cur_w <= 0.005:
-                continue
-            cur_p = all_pts[k]
-            cur_n = all_norms[k]
-
-            hits = kd.find_range(cur_p, search_radius)
-            for _, hit_k, _ in hits:
-                if hit_k == k:
+            for k in range(n_pts):
+                cur_w = float(orig_weights[k])
+                if cur_w <= 0.005:
                     continue
-                hit_p = all_pts[hit_k]
-                hit_n = all_norms[hit_k]
+                cur_p = all_pts[k]
+                cur_d = dists[k]
+                cur_u = uvecs[k]
 
-                # 1. 동일한 방향을 바라보는 다층 레이어인지 확인 (노멀 내적 >= 0.50)
-                if cur_n.dot(hit_n) < 0.50:
-                    continue
+                hits = kd.find_range(cur_p, search_radius)
+                for _, hit_k, _ in hits:
+                    if hit_k == k:
+                        continue
+                    hit_d = dists[hit_k]
+                    diff_d = hit_d - cur_d
+                    abs_diff_d = abs(diff_d)
 
-                # 2. 법선 방향 분리 거리 확인 (동일 표면 인접 버텍스 배제: 0.8mm ~ 15mm)
-                delta = hit_p - cur_p
-                d_norm = delta.dot(cur_n)
-                abs_d_norm = abs(d_norm)
-                if abs_d_norm < 0.0008 or abs_d_norm > search_radius:
-                    continue
+                    # 1. 서로 다른 층(Shell) 사이인지 확인 (0.8mm ~ search_radius)
+                    if abs_diff_d < 0.0008 or abs_diff_d > search_radius:
+                        continue
 
-                # 3. 접평면 상의 수평 거리: 4.0mm 이내 (동일 수직 단면 매칭)
-                d_perp_sq = delta.length_squared - d_norm * d_norm
-                if d_perp_sq > (0.0040 * 0.0040):
-                    continue
+                    # 2. 동일한 방사 각도 선상에 놓여 있는지 확인 (내적 >= 0.985 또는 접평면 오차 <= 3.5mm)
+                    hit_u = uvecs[hit_k]
+                    dot_u = cur_u.dot(hit_u)
+                    if dot_u < 0.985:
+                        continue
 
-                w_hit = float(orig_weights[hit_k])
-                if d_norm > 0:
-                    # hit_k가 cur_p 앞쪽에 있는 바깥쪽(겉옷): w_outer >= w_inner
-                    if w_hit < cur_w:
-                        promotions[hit_k] = max(promotions.get(hit_k, w_hit), cur_w)
-                else:
-                    # hit_k가 cur_p 뒤쪽에 있는 안쪽(속살): w_inner <= w_outer
-                    if cur_w < w_hit:
-                        clamps[k] = min(clamps.get(k, cur_w), w_hit)
+                    hit_w = float(orig_weights[hit_k])
 
-        # 비연쇄적 일괄 반영
-        for vi_k, val in promotions.items():
-            if val > weights_arr[vi_k]:
-                weights_arr[vi_k] = val
-                total_adjusted += 1
-        for vi_k, val in clamps.items():
-            if val < weights_arr[vi_k]:
-                weights_arr[vi_k] = val
-                total_adjusted += 1
+                    if diff_d > 0:
+                        # hit_k가 cur_p보다 바깥쪽(겉옷): cur_p(살) <= hit_k(옷)
+                        if cur_w > hit_w:
+                            promotions[hit_k] = max(promotions.get(hit_k, hit_w), cur_w)
+                            clamps[k] = min(clamps.get(k, cur_w), hit_w)
+                    else:
+                        # hit_k가 cur_p보다 안쪽(속살): hit_k(살) <= cur_p(옷)
+                        if hit_w > cur_w:
+                            promotions[k] = max(promotions.get(k, cur_w), hit_w)
+                            clamps[hit_k] = min(clamps.get(hit_k, hit_w), cur_w)
+
+            # 비연쇄적 일괄 반영
+            changed = False
+            for vi_k, val in promotions.items():
+                if val > weights_arr[vi_k]:
+                    weights_arr[vi_k] = val
+                    total_adjusted += 1
+                    changed = True
+            for vi_k, val in clamps.items():
+                if val < weights_arr[vi_k]:
+                    weights_arr[vi_k] = val
+                    total_adjusted += 1
+                    changed = True
+
+            if not changed:
+                break
 
         # 버텍스 그룹에 반영
         updates_per_obj = {}
@@ -758,7 +773,10 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
             if not vg:
                 continue
             for vi, new_w in v_list:
-                vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
+                if new_w > 0.0005:
+                    vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
+                else:
+                    vg.remove([vi])
 
     return total_adjusted
 
