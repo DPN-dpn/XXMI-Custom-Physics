@@ -232,7 +232,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
 
 
 
-def inject_physics_zzz(ini_path, matched_buffers, props, master_idx=None):
+def inject_physics_zzz(ini_path, matched_buffers, props, master_idx=None, num_bones=1):
     backup_ini_file(ini_path)
     with open(ini_path, 'r', encoding='utf-8') as f:
         raw_lines = f.readlines()
