@@ -74,15 +74,27 @@ if obj_k == obj_hit and comp_k == comp_hit:
 
 ---
 
-## 🔗 4. 강체 악세서리(Rigid Accessory) 표면 근접 전이
+## 🔗 4. 강체 악세서리(Rigid Accessory) 다중 오브젝트 일체화 및 표면 근접 전이
 
-단추, 브로치, 리본, 지퍼 고리 등은 자체적으로 모핑되거나 늘어나서는 안 됩니다:
-1. 에디트 모드에서 강체 슬롯에 정점 등록 시, `label_components`로 해당 부품의 **연결된 메쉬 섬 전체를 자동 완결**합니다 (보이지 않는 안감이나 뒷면 정점 누락 방지).
-2. **Universal Surface Proximity Transfer**:
-   - 강체 부품의 각 정점 위치에서 하부 연질 표면(Soft Surface)의 본별 KD-Tree를 질의합니다.
-   - 역거리 가중치($\frac{1}{d}$)로 하부 표면의 움직임 가중치를 샘플링합니다:
-     $$w_{\text{rigid}} = \frac{\sum w_i / d_i}{\sum 1 / d_i} \times \text{weight\_scale}$$
-   - 부품 내부 엣지 네트워크를 따라 3회 라플라시안 스무딩을 거쳐 금속 부품 전체가 100% 강체 형태를 유지하며 부드럽게 피부를 따라 움직입니다.
+단추, 브로치, 벨트 버클뿐만 아니라 **무전기 본체(Hair 오브젝트) + 무전기 파우치(Body 오브젝트)**처럼 여러 메쉬 오브젝트에 걸쳐 나뉜 복합 부품도 하나의 강체 슬롯(`XXMI_PG_rigid_item`)으로 묶여 있다면 **절대로 서로 분리되거나 뚫고 나오지 않아야 합니다.**
+
+### 1. 단일 슬롯 = 단일 완전 강체 조립체 (Single Rigid Assembly)
+- 한 슬롯에 등록된 모든 오브젝트의 정점들은 **$100.000\%$ 완벽히 동일한 단일 가중치 벡터 $(w_0, w_1, \dots, w_N)$**를 공유합니다.
+- 부품 내부 정점별로 가중치를 다르게 주거나 메쉬 엣지 라플라시안 스무딩을 적용하면, 돌출된 무전기 안테나와 안쪽 케이스의 가중치가 달라져 인게임 모션 시 무전기가 케이스를 뚫고 튀어나오게 됩니다.
+
+### 2. 슬롯 통합 접촉면 가중치 (Mounting Base Proximity) 산출 알고리즘
+강체 조립체가 신체/의상에 마운트된 위치의 정확한 움직임을 추종하기 위해, 슬롯 전체의 3D 정점 중 하부 소프트 표면과의 **최단 접촉면(Mounting Base)**을 기준으로 가중치를 산출합니다:
+1. 슬롯 내 모든 오브젝트의 정점 $\mathbf{P}_v$에서 하부 소프트 표면까지의 거리 $d_v$를 질의하고 최소 거리 $d_{\text{min}} = \min(d_v)$를 도출합니다 (예: 케이스 뒷면이 가슴 피부와 접촉하는 $d \approx 2\text{mm}$).
+2. 접촉면 근방($d_v \le d_{\text{min}} + 15\text{mm}$)에 속하는 접촉 정점들만을 대상으로 역거리 가중 평균을 산출합니다:
+   $$W_{\text{base}, k} = \frac{\sum_{v \in \text{contact}} \frac{w(v, \text{soft})}{\max(d_v, 0.002)}}{\sum_{v \in \text{contact}} \frac{1}{\max(d_v, 0.002)}}$$
+3. 거리 감쇠 인자를 곱하여 슬롯의 단일 통합 가중치 $W_{\text{slot}, k} = W_{\text{base}, k} \times \text{dist\_factor} \times \text{weight\_scale}$를 결정합니다.
+4. 이 단일 스칼라 가중치를 **해당 슬롯에 속한 모든 오브젝트(`Hair`, `Body` 등)의 모든 정점에 100% 균일 할당**합니다.
+5. 이를 통해 셰이더 상에서 조립체 전체의 상대 변위($\Delta \mathbf{P}_{\text{radio}} - \Delta \mathbf{P}_{\text{case}}$)가 항등적으로 0이 되어, 뚫림이나 부품 간 분리가 수학적으로 원천 차단됩니다.
+
+### 3. 후속 단계 강체 가중치 보호 규칙
+- **오버랩 크로스 정규화(`normalize_overlapping_bone_weights`)**: 비강체 메쉬 정점만 스케일하며, 강체 정점(`rigid_mask`)은 100% 보존.
+- **IB 경계면 테이퍼(`smooth_boundary_gradient_taper`, `operators.py`)**: 강체 정점(`rig_out > 0.5`)은 테이퍼 대상에서 엄격히 배제하여, 케이스 외곽이 깎여나가 무전기보다 작게 움직이는 버그를 원천 차단.
+- **버퍼 정합 시 소프트 정점과의 블렌딩 금지**: `operators.py`에서 `unified_rigid_weights > 0.5`인 정점은 주변 피부 정점과의 반경 보간 없이 다이렉트 복사.
 
 ---
 

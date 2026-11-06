@@ -279,7 +279,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     if res is not None and res[0] is not None:
                         near_p, near_idx, near_d = res
                         if near_d < 0.015:  # 1.5cm 이내 정점만 가중치 매칭
-                            if near_d < 0.0008:  # 0.8mm 이내 정확 일치 (동일 정점)
+                            is_near_rigid = (unified_rigid_weights[near_idx] > 0.5)
+                            if near_d < 0.0008 or is_near_rigid:  # 0.8mm 이내 또는 강체 정점 (강체는 주변 소프트 정점과 절대 블렌딩 금지)
                                 for bi in range(num_bones):
                                     w_out_list[bi][vi] = unified_bone_weights[bi][near_idx]
                                 rig_out[vi] = unified_rigid_weights[near_idx]
@@ -295,9 +296,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                                         w_out_list[bi][vi] = unified_bone_weights[bi][near_idx]
                                     rig_out[vi] = unified_rigid_weights[near_idx]
 
-                # 1. 인접 본 영향이 겹치는 부위 가중치 정규화 (변위 폭발 방지 및 자연스러운 블렌딩)
+                # 1. 인접 본 영향이 겹치는 부위 가중치 정규화 (비강체 정점만 대상, 강체는 비례성 보존)
                 sum_w = sum(w_out_list)
-                overlap_mask = (sum_w > global_peak_weight)
+                overlap_mask = (sum_w > global_peak_weight) & (rig_out < 0.5)
                 if np.any(overlap_mask):
                     scale = global_peak_weight / np.maximum(1e-5, sum_w[overlap_mask])
                     for bi in range(num_bones):
@@ -343,7 +344,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                     for w_arr in w_out_list:
                         for _ in range(3):
-                            active_b = np.nonzero(w_arr > 0.01)[0]
+                            active_b = np.nonzero((w_arr > 0.01) & (rig_out < 0.5))[0]
                             for vi in active_b:
                                 nbrs = adj_buf[vi]
                                 if not nbrs:
@@ -391,12 +392,21 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                 for root, g_list in co_groups_map.items():
                     if len(g_list) > 1 and any(active_any_buf[v] for v in g_list):
-                        max_rig = max(float(rig_out[v]) for v in g_list)
-                        max_w = [max(float(w_out_list[bi][v]) for v in g_list) for bi in range(num_bones)]
-                        for v in g_list:
-                            rig_out[v] = max_rig
-                            for bi in range(num_bones):
-                                w_out_list[bi][v] = max_w[bi]
+                        has_rigid = any(rig_out[v] > 0.5 for v in g_list)
+                        if has_rigid:
+                            # 강체 정점이 포함된 동일 좌표 그룹은 강체 가중치와 플래그를 우선 동기화
+                            rigid_v = [v for v in g_list if rig_out[v] > 0.5][0]
+                            for v in g_list:
+                                rig_out[v] = 1.0
+                                for bi in range(num_bones):
+                                    w_out_list[bi][v] = w_out_list[bi][rigid_v]
+                        else:
+                            max_rig = max(float(rig_out[v]) for v in g_list)
+                            max_w = [max(float(w_out_list[bi][v]) for v in g_list) for bi in range(num_bones)]
+                            for v in g_list:
+                                rig_out[v] = max_rig
+                                for bi in range(num_bones):
+                                    w_out_list[bi][v] = max_w[bi]
 
                 max_bone_weights = [float(wb.max()) for wb in w_out_list]
                 has_physics = any(mw > 0.001 for mw in max_bone_weights) or (float(rig_out.max()) > 0.001)

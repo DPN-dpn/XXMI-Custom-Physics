@@ -422,9 +422,17 @@ def normalize_overlapping_bone_weights(target_objs, active_bones, max_total_weig
 
         # 활성 가중치 합 계산
         sum_w = weight_matrix.sum(axis=0)
-        # 2개 이상의 본에 영향받으며, 합이 max_total_weight를 초과하는 정점 식별
+
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
+        rigid_mask = np.zeros(n_verts, dtype=bool)
+        if vg_rigid:
+            r_data = read_vertex_group_arrays(obj, {vg_rigid.index: "r"}).get("r")
+            if r_data is not None:
+                rigid_mask = (r_data > 0.5)
+
+        # 2개 이상의 본에 영향받으며, 합이 max_total_weight를 초과하는 비강체 정점 식별
         active_counts = (weight_matrix > 0.001).sum(axis=0)
-        over_mask = (active_counts >= 2) & (sum_w > max_total_weight)
+        over_mask = (active_counts >= 2) & (sum_w > max_total_weight) & ~rigid_mask
 
         if not np.any(over_mask):
             continue
@@ -1043,7 +1051,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
             bone_kd_map[bname] = (kd, soft_weights)
 
     # 다중 강체 슬롯 가중치 계산 및 할당 (통합 표면 간접 추종 / Universal Surface Proximity Transfer)
-    # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭) 모두 자동 지원
+    # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭), 다중 오브젝트 결합 부품(무전기+케이스) 모두 지원
     applied_slots = 0
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -1052,77 +1060,60 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
         w_scale = getattr(item, "weight_scale", 1.0)
 
+        # 1. 해당 강체 슬롯에 속한 모든 오브젝트의 정점 및 3D 월드 좌표 수집
+        slot_objs_data = []
+        all_pts_slot = []
         for oname, vis in rdata.items():
             robj = bpy.data.objects.get(oname)
             if not robj or robj.type != 'MESH' or not vis:
                 continue
-
             r_world = world_vertex_positions(robj)
-            n_v = len(vis)
-            bone_weights_for_slot = {bn: np.zeros(n_v, dtype=np.float32) for bn in active_bones}
+            slot_objs_data.append((robj, vis, r_world))
+            for vi in vis:
+                if vi < len(r_world):
+                    all_pts_slot.append(Vector(r_world[vi]))
 
-            for bn in active_bones:
-                if bn not in bone_kd_map:
-                    continue
-                kd, s_weights = bone_kd_map[bn]
-                for idx_i, vi in enumerate(vis):
-                    if vi >= len(r_world):
-                        continue
-                    pt = Vector(r_world[vi])
-                    max_range = 0.08
-                    hits = kd.find_range(pt, max_range)
-                    valid_hits = [h for h in hits if h is not None and h[0] is not None] if hits else []
-                    if valid_hits:
-                        inv_d_sum = sum(1.0 / max(h[2], 0.002) for h in valid_hits)
-                        sample_w = sum(s_weights[h[1]] * (1.0 / max(h[2], 0.002)) for h in valid_hits) / inv_d_sum
-                        min_d = min(h[2] for h in valid_hits)
-                        dist_factor = max(0.0, 1.0 - max(0.0, min_d - 0.04) / 0.04)
-                        bone_weights_for_slot[bn][idx_i] = sample_w * dist_factor * w_scale
-                    else:
-                        bone_weights_for_slot[bn][idx_i] = 0.0
+        if not all_pts_slot:
+            continue
 
-            # 메쉬 엣지 기반 라플라시안 스무딩 (급격한 가중치 차이 방지 및 끈 형태 유지)
-            mesh = robj.data
-            vis_set = set(vis)
-            adj = {vi: [] for vi in vis}
-            for e in mesh.edges:
-                v1, v2 = e.vertices[0], e.vertices[1]
-                if v1 in vis_set and v2 in vis_set:
-                    adj[v1].append(v2)
-                    adj[v2].append(v1)
+        # 2. 강체 슬롯 전체(다중 오브젝트 포함)를 하나의 완전한 일체형 강체로 취급하여
+        #    하부 소프트 표면과의 밀착 접촉면(Mounting Base)을 기준으로 단일 통합 가중치 벡터 산출
+        slot_unified_weights = {bn: 0.0 for bn in active_bones}
 
-            v_to_idx = {vi: i for i, vi in enumerate(vis)}
-            for _ in range(3):
-                for bn in active_bones:
-                    w_arr = bone_weights_for_slot[bn]
-                    new_w = w_arr.copy()
-                    for vi, nbrs in adj.items():
-                        if nbrs:
-                            idx_cur = v_to_idx[vi]
-                            nbr_vals = [w_arr[v_to_idx[n]] for n in nbrs]
-                            new_w[idx_cur] = 0.5 * w_arr[idx_cur] + 0.5 * float(np.mean(nbr_vals))
-                    bone_weights_for_slot[bn] = new_w
+        for bn in active_bones:
+            if bn not in bone_kd_map:
+                continue
+            kd, s_weights = bone_kd_map[bn]
 
-            # 버텍스 그룹에 적용
+            dists_and_weights = []
+            for pt in all_pts_slot:
+                res = kd.find(pt)
+                if res is not None and res[0] is not None:
+                    dists_and_weights.append((res[2], s_weights[res[1]]))
+
+            if dists_and_weights:
+                min_d = min(d for d, _ in dists_and_weights)
+                if min_d < 0.08:
+                    # 강체 부품이 신체/의상에 맞닿아 있는 접촉면(최단 거리 근방 15mm 이내) 정점들의 가중치를 기준으로 슬롯 가중치 결정
+                    contact_pts = [(d, w) for d, w in dists_and_weights if d <= min_d + 0.015]
+                    inv_d_sum = sum(1.0 / max(d, 0.002) for d, _ in contact_pts)
+                    base_w = sum(w * (1.0 / max(d, 0.002)) for d, w in contact_pts) / max(1e-6, inv_d_sum)
+                    dist_factor = max(0.0, 1.0 - max(0.0, min_d - 0.04) / 0.04)
+                    slot_unified_weights[bn] = base_w * dist_factor * w_scale
+
+        # 3. 강체 슬롯에 속한 모든 오브젝트(예: Hair의 무전기 본체, Body의 무전기 케이스)의
+        #    모든 정점에 100.000% 완벽히 동일한 단일 가중치 부여 (상대 변위 0 -> 뚫림 원천 차단)
+        for robj, vis, _ in slot_objs_data:
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
             vg_rigid.add(vis, 1.0, 'REPLACE')
 
             for bn in active_bones:
                 vg_target = robj.vertex_groups.get(f"XXMI_{bn}") or robj.vertex_groups.new(name=f"XXMI_{bn}")
-                w_arr = bone_weights_for_slot[bn]
-                add_list = []
-                rem_list = []
-                for idx_i, vi in enumerate(vis):
-                    w_val = float(w_arr[idx_i])
-                    if w_val > 0.001:
-                        add_list.append((vi, min(1.0, w_val)))
-                    else:
-                        rem_list.append(vi)
-
-                for vi, w_val in add_list:
-                    vg_target.add([vi], w_val, 'REPLACE')
-                if rem_list:
-                    vg_target.remove(rem_list)
+                slot_w = float(slot_unified_weights.get(bn, 0.0))
+                if slot_w > 0.001:
+                    vg_target.add(vis, min(1.0, slot_w), 'REPLACE')
+                else:
+                    vg_target.remove(vis)
 
         applied_slots += 1
 
