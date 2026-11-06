@@ -164,12 +164,21 @@ def preview_frame_handler(scene):
         for i in active_indices:
             base_co = base_coords[i]
             total_disp = Vector((0.0, 0.0, 0.0))
+            sum_eff = 0.0
+            max_eff = 0.0
             for bn in active_bones:
                 w_arr = weights_by_bone.get(bn)
                 if w_arr:
-                    w = w_arr[i]
-                    if w > 1e-4:
-                        total_disp += disp_vectors[bn] * (w * bone_scales[bn])
+                    eff_w = w_arr[i] * bone_scales[bn]
+                    if eff_w > 1e-4:
+                        total_disp += disp_vectors[bn] * eff_w
+                        sum_eff += eff_w
+                        if eff_w > max_eff:
+                            max_eff = eff_w
+
+            # 가슴 중앙/클리비지에서 양쪽 본 변위가 단순 합산되어 2배로 폭발하는 현상 원천 방지 (가중 평균 볼록 결합)
+            if sum_eff > max_eff and sum_eff > 1e-5:
+                total_disp *= (max_eff / sum_eff)
 
             d_len = total_disp.length
             if d_len > max_disp and d_len > 1e-5:

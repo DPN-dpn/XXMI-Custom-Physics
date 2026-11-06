@@ -210,9 +210,13 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
         float3 disp_l = s0.xyz * (bw.x * SCALE_L);
         float3 disp_r = s1.xyz * (bw.y * SCALE_R);
 
-        // 좌우 본 영향이 겹치는 부위(가슴골 등)에서 변위가 무작정 2배로 폭발하지 않도록 정규화 선형 블렌딩
-        float blend_norm = max(1.0, (bw.x + bw.y));
-        float3 total_disp = (disp_l + disp_r) / blend_norm;
+        // 좌우 본 영향이 겹치는 부위(가슴골 등)에서 변위가 무작정 2배로 폭발하지 않도록 가중 평균 볼록 결합 (Convex Combination)
+        float max_w = max(bw.x, bw.y);
+        float sum_w = bw.x + bw.y;
+        float3 total_disp = (disp_l + disp_r);
+        if (sum_w > max_w && sum_w > 1e-5) {{
+            total_disp *= (max_w / sum_w);
+        }}
 
         float d_len = length(total_disp);
         if (d_len > MAX_DISP && d_len > 1e-5) {{

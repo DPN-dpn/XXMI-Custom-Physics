@@ -465,8 +465,19 @@ def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_dist
     if not global_faces or not global_positions:
         return 0
 
-    # 2. 전역 메쉬 BVHTree 구축
+    # 2. 전역 메쉬 BVHTree 및 KDTree 구축
     bvh = BVHTree.FromPolygons(global_positions, global_faces)
+    kd_global = KDTree(len(global_positions))
+    for idx_g, pt_g in enumerate(global_positions):
+        kd_global.insert(pt_g, idx_g)
+    kd_global.balance()
+
+    # 전역 엣지 인접 리스트 구축 (연결된 천 표면 가중치 확산용)
+    adj_global = [set() for _ in range(len(global_positions))]
+    for v0, v1, v2 in global_faces:
+        adj_global[v0].add(v1); adj_global[v0].add(v2)
+        adj_global[v1].add(v0); adj_global[v1].add(v2)
+        adj_global[v2].add(v0); adj_global[v2].add(v1)
 
     total_clamped_and_promoted = 0
 
@@ -513,11 +524,12 @@ def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_dist
         for g_vi in active_indices:
             p = global_positions[g_vi]
             n = global_normals[g_vi]
+            w_skin = float(g_weights[g_vi])
             if n.length < 0.5:
                 continue
             n_u = n.normalized()
 
-            # 표면 외향 법선 방향 광선 투사 (0.3mm ~ max_distance)
+            # 1) 광선 투사 (Raycast): 표면 외향 법선 방향 (0.3mm ~ max_distance)
             ray_start = p + n_u * 0.0003
             hit_loc, hit_norm, hit_idx, hit_dist = bvh.ray_cast(ray_start, n_u, max_distance)
 
@@ -525,21 +537,44 @@ def apply_face_barrier_anti_penetration(target_objs, active_bones=None, max_dist
                 dot_n = n_u.dot(hit_norm)
                 if dot_n >= min_dot:
                     v0, v1, v2 = global_faces[hit_idx]
-                    w_skin = float(g_weights[g_vi])
-
-                    # 마주보는 바깥쪽 옷 페이스 정점들 가중치 상향 동기화
                     for vt in (v0, v1, v2):
                         if not g_rigid[vt]:
                             if w_skin > cloth_promotions.get(vt, float(g_weights[vt])):
                                 cloth_promotions[vt] = w_skin
 
+            # 2) 외향 근접 쉘 투영 (Proximity Shell Pass, 0.5mm ~ 6mm):
+            # 바늘 같은 단일 레이캐스트가 빗나가는 카라/솔기/주름 및 복합 레이어 겉옷을 누락 없이 완벽 감싸기
+            shell_hits = kd_global.find_range(p, 0.006)
+            for _, near_idx, dist in shell_hits:
+                if near_idx == g_vi or g_rigid[near_idx]:
+                    continue
+                cur_w = float(g_weights[near_idx])
+                if cur_w < w_skin:
+                    # 3mm 이내의 직접 겉옷 쉘은 w_cloth >= w_skin 원칙을 엄격 보장하여 관통 방지
+                    if dist <= 0.0030:
+                        decay = 1.0
+                    else:
+                        decay = max(0.0, 1.0 - ((dist - 0.0030) / 0.0040))
+                    target_w = w_skin * decay
+                    if target_w > cloth_promotions.get(near_idx, cur_w):
+                        cloth_promotions[near_idx] = target_w
+
+        newly_promoted = []
         for vt, promoted_w in cloth_promotions.items():
             if promoted_w > g_weights[vt]:
+                if g_weights[vt] <= 0.0005:
+                    newly_promoted.append(vt)
                 g_weights[vt] = promoted_w
                 total_clamped_and_promoted += 1
 
-        # 주의: 안쪽 살의 가중치를 0으로 깎아버리는 하향 클램프(Pass 2)는 가슴골 V자 굴곡, 주름 등에서
-        # 쇄골/목/가슴골 안쪽 벽(0.0)을 때려 앞섬 정점을 0으로 못 박아버리는 스파이크 버그를 유발하므로 수행하지 않습니다.
+        # 3) 연결된 천 표면 확산 (Connected Surface Diffusion):
+        # 겉옷의 일부 페이스만 칠해져 경계면에서 찢어지는 구멍(스위스 치즈 현상) 방지
+        for _ in range(2):
+            for vt in newly_promoted:
+                for nb in adj_global[vt]:
+                    if not g_rigid[nb] and g_weights[nb] < g_weights[vt] * 0.75:
+                        avg_w = (g_weights[vt] + g_weights[nb]) * 0.5
+                        g_weights[nb] = max(g_weights[nb], avg_w)
 
         # 4. 버텍스 그룹에 반영
         for obj in valid_objs:
@@ -956,23 +991,33 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                         allowed_mask=allowed_m
                     )
 
+    # 4.5. 1차 동일 위치 공유 정점 동기화 (UV 심 정점들이 페이스 배리어 계산에 100% 온전히 참여하도록 보장)
+    synchronize_coincident_vertices_across_objects(
+        target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
+    )
+
     # 5. 다중 레이어 3D 메쉬 페이스 비침투 배리어(Face-Barrier Conformal Sync):
     # 안쪽 가슴 정점 바로 위에 얹힌 겉옷 페이스 정점들의 가중치를 안쪽 가슴 이상으로 상향 일치(w_cloth >= w_skin)
     # 옷이 가슴 볼륨 팽창을 온전히 감싸며 함께 이동하도록 보장하여 관통 원천 차단
     num_promoted = apply_face_barrier_anti_penetration(
-        target_objs, active_bones=active_bones, max_distance=0.015, min_dot=0.60
+        target_objs, active_bones=active_bones, max_distance=0.018, min_dot=0.40
     )
 
     # 5.5. 가슴 좌우 본 중복 영역 가중치 정규화 & 크로스 블렌딩:
     # 좌우 본 영향이 겹치는 가슴 중앙/클리비지 정점에서 변위가 2배로 폭발하지 않도록 가중치 합을 peak_w 이내로 부드럽게 정규화
-    max_peak_w = max(0.40, float(peak_w))
+    target_peak_cap = float(peak_w)
     num_normalized = normalize_overlapping_bone_weights(
-        target_objs, active_bones, max_total_weight=max_peak_w
+        target_objs, active_bones, max_total_weight=target_peak_cap
     )
 
     # 6. 동일 위치 공유 정점 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
         target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
+    )
+
+    # 6.5. 동일 위치 동기화 후 가슴 중앙선 중복 가중치 재정규화 (가슴골 2배 돌출 원천 차단)
+    normalize_overlapping_bone_weights(
+        target_objs, active_bones, max_total_weight=target_peak_cap
     )
 
     # 7. 강체(액세서리) 표면 밀착 가중치 동기화
