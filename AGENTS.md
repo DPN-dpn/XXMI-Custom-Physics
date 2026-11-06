@@ -77,22 +77,23 @@ XXMI-Custom-Physics/
    - 가중치는 전방 깊이 코사인 램프(흉벽 0.0 → 꼭짓점 1.0)와 방사형 Hann 코사인 감쇠(중심축 0.0 → 외곽 1.0)의 합성으로 산출합니다.
    - 기저 지수 보정(`0.35 * falloff_power`)을 적용하여, UI 기본값 1.0에서 끝에 몰리지 않고 풍성하고 자연스러운 볼륨 곡면을 형성하도록 합니다.
    - 가슴골/중앙 등 인접 본의 영향권이 중첩되는 영역은 양쪽 비율을 보존하면서 합이 `peak_weight`를 넘지 않도록 크로스 블렌딩 정규화합니다.
-5. **다층 메쉬 절대 방사형 비침투 배리어 (Strict Radial Monotonic Non-Penetration Constraint)**:
+5. **다층 메쉬 절대 방사형 비침투 배리어 및 경계면 완만화 (Strict Multi-Layer Non-Penetration & Boundary Taper)**:
    - **대원칙**: "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷/장식)를 절대로 넘지 못한다 ($w_{\text{inner}} \le w_{\text{outer}}$)."
-   - **다층 볼륨 후보군 확장**: 사용자가 가슴 정점을 등록할 때 복잡한 다층 메쉬(속살, 속옷, 겉옷, 리본 등 분리된 쉘) 중 일부 겉옷 정점이 누락되더라도, 등록 영역 전방/상단($1.8\text{cm}$ 이내)의 모든 겉옷 쉘 정점을 물리 후보군에 자동 포함시켜 겉옷이 $0.000$으로 동결되어 찢어지는 구멍 현상을 원천 방지합니다.
-   - **2-Pass 방사형 단조 비침투 강제**:
-     1) **Pass 1 (Outer Promotion)**: 동일 본 방사선 상에서 바깥쪽 겉옷 정점의 가중치를 안쪽 살 이상으로 상향 일치($w_{\text{outer}} \ge w_{\text{inner}}$)하여 옷이 속살의 팽창을 온전히 감싸며 이동.
-     2) **Pass 2 (Inner Ceiling Clamp)**: 겉옷의 가중치가 경계선에서 줄어들면, 안쪽 살도 겉옷을 넘을 수 없도록 $w_{\text{inner}} \le w_{\text{outer}}$로 절대 상한 제한.
-     3) 이를 통해 물리 변위 발생 시 $(\Delta \vec{P}_{\text{inner}} - \Delta \vec{P}_{\text{outer}}) \cdot \vec{u}_{\text{radial}} \le 0$을 100% 만족시켜 살이 옷을 뚫고 나오는 현상을 기하학적으로 원천 차단합니다.
-6. **UV 심(Seam) 및 하드 엣지 찢어짐 방지**:
+   - **비연쇄 다층 매칭 (Non-Cascading Layer Separation)**: 동일 표면의 이웃 정점이 연쇄 전파(Avalanche)를 일으키지 않도록, 표면 법선 정렬($\vec{n}_1 \cdot \vec{n}_2 \ge 0.50$)과 법선 방향 이격 거리($0.8\text{mm} \le d_{\text{norm}} \le 15\text{mm}$)를 만족하는 서로 다른 쉘(속살 ➔ 겉옷) 사이에서만 읽기 전용 버퍼를 통해 일괄 평가합니다.
+   - **Conformal Promotion & Ceiling Clamp**: 겉옷은 안쪽 살 이상으로 상향 일치($w_{\text{outer}} \ge w_{\text{inner}}$)하고, 겉옷 가중치가 줄어들거나 고정되는 경계선에서는 속살도 겉옷을 넘지 못하도록 상한선($w_{\text{inner}} \le w_{\text{outer}}$)으로 엄격 클램프합니다.
+   - **경계면 완만화 (Boundary Gradient Taper)**: 단일 폴리곤 엣지 상에서 가중치가 $0.35 \to 0.00$으로 급락하여 발생하는 인게임 폴리곤 찢어짐(Tearing)을 방지하기 위해, 연결된 엣지 가중치 편차를 $\Delta w \le 0.08$ 이내로 완만하게 감쇠합니다.
+6. **UV 심(Seam) 및 하드 엣지 찢어짐 방지 (절대 최종 단계 동기화)**:
    - 블렌더에서 1개의 정점이 익스포트 시 UV 경계나 날카로운 모서리(Sharp Edge)에서 여러 개의 `.buf` 정점으로 분리됩니다.
-   - 스키닝 가중치를 계산할 때 **동일한 3D 좌표를 공유하는 모든 정점은 반드시 100% 동일한 본 인덱스와 가중치**를 갖도록 동기화해야 인게임에서 메쉬가 찢어지지 않습니다.
-7. **강체 악세서리(Rigid Accessory) 보존**:
+   - 모든 스키닝 가중치 계산, 정규화, 스무딩, 비침투 처리가 끝난 **절대 최종 단계**에서 3D 공간 상의 동일 좌표(기본 $1.2\text{mm}$ 이내, DSU 그룹)를 공유하는 모든 분리 정점의 가중치를 100% 동일하게 일치시켜야 인게임에서 메쉬가 찢어지지 않습니다.
+7. **물리 ODE 파라미터 완전 일치화 (Blender Preview ↔ In-Game HLSL)**:
+   - 블렌더 뷰포트 프리뷰(`engine.py`)와 인게임 셰이더(`hsr.py`, `zzz.py`)의 물리 적분 공식(4-Substep Symplectic Euler)과 감쇠비(`damp = 2.0 * omega * (damping * 0.55)`), 관성비(`12.0 * inertia`), 최대 변위 클램프(`0.035 * max_strength`)를 100% 일치시켜 블렌더 프리뷰와 인게임 모션의 차이를 없앱니다.
+   - 블렌더 프리뷰 시 몸통 회전 요(Yaw) 및 롤(Roll)에 의한 좌/우 차동 가속도를 부여하여 대칭 본들이 완전히 독립된 3D 물리 거동을 보이도록 합니다.
+8. **강체 악세서리(Rigid Accessory) 보존**:
    - 가슴이나 옷 위에 있는 단추, 브로치, 리본 장식, 벨트 버클 등이 모핑으로 휘어지는 것을 막기 위해, `XXMI_Role_Rigid` 그룹에 속한 정점은 **연결된 메쉬 덩어리(Connected Mesh Island) 전체의 중심점(Centroid) 또는 표면 간접 추종 가중치로 통일**합니다.
-8. **DirectX (DXGI) ↔ 블렌더 좌표계 변환 주의**:
+9. **DirectX (DXGI) ↔ 블렌더 좌표계 변환 주의**:
    - 3DMigoto 버퍼(`Position.buf`)는 DirectX Y-Up 계열 좌표계를 사용하며, Blender 메쉬는 Z-Up 계열 좌표계를 사용합니다.
    - 버퍼 직접 파싱 및 위치 매칭 시 축 변환(`(px, -pz, py)`)을 반드시 일치시켜야 앵커 및 버텍스 위치 오차가 발생하지 않습니다.
-9. **3DMigoto INI 주입 규칙**:
+10. **3DMigoto INI 주입 규칙**:
    - `vb0 = Resource...` 뿐만 아니라 최신 XXMI Tools의 `vb0 = ref Resource...`, `vb0 = copy Resource...` 형태를 모두 파싱·매칭해야 합니다.
    - 교체 시 `; [XXMI-PHYSICS-VB-START]`와 `; [XXMI-PHYSICS-ORIG] <원본 줄>` 주석 메타데이터를 함께 기록하여, 재주입이나 롤백 시 원본 `.ini` 구문을 100% 무손실 복원해야 합니다.
    - 디버그 모드(`debug_mode`) 활성화 시 `[KeyXXMIPhysToggle]` 섹션과 `if $xxmi_phys_enable == 1 ... else ... endif` 분기를 주입하여 인게임 단축키(기본 `VK_F9`)로 즉시 전/후 비교가 가능해야 합니다.
