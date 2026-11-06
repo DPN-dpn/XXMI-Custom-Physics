@@ -77,11 +77,17 @@ XXMI-Custom-Physics/
    - 가중치는 전방 깊이 코사인 램프(흉벽 0.0 → 꼭짓점 1.0)와 방사형 Hann 코사인 감쇠(중심축 0.0 → 외곽 1.0)의 합성으로 산출합니다.
    - 기저 지수 보정(`0.35 * falloff_power`)을 적용하여, UI 기본값 1.0에서 끝에 몰리지 않고 풍성하고 자연스러운 볼륨 곡면을 형성하도록 합니다.
    - 가슴골/중앙 등 인접 본의 영향권이 중첩되는 영역은 양쪽 비율을 보존하면서 합이 `peak_weight`를 넘지 않도록 크로스 블렌딩 정규화합니다.
-5. **다층 메쉬 절대 방사형 비침투 배리어 및 경계면 완만화 (Strict Multi-Layer Non-Penetration & Boundary Taper)**:
+5. **다층 메쉬 절대 방사형 비침투 배리어 및 경계면 완만화 (Strict Radial Multi-Layer Non-Penetration & Boundary Taper)**:
    - **대원칙**: "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷/장식)를 절대로 넘지 못한다 ($w_{\text{inner}} \le w_{\text{outer}}$)."
-   - **비연쇄 다층 매칭 (Non-Cascading Layer Separation)**: 동일 표면의 이웃 정점이 연쇄 전파(Avalanche)를 일으키지 않도록, 표면 법선 정렬($\vec{n}_1 \cdot \vec{n}_2 \ge 0.50$)과 법선 방향 이격 거리($0.8\text{mm} \le d_{\text{norm}} \le 15\text{mm}$)를 만족하는 서로 다른 쉘(속살 ➔ 겉옷) 사이에서만 읽기 전용 버퍼를 통해 일괄 평가합니다.
-   - **Conformal Promotion & Ceiling Clamp**: 겉옷은 안쪽 살 이상으로 상향 일치($w_{\text{outer}} \ge w_{\text{inner}}$)하고, 겉옷 가중치가 줄어들거나 고정되는 경계선에서는 속살도 겉옷을 넘지 못하도록 상한선($w_{\text{inner}} \le w_{\text{outer}}$)으로 엄격 클램프합니다.
-   - **경계면 완만화 (Boundary Gradient Taper)**: 단일 폴리곤 엣지 상에서 가중치가 $0.35 \to 0.00$으로 급락하여 발생하는 인게임 폴리곤 찢어짐(Tearing)을 방지하기 위해, 연결된 엣지 가중치 편차를 $\Delta w \le 0.08$ 이내로 완만하게 감쇠합니다.
+   - **방사형 레이어 매칭 (Radial Shell Separation)**: 
+     - 오류를 유발하는 표면 법선(Normal) 계산을 배제하고, 본 앵커(`Head`)로부터의 방사형 거리($r = \|P - \text{Head}\|$) 및 방사선(Ray, $10^\circ$ 이내)을 기준으로 속살과 겉옷을 명확히 판별합니다.
+     - 곡면 경사(아랫가슴 Underboob 등)에 구애받지 않고 본 중심에서 바깥으로 나가는 동일 볼륨 선상의 레이어를 $100\%$ 매칭합니다.
+   - **Conformal Promotion & Ceiling Clamp**: 
+     - 겉옷은 안쪽 살 이상으로 상향 일치($w_{\text{outer}} = \max(w_{\text{outer}}, w_{\text{inner}})$)하고,
+     - 속살도 겉옷을 넘지 못하도록 상한선($w_{\text{inner}} = \min(w_{\text{inner}}, w_{\text{outer}})$)으로 엄격 클램프하여 속살 돌출을 수학적으로 원천 봉쇄합니다.
+   - **경계면 완만화 (Boundary Gradient Taper)**: 
+     - 모드 폴더 내의 모든 연관 `.ib` 인덱스 버퍼를 자동으로 수집하여 삼각망 인접 그래프를 구축합니다.
+     - 단일 폴리곤 엣지 상에서 가중치가 $0.40 \to 0.00$으로 급락해 발생하는 인게임 메쉬 찢어짐(Tearing)을 방지하기 위해, 5회 패스에 걸쳐 연결된 엣지 가중치 편차를 $\Delta w \le 0.06$ 이내로 완만하게 감쇠합니다.
 6. **UV 심(Seam) 및 하드 엣지 찢어짐 방지 (절대 최종 단계 동기화)**:
    - 블렌더에서 1개의 정점이 익스포트 시 UV 경계나 날카로운 모서리(Sharp Edge)에서 여러 개의 `.buf` 정점으로 분리됩니다.
    - 모든 스키닝 가중치 계산, 정규화, 스무딩, 비침투 처리가 끝난 **절대 최종 단계**에서 3D 공간 상의 동일 좌표(기본 $1.2\text{mm}$ 이내, DSU 그룹)를 공유하는 모든 분리 정점의 가중치를 100% 동일하게 일치시켜야 인게임에서 메쉬가 찢어지지 않습니다.
