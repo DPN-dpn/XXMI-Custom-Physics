@@ -60,11 +60,13 @@ static const float STIFF_K_L = {stiff_k_l:.4f};
 static const float DAMP_C_L = {damp_c_l:.4f};
 static const float INERTIA_SCALE_L = {inertia_l:.4f};
 static const float IDLE_SCALE_L = {idle_l:.4f};
+static const float SPEED_L = {speed_l:.4f};
 
 static const float STIFF_K_R = {stiff_k_r:.4f};
 static const float DAMP_C_R = {damp_c_r:.4f};
 static const float INERTIA_SCALE_R = {inertia_r:.4f};
 static const float IDLE_SCALE_R = {idle_r:.4f};
+static const float SPEED_R = {speed_r:.4f};
 
 [numthreads(1, 1, 1)]
 void main() {{
