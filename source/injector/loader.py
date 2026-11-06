@@ -187,11 +187,14 @@ def _load_physics_from_mod(mod_folder, context, props):
 
     pairs = []
     for mp in map_files:
-        m_vc = os.path.getsize(mp) // 16
+        m_size = os.path.getsize(mp)
         for pp in pos_files:
-            if os.path.getsize(pp) // 40 == m_vc:
-                pairs.append((mp, pp, m_vc))
-                break
+            p_vc = os.path.getsize(pp) // 40
+            if p_vc > 0 and m_size % (p_vc * 4) == 0:
+                n_floats = m_size // (p_vc * 4)
+                if n_floats >= 2:
+                    pairs.append((mp, pp, p_vc))
+                    break
 
     # 2. 본 데이터가 JSON에 없는 경우 Map.buf와 Position.buf로부터 역추정
     if not bones_data and pairs:
@@ -204,8 +207,13 @@ def _load_physics_from_mod(mod_folder, context, props):
             with open(pp, 'rb') as f:
                 pos_data = f.read()
 
+            n_floats = max(2, len(map_data) // (map_v_count * 4))
+            stride_bytes = n_floats * 4
+            fmt_str = f'<{n_floats}f'
             for i in range(map_v_count):
-                wl, wr, _, _ = struct.unpack_from('<4f', map_data, i * 16)
+                vals = struct.unpack_from(fmt_str, map_data, i * stride_bytes)
+                wl = vals[0]
+                wr = vals[1] if n_floats >= 3 else 0.0
                 px, py, pz = struct.unpack_from('<3f', pos_data, i * 40)
                 pt = Vector((px, py, pz))
                 if wl > 0.15:
@@ -335,11 +343,18 @@ def _load_physics_from_mod(mod_folder, context, props):
             b1_vis = []
             rigid_vis = []
 
+            n_floats = max(2, len(map_data) // (best_pcache["n"] * 4))
+            stride_bytes = n_floats * 4
+            fmt_str = f'<{n_floats}f'
+
             for vi, v in enumerate(mesh.vertices):
                 p_buf = best_mat @ v.co
                 _, b_idx, dist = kd.find(p_buf)
                 if dist < 0.02:
-                    w0, w1, vrigid, _ = struct.unpack_from('<4f', map_data, b_idx * 16)
+                    vals = struct.unpack_from(fmt_str, map_data, b_idx * stride_bytes)
+                    w0 = vals[0]
+                    w1 = vals[1] if n_floats >= 3 else 0.0
+                    vrigid = vals[2] if n_floats == 3 else (vals[2] if n_floats == 4 else vals[-1])
                     if w0 > 0.0001:
                         vg_0.add([vi], w0, 'REPLACE')
                         b0_vis.append(vi)

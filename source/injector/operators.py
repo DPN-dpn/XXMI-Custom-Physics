@@ -213,6 +213,20 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             if not pos_buffers:
                 continue
 
+            # INI 구문 기반 SRMI(HSR) / ZZMI 자동 감지 보정
+            effective_game = target_game
+            try:
+                with open(ini_path, 'r', encoding='utf-8', errors='ignore') as f_chk:
+                    ini_raw_low = f_chk.read().lower()
+                if "\\srmi\\" in ini_raw_low:
+                    effective_game = 'HSR'
+                    props.target_game = 'HSR'
+                elif "\\zzmi\\" in ini_raw_low:
+                    effective_game = 'ZZZ'
+                    props.target_game = 'ZZZ'
+            except Exception:
+                pass
+
             # 3. .ini 파일 백업 (영구 원본 + 타임스탬프 백업)
             backup_ini_file(ini_path)
 
@@ -265,10 +279,14 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     continue
 
                 # KD-Tree 기반 정점 가중치 보간 (통합 KD-Tree 활용)
-                inv_mat = best_mat.inverted()
+                # best_mat는 오브젝트 로컬 좌표(co) -> 버퍼 좌표(buf_np) 변환 행렬이므로,
+                # 버퍼 좌표(buf_np) -> 블렌더 월드 좌표(co_world) 변환은 matrix_world @ best_mat.inverted()
+                obj_mw = best_cache["obj"].matrix_world
+                buf_to_world_mat = obj_mw @ best_mat.inverted()
+                world_to_buf_mat = best_mat @ obj_mw.inverted()
                 buf_in_world = np.empty_like(buf_np)
                 for vi in range(n_buf):
-                    buf_in_world[vi] = (inv_mat @ Vector(buf_np[vi]))[:]
+                    buf_in_world[vi] = (buf_to_world_mat @ Vector(buf_np[vi]))[:]
 
                 w_out_list = [np.zeros(n_buf, dtype=np.float32) for _ in range(num_bones)]
                 rig_out = np.zeros(n_buf, dtype=np.float32)
@@ -429,7 +447,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         b_head_w = bone_heads_world[bi] if bi < len(bone_heads_world) else None
 
                         if b_head_w is not None:
-                            c = np.array((best_mat @ b_head_w)[:], dtype=np.float64)
+                            c = np.array((world_to_buf_mat @ b_head_w)[:], dtype=np.float64)
                         elif (wb > 0.05).any():
                             c = buf_np[wb > 0.05].mean(axis=0)
                         elif wb.max() > 1e-4:
@@ -447,7 +465,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     _export_physics_state_buf(custom_physics_dir, idx, num_bones)
 
                     # 게임별 분기 쉐이더 내보내기 (ZZZ vs HSR)
-                    if target_game == 'HSR':
+                    if effective_game == 'HSR':
                         export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_indices)
                     else:
                         export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_indices, props)
@@ -468,7 +486,7 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     master_entry = matched_in_ini[0]
                     master_idx = master_entry[0]
 
-                if target_game == 'HSR':
+                if effective_game == 'HSR':
                     inject_physics_hsr(ini_path, matched_in_ini, props, master_idx, num_bones)
                 else:
                     inject_physics_zzz(ini_path, matched_in_ini, props, master_idx, num_bones)
