@@ -98,12 +98,9 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     uint i = threadID.x;
     if (i >= VERTEX_COUNT) return;
 
-    // 스레드 0: 각 본별 독립 앵커 관성 및 스프링 물리 시뮬레이션
+    // 1. 스레드 0: 각 본별 독립 앵커 관성 및 스프링 물리 시뮬레이션 (프레임당 1회 갱신)
     if (i == 0) {{
         float time = IniParams.Load(int2(87, 0)).x;
-        if (isnan(time) || isinf(time)) {{
-            time = 0.0;
-        }}
 
         for (uint b = 0; b < NUM_BONES; b++) {{
             uint base_idx = b * 3;
@@ -117,80 +114,95 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
             float3 prev_root  = s2.xyz;
             float  init_flag  = s2.w;
 
-            float3 curr_root = LiveMesh[BONES[b].root_idx].position;
-            if (isnan(curr_root.x) || isinf(curr_root.x) || length(curr_root) < 1e-4) {{
+            BoneConfig cfg = BONES[b];
+            float3 curr_root = LiveMesh[cfg.root_idx].position;
+            float root_len = length(curr_root);
+            if (!(root_len > 1e-4 && root_len < 1000.0)) {{
                 curr_root = prev_root;
             }}
 
-            if (init_flag < 0.5 || isnan(prev_time) || isinf(prev_time)) {{
-                prev_root = curr_root;
-                prev_time = time;
-                prev_disp = float3(0.0, 0.0, 0.0);
+            if (init_flag < 0.5) {{
+                prev_disp  = float3(0.0, 0.0, 0.0);
                 spring_vel = float3(0.0, 0.0, 0.0);
-                init_flag = 1.0;
-            }}
+                prev_root  = curr_root;
+                prev_time  = time;
+                init_flag  = 1.0;
+            }} else {{
+                float raw_dt = time - prev_time;
+                if (abs(raw_dt) > 0.0005) {{
+                    float dt = clamp(raw_dt, 0.002, 0.04);
+                    float3 delta = curr_root - prev_root;
 
-            float dt = time - prev_time;
-            if (dt < 0.0001 || dt > 0.1) {{
-                dt = 0.016667;
-            }}
+                    if (length(delta) > 0.25 || raw_dt < 0.0 || raw_dt > 0.15) {{
+                        delta = float3(0.0, 0.0, 0.0);
+                        spring_vel = float3(0.0, 0.0, 0.0);
+                    }}
 
-            float3 root_delta = curr_root - prev_root;
-            if (length(root_delta) > 0.08) {{
-                root_delta = normalize(root_delta) * 0.08;
-            }}
+                    float3 raw_vel = delta / dt;
+                    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
+                    float3 ext_force = -anim_vel * (14.0 * cfg.inertia_scale);
 
-            float3 body_accel = -(root_delta / max(dt, 0.001)) * (12.0 * BONES[b].inertia_scale);
+                    if (cfg.idle_scale > 0.001) {{
+                        float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
+                        ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
+                    }}
 
-            float phase = time * (4.0 * BONES[b].speed) + float(b) * 0.785398;
-            float3 idle_accel = float3(
-                sin(phase * 0.5) * 0.15,
-                sin(phase) * 0.4,
-                cos(phase * 0.7) * 0.2
-            ) * (0.8 * BONES[b].idle_scale);
+                    // 4-Substep Symplectic Euler
+                    float sub_dt = dt * 0.25;
+                    [unroll]
+                    for (int step = 0; step < 4; step++) {{
+                        float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
+                        spring_vel = clamp(spring_vel + accel * sub_dt, -3.0, 3.0);
+                        prev_disp  = clamp(prev_disp + spring_vel * sub_dt, -0.040, 0.040);
+                    }}
 
-            float3 force = body_accel + idle_accel;
-
-            // 4-Substep Symplectic Euler
-            float sub_dt = dt / 4.0;
-            [unroll]
-            for (int step = 0; step < 4; step++) {{
-                float3 total_accel = force - BONES[b].stiff_k * prev_disp - BONES[b].damp_c * spring_vel;
-                spring_vel += total_accel * sub_dt;
-                prev_disp  += spring_vel * sub_dt;
-            }}
-
-            if (length(prev_disp) > MAX_DISP) {{
-                prev_disp = normalize(prev_disp) * MAX_DISP;
+                    prev_root = curr_root;
+                    prev_time = time;
+                }}
             }}
 
             PhysState[base_idx + 0] = float4(prev_disp, length(spring_vel));
-            PhysState[base_idx + 1] = float4(spring_vel, time);
-            PhysState[base_idx + 2] = float4(curr_root, 1.0);
+            PhysState[base_idx + 1] = float4(spring_vel, prev_time);
+            PhysState[base_idx + 2] = float4(prev_root, init_flag);
         }}
     }}
 
-    AllMemoryBarrierWithGroupSync();
-
-    // 각 정점 변위 적용 (BaseMesh 원본 정점에 가중치 블렌딩)
+    // 2. 각 정점 변위 적용 (BaseMesh 원본 정점에 가중치 블렌딩)
     Vertex v = BaseMesh[i];
     WeightData wdata = Weights[i];
 
     float3 total_disp = float3(0.0, 0.0, 0.0);
+    float sum_w = 0.0;
+    float max_w = 0.0;
+
     [unroll]
     for (uint b = 0; b < NUM_BONES; b++) {{
         float w = wdata.weights[b];
         if (w > 0.0001) {{
-            float3 disp_b = PhysState[b * 3].xyz;
-            total_disp += disp_b * (w * BONES[b].scale);
+            float3 disp_b = PhysState[b * 3 + 0].xyz * (w * BONES[b].scale);
+            total_disp += disp_b;
+            sum_w += w;
+            max_w = max(max_w, w);
         }}
     }}
 
-    if (length(total_disp) > MAX_DISP) {{
-        total_disp = normalize(total_disp) * MAX_DISP;
+    if (sum_w > 0.0001) {{
+        if (sum_w > max_w && sum_w > 1e-5) {{
+            total_disp *= (max_w / sum_w);
+        }}
+
+        float d_len = length(total_disp);
+        if (d_len > MAX_DISP && d_len > 1e-5) {{
+            total_disp = (total_disp / d_len) * MAX_DISP;
+        }}
+
+        v.position += total_disp;
+
+        if (wdata.is_rigid < 0.5) {{
+            v.normal = normalize(v.normal + total_disp * 2.5);
+        }}
     }}
 
-    v.position += total_disp;
     Output[i] = v;
 }}
 """
