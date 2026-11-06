@@ -786,6 +786,127 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
     return synced_count
 
 
+def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bones, search_radius=0.015):
+    """
+    [절대 방사형 비침투 제약 (Strict Radial Monotonic Non-Penetration Constraint)]:
+    "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다."
+    
+    동일한 본 방사선(Radial Ray) 상에 놓인 다층 메쉬(속살 -> 속옷 -> 겉옷 -> 장식)에 대해:
+    1. Pass 1 (바깥쪽 겉옷 상향 동기화): w_outer >= w_inner
+       안쪽 살이 가중치 w_inner로 움직이면, 겉옷은 최소한 w_inner 이상으로 함께 움직여야 함.
+    2. Pass 2 (안쪽 속살 절대 상한 제한): w_inner <= w_outer
+       겉옷의 가중치가 경계선에서 줄어들면, 안쪽 살도 겉옷을 넘지 못하도록 w_outer 이하로 엄격 클램프.
+    """
+    if not target_objs or not active_bones or not bone_info:
+        return 0
+
+    valid_objs = [o for o in target_objs if o and o.type == 'MESH' and len(o.data.vertices) > 0]
+    if not valid_objs:
+        return 0
+
+    total_adjusted = 0
+
+    for bname in active_bones:
+        bentry = bone_info.get(bname)
+        if not bentry:
+            b_low = bname.lower()
+            for k, e in bone_info.items():
+                if k.lower() == b_low or e["bname"].lower() == b_low:
+                    bentry = e
+                    break
+        if not bentry:
+            continue
+
+        head = Vector(bentry["head"])
+        vg_name = f"XXMI_{bname}"
+
+        # 본의 대상 정점 및 가중치 전역 수집
+        all_pts = []
+        all_weights = []
+        all_refs = []  # (obj, vi)
+
+        for obj in valid_objs:
+            vg = obj.vertex_groups.get(vg_name)
+            if not vg:
+                continue
+            world = world_vertex_positions(obj)
+            arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
+            w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
+
+            for vi in range(len(world)):
+                w = float(w_arr[vi])
+                if w > 0.0005:
+                    all_pts.append(Vector(world[vi]))
+                    all_weights.append(w)
+                    all_refs.append((obj, vi))
+
+        if len(all_pts) < 2:
+            continue
+
+        weights_arr = np.array(all_weights, dtype=np.float32)
+        n_pts = len(all_pts)
+
+        kd = KDTree(n_pts)
+        for k, p in enumerate(all_pts):
+            kd.insert(p, k)
+        kd.balance()
+
+        r_arr = np.array([(p - head).length for p in all_pts], dtype=np.float32)
+
+        # 2회 반복으로 연쇄 관통 완전 제거
+        for _ in range(2):
+            # Pass 1: 안쪽 -> 바깥쪽 (Outer Promotion: w_outer >= w_inner)
+            order_asc = np.argsort(r_arr)
+            for k_in in order_asc:
+                w_in = float(weights_arr[k_in])
+                if w_in <= 0.0005:
+                    continue
+                p_in = all_pts[k_in]
+                u_in = (p_in - head).normalized() if r_arr[k_in] > 1e-4 else Vector((0, -1, 0))
+                hits = kd.find_range(p_in, search_radius)
+                for co, k_out, dist in hits:
+                    if k_out == k_in:
+                        continue
+                    diff = co - p_in
+                    if diff.dot(u_in) > 0.0003:  # 방사선 상에서 바깥쪽에 위치
+                        if weights_arr[k_out] < w_in:
+                            weights_arr[k_out] = w_in
+                            total_adjusted += 1
+
+            # Pass 2: 바깥쪽 -> 안쪽 (Inner Ceiling Clamp: w_inner <= w_outer)
+            order_desc = np.argsort(-r_arr)
+            for k_out in order_desc:
+                w_out = float(weights_arr[k_out])
+                p_out = all_pts[k_out]
+                u_out = (p_out - head).normalized() if r_arr[k_out] > 1e-4 else Vector((0, -1, 0))
+                hits = kd.find_range(p_out, search_radius)
+                for co, k_in, dist in hits:
+                    if k_in == k_out:
+                        continue
+                    diff = p_out - co
+                    if diff.dot(u_out) > 0.0003:  # 방사선 상에서 안쪽에 위치
+                        if weights_arr[k_in] > w_out:
+                            weights_arr[k_in] = w_out
+                            total_adjusted += 1
+
+        # 버텍스 그룹에 반영
+        updates_per_obj = {}
+        for k in range(n_pts):
+            obj, vi = all_refs[k]
+            new_w = float(weights_arr[k])
+            if abs(new_w - all_weights[k]) > 1e-4:
+                updates_per_obj.setdefault(obj, []).append((vi, new_w))
+
+        for obj, v_list in updates_per_obj.items():
+            vg = obj.vertex_groups.get(vg_name)
+            if not vg:
+                continue
+            for vi, new_w in v_list:
+                vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
+
+    return total_adjusted
+
+
 def rebake_mesh_weights_from_rig(context, rig, props=None):
     """
     물리 리그(XXMI_Physics_Rig) 내의 본 위치를 기준으로
@@ -926,7 +1047,22 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                     is_registered_b[vi] = True
 
             if side_lock_registered:
-                cand_mask = is_registered_b & ~rigid_mask
+                # 사용자가 등록한 정점 외에, 그 바로 위/앞에 얹힌 겉옷/액세서리 쉘 정점들을 자동 포함 (겉옷 0.000 방치로 인한 찢어짐 원천 차단)
+                expanded_cand = set(np.nonzero(is_registered_b)[0].tolist())
+                if expanded_cand:
+                    kd_obj = KDTree(n_v)
+                    for v_k in range(n_v):
+                        kd_obj.insert(Vector(world[v_k]), v_k)
+                    kd_obj.balance()
+                    for v_k in list(expanded_cand):
+                        p_k = Vector(world[v_k])
+                        for _, near_idx, dist in kd_obj.find_range(p_k, 0.018):
+                            expanded_cand.add(near_idx)
+                    cand_mask = np.zeros(n_v, dtype=bool)
+                    cand_mask[list(expanded_cand)] = True
+                    cand_mask &= ~rigid_mask
+                else:
+                    cand_mask = np.zeros(n_v, dtype=bool)
             else:
                 dist = np.linalg.norm(world - cent, axis=1)
                 in_radius = (dist <= eff_radius)
@@ -1018,6 +1154,12 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     # 6.5. 동일 위치 동기화 후 가슴 중앙선 중복 가중치 재정규화 (가슴골 2배 돌출 원천 차단)
     normalize_overlapping_bone_weights(
         target_objs, active_bones, max_total_weight=target_peak_cap
+    )
+
+    # 6.6. 절대 방사형 비침투 제약 (Strict Radial Monotonic Non-Penetration Constraint):
+    # "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)"
+    enforce_radial_monotonic_non_penetration(
+        target_objs, bone_info, active_bones, search_radius=0.015
     )
 
     # 7. 강체(액세서리) 표면 밀착 가중치 동기화
@@ -1143,6 +1285,17 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                     vg_target.remove(rem_list)
 
         applied_slots += 1
+
+    # 7.5. 강체 액세서리 포함 2차 절대 방사형 비침투 제약 및 최종 Seam 일치 보장
+    enforce_radial_monotonic_non_penetration(
+        target_objs, bone_info, active_bones, search_radius=0.015
+    )
+    synchronize_coincident_vertices_across_objects(
+        target_objs, vg_names=[f"XXMI_{bn}" for bn in active_bones], tol=0.0012
+    )
+    normalize_overlapping_bone_weights(
+        target_objs, active_bones, max_total_weight=target_peak_cap
+    )
 
     return updated_obj_count, f"{updated_obj_count}개 메쉬 ({total_recomputed_verts}개 정점, 동기화 {num_synced}개, 강체슬롯 {applied_slots}개) 가중치 갱신 완료"
 
