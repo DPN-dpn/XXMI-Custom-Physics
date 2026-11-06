@@ -38,31 +38,25 @@
 
 ---
 
-## 🚫 2. 다층 메쉬 절대 방사형 비침투 배리어 (Strict Radial Non-Penetration)
+## 🚫 2. BVH 삼각망 무게중심 등각 동기화 및 변형 교차 검증 (`enforce_radial_monotonic_non_penetration`)
 
-### 대원칙:
-> **"본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷/장식)를 절대로 넘지 못한다 ($w_{\text{inner}} \le w_{\text{outer}}$)."**
+### 왜 단순 $w_{\text{inner}} \le w_{\text{outer}}$ 부등식만으로는 관통을 막을 수 없는가?
+인게임 3D 스프링 시뮬레이션은 전방($-Z$), 후방($+Z$), 상하($\pm Y$), 좌우($\pm X$) 전 방향으로 양방향 진동합니다.
+- 만약 $w_{\text{inner}} > w_{\text{outer}}$이면 **전진/하강 시** 속살이 겉옷 밖으로 뚫고 나옵니다.
+- 반대로 $w_{\text{inner}} < w_{\text{outer}}$이면 **후진/상승 복원 시** 겉옷이 속살 안으로 파고들어 속살이 바깥으로 노출됩니다.
+- 또한, 정점 대 정점 최근접 매칭을 사용하면 내피 정점이 외피 삼각형의 중앙에 위치할 때 외피 삼각형의 선형 보간 가중치($u w_A + v w_B + w w_C$)와 불일치가 발생하여 삼각형 면 중심을 뚫고 나오게 됩니다.
 
-### ⚠️ 치명적 주의사항: 연결 메쉬 섬(Same Island) 격리
-과거 버전에서 가슴 표면에 **대각선 계단식 절벽 단차**와 **얼룩덜룩한 단차 구멍**이 발생했던 이유는, 동일한 하나의 연속된 단일 표면 정점들끼리도 곡면 경사로 인해 1~2mm의 깊이 차이가 발생하여 서로를 '속살 vs 겉옷'으로 오인하고 가중치를 강제로 깎아내렸기 때문입니다.
-
-따라서 **반드시 연결 성분(`label_components`) 분석을 거쳐 동일 컴포넌트 내부 정점 간의 상호 클램프를 엄격히 차단**해야 합니다:
-
-```python
-# weighting.py의 필수 규칙
-e0, e1 = mesh_edge_arrays(obj.data)
-comp_labels = label_components(len(world), e0, e1)
-
-# KD-Tree 탐색 루프
-if obj_k == obj_hit and comp_k == comp_hit:
-    continue  # 동일 오브젝트의 동일 연속 메쉬 표면 내부 정점은 비교 제외!
-```
-
-### Conformal Promotion (겉옷 상향 일치)
-- $d_{\text{diff}} = r_{\text{outer}} - r_{\text{inner}} > 0$ 이고 $w_{\text{inner}} > w_{\text{outer}}$인 경우:
-  - 겉옷($w_{\text{outer}}$)을 최소한 속살 이상으로 상향 일치시킵니다:
-    $$w_{\text{outer}} = \max(w_{\text{outer}}, w_{\text{inner}})$$
-  - **속살($w_{\text{inner}}$)을 강제로 깎아내려 분화구 형태의 함몰을 만들지 않습니다.** 겉옷이 속살만큼 움직여주면 속살이 튀어나오지 않으면서도 매끄러운 피부 볼륨이 그대로 보존됩니다.
+### 해결 원리: BVHTree 삼각망 무게중심 투영 & 6방향 변형 BVH 교차 평탄화
+1. **연결 메쉬 섬(`label_components`) 별 BVHTree 구축**:
+   - 각 연결 컴포넌트별로 독립된 `BVHTree.FromPolygons`를 구축하여 동일 연속 표면 내부 정점끼리의 간섭을 원천 차단합니다.
+2. **외피(Outer Shell) ➔ 내피(Inner Shell) 무게중심 등각 투영 (Barycentric Conformal Projection)**:
+   - 면 법선(`norm`) 및 본 외향 벡터(`out_dirs`) 기준으로 외피(겉옷)와 내피(속살)의 피복 관계를 판별합니다.
+   - 내피 정점 $\mathbf{P}_{\text{inner}}$에서 외피 삼각망(`bvh.find_nearest`) 위 최근접 투영점 $\mathbf{Q}$와 해당 삼각형 $(A, B, C)$의 무게중심 좌표 $(u, v, w)$를 구한 뒤, 전 본의 가중치 벡터를 동시 전사합니다:
+     $$\mathbf{w}(\mathbf{P}_{\text{inner}}) = u\,\mathbf{w}(A) + v\,\mathbf{w}(B) + w\,\mathbf{w}(C)$$
+   - 의상 외곽 경계선 밖으로 노출되는 피부는 접평면 거리($d_{\text{tang}}: 2.5\text{mm} \to 8.0\text{mm}$)에 따라 부드럽게 원래 피부 가중치로 블렌딩합니다.
+3. **6방향 극한 변위 BVH 교차 검증 루프 (Deformed BVH Overlap Elimination)**:
+   - $0.3\text{mm} \sim 1.5\text{mm}$ 초밀착 경계(예: 밑가슴/가슴골 의상 재봉선)에서 내피와 외피의 삼각 분할(Triangulation) 방향이 다르면 급격한 가중치 경사 구간에서 모서리 대각선 교차가 발생할 수 있습니다.
+   - 전후/상하/역위상 극한 변위 시뮬레이션으로 실제 교차하는 삼각형 쌍(`bvh_j_def.overlap(bvh_i_def)`)을 직접 검출하고, 동일 좌표 UV 심 쌍둥이 정점(`coincident_map`)을 포함하여 외피 변화량 등각 보존(Delta Projection) 및 삼각형 평균 수렴을 수행함으로써 **전 방향 모션에서 삼각망 교차를 0으로 수렴**시킵니다.
 
 ---
 

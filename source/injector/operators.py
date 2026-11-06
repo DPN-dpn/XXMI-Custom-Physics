@@ -166,6 +166,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
             mesh_caches.append({
                 "obj": obj,
                 "sample_obj": sample_obj,
+                "world": co_world,
+                "w_bones_list": w_bones_list,
+                "is_rigid": is_rigid,
             })
 
         if not all_world_pts:
@@ -291,7 +294,25 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 w_out_list = [np.zeros(n_buf, dtype=np.float32) for _ in range(num_bones)]
                 rig_out = np.zeros(n_buf, dtype=np.float32)
 
+                best_world = best_cache.get("world")
+                best_w_bones = best_cache.get("w_bones_list")
+                best_is_rigid = best_cache.get("is_rigid")
+                n_best = len(best_world) if best_world is not None else 0
+                direct_match_count = 0
+
                 for vi in range(n_buf):
+                    # 1:1 정점 인덱스 매칭이 성립하는 경우(거리 0.5mm 이내), KD-Tree 동일 좌표 모호성 없이 원본 정점 가중치 직접 복사
+                    if vi < n_best:
+                        dx = float(buf_in_world[vi, 0] - best_world[vi, 0])
+                        dy = float(buf_in_world[vi, 1] - best_world[vi, 1])
+                        dz = float(buf_in_world[vi, 2] - best_world[vi, 2])
+                        if (dx * dx + dy * dy + dz * dz) < 2.5e-7:
+                            for bi in range(num_bones):
+                                w_out_list[bi][vi] = best_w_bones[bi][vi]
+                            rig_out[vi] = best_is_rigid[vi]
+                            direct_match_count += 1
+                            continue
+
                     pt = Vector(buf_in_world[vi])
                     res = kd_unified.find(pt)
                     if res is not None and res[0] is not None:
@@ -323,54 +344,57 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                         w_out_list[bi][overlap_mask] *= scale
 
                 # 2. .ib 인덱스 버퍼 기반 삼각망 찢어짐(Tearing) 완화 (Boundary Gradient Taper):
-                ib_candidates = [
-                    os.path.splitext(buf_path)[0] + ".ib",
-                    os.path.join(mod_folder, raw_fname.replace("Position.buf", ".ib")),
-                    os.path.join(mod_folder, raw_fname.replace("Position", ".ib")),
-                ]
-                base_stem = os.path.splitext(raw_fname)[0].replace("Position", "").replace("Blend", "").replace("TexCoord", "").lower()
-                for root, _, files in os.walk(mod_folder):
-                    for f in files:
-                        if f.lower().endswith('.ib'):
-                            f_stem = os.path.splitext(f)[0].lower()
-                            if base_stem in f_stem or f_stem in base_stem:
-                                p_cand = os.path.join(root, f)
-                                if p_cand not in ib_candidates:
-                                    ib_candidates.append(p_cand)
+                #    1:1 정점 매칭된 메쉬는 rebake_mesh_weights_from_rig에서 이미 양방향 테이퍼 및 다층 BVH 등각 동기화가 완료되었으므로,
+                #    외부 재토폴로지 버퍼(1:1 매칭 비율 < 90%)인 경우에만 보조 IB 테이퍼를 수행합니다.
+                if direct_match_count < n_buf * 0.90:
+                    ib_candidates = [
+                        os.path.splitext(buf_path)[0] + ".ib",
+                        os.path.join(mod_folder, raw_fname.replace("Position.buf", ".ib")),
+                        os.path.join(mod_folder, raw_fname.replace("Position", ".ib")),
+                    ]
+                    base_stem = os.path.splitext(raw_fname)[0].replace("Position", "").replace("Blend", "").replace("TexCoord", "").lower()
+                    for root, _, files in os.walk(mod_folder):
+                        for f in files:
+                            if f.lower().endswith('.ib'):
+                                f_stem = os.path.splitext(f)[0].lower()
+                                if base_stem in f_stem or f_stem in base_stem:
+                                    p_cand = os.path.join(root, f)
+                                    if p_cand not in ib_candidates:
+                                        ib_candidates.append(p_cand)
 
-                all_tris_list = []
-                for p_ib in ib_candidates:
-                    if os.path.exists(p_ib):
-                        try:
-                            with open(p_ib, 'rb') as f_ib:
-                                ib_raw = f_ib.read()
-                            ib_tris = np.frombuffer(ib_raw, dtype=np.uint32)
-                            if len(ib_tris) == 0 or ib_tris.max() >= n_buf:
-                                ib_tris = np.frombuffer(ib_raw, dtype=np.uint16)
-                            if len(ib_tris) >= 3 and ib_tris.max() < n_buf:
-                                all_tris_list.append(ib_tris.reshape(-1, 3))
-                        except Exception:
-                            pass
+                    all_tris_list = []
+                    for p_ib in ib_candidates:
+                        if os.path.exists(p_ib):
+                            try:
+                                with open(p_ib, 'rb') as f_ib:
+                                    ib_raw = f_ib.read()
+                                ib_tris = np.frombuffer(ib_raw, dtype=np.uint32)
+                                if len(ib_tris) == 0 or ib_tris.max() >= n_buf:
+                                    ib_tris = np.frombuffer(ib_raw, dtype=np.uint16)
+                                if len(ib_tris) >= 3 and ib_tris.max() < n_buf:
+                                    all_tris_list.append(ib_tris.reshape(-1, 3))
+                            except Exception:
+                                pass
 
-                if all_tris_list:
-                    tris = np.vstack(all_tris_list)
-                    adj_buf = [[] for _ in range(n_buf)]
-                    for t0, t1, t2 in tris:
-                        adj_buf[t0].append(t1); adj_buf[t0].append(t2)
-                        adj_buf[t1].append(t0); adj_buf[t1].append(t2)
-                        adj_buf[t2].append(t0); adj_buf[t2].append(t1)
+                    if all_tris_list:
+                        tris = np.vstack(all_tris_list)
+                        adj_buf = [[] for _ in range(n_buf)]
+                        for t0, t1, t2 in tris:
+                            adj_buf[t0].append(t1); adj_buf[t0].append(t2)
+                            adj_buf[t1].append(t0); adj_buf[t1].append(t2)
+                            adj_buf[t2].append(t0); adj_buf[t2].append(t1)
 
-                    for w_arr in w_out_list:
-                        for _ in range(3):
-                            active_b = np.nonzero((w_arr > 0.01) & (rig_out < 0.5))[0]
-                            for vi in active_b:
-                                nbrs = adj_buf[vi]
-                                if not nbrs:
-                                    continue
-                                min_nb = min(w_arr[nb] for nb in nbrs)
-                                diff = w_arr[vi] - min_nb
-                                if diff > 0.12:
-                                    w_arr[vi] -= (diff - 0.12) * 0.40
+                        for w_arr in w_out_list:
+                            for _ in range(3):
+                                active_b = np.nonzero((w_arr > 0.01) & (rig_out < 0.5))[0]
+                                for vi in active_b:
+                                    nbrs = adj_buf[vi]
+                                    if not nbrs:
+                                        continue
+                                    min_nb = min(w_arr[nb] for nb in nbrs)
+                                    diff = w_arr[vi] - min_nb
+                                    if diff > 0.12:
+                                        w_arr[vi] -= (diff - 0.12) * 0.40
 
                 # 3. [절대 최종 단계]: Position.buf 내 모든 동일 위치(UV 심/하드 엣지 분리점) 100% 완전 동기화
                 # 3DMigoto 버퍼 상의 분리 정점(Coincident Vertices) 가중치 불일치로 인한 구멍 및 찢어짐 원천 차단
@@ -412,10 +436,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     if len(g_list) > 1 and any(active_any_buf[v] for v in g_list):
                         has_rigid = any(rig_out[v] > 0.5 for v in g_list)
                         if has_rigid:
-                            # 강체 정점이 포함된 동일 좌표 그룹은 강체 가중치와 플래그를 우선 동기화
+                            # 강체 정점이 포함된 동일 좌표 그룹은 강체 가중치를 우선 동기화하되, 연질 정점의 rig_out 플래그는 보존
                             rigid_v = [v for v in g_list if rig_out[v] > 0.5][0]
                             for v in g_list:
-                                rig_out[v] = 1.0
                                 for bi in range(num_bones):
                                     w_out_list[bi][v] = w_out_list[bi][rigid_v]
                         else:

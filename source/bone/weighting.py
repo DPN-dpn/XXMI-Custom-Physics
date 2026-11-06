@@ -4,6 +4,7 @@ from collections import deque
 import bpy
 from mathutils import Vector
 from mathutils.kdtree import KDTree
+from mathutils.bvhtree import BVHTree
 from ..utils import (
     ensure_object_visible,
     ensure_all_objects_in_object_mode,
@@ -572,7 +573,8 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
     """
     모든 대상 오브젝트에 걸쳐 3D 공간 상에서 동일한 위치(기본 0.2mm 이내)를 공유하는
     모든 정점(UV 심, 하드 엣지 분리점 등)의 가중치를 100% 동일하게 동기화합니다.
-    동적으로 등록된 모든 모핑 본 버텍스 그룹(XXMI_*)을 지원합니다.
+    강체(VG_RIGID) 정점과 맞닿은 연질(Soft) 정점은 강체 가중치를 우선 추종하되
+    연질 정점의 VG_RIGID 플래그는 건드리지 않습니다.
     """
     if not target_objs:
         return 0
@@ -622,9 +624,9 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
                 "n": n_verts,
             })
 
-            mask = (w > 0.0001) & ~rigid
+            mask = (w > 0.0001) | rigid
             for vi in np.nonzero(mask)[0].tolist():
-                active_items.append((o_idx, vi, world[vi], float(w[vi])))
+                active_items.append((o_idx, vi, world[vi], float(w[vi]), bool(rigid[vi])))
 
         if not active_items:
             continue
@@ -650,14 +652,18 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
                 if not hits:
                     continue
 
-                max_w = float(w[vi])
-                for _, hit_idx, _ in hits:
-                    hw = active_items[hit_idx][3]
-                    if hw > max_w:
-                        max_w = hw
+                rigid_hits = [active_items[h_idx][3] for _, h_idx, _ in hits if active_items[h_idx][4]]
+                if rigid_hits:
+                    target_w = float(rigid_hits[0])
+                else:
+                    target_w = float(w[vi])
+                    for _, hit_idx, _ in hits:
+                        hw = active_items[hit_idx][3]
+                        if hw > target_w:
+                            target_w = hw
 
-                if abs(w[vi] - max_w) > 1e-4:
-                    updates_per_obj[o_idx][vi] = max_w
+                if abs(w[vi] - target_w) > 1e-4:
+                    updates_per_obj[o_idx][vi] = target_w
 
         for o_idx, updates in updates_per_obj.items():
             if not updates:
@@ -676,11 +682,11 @@ def synchronize_coincident_vertices_across_objects(target_objs, vg_names=None, t
     return synced_count
 
 
-def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes=3):
+def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes=3, seam_locked_by_obj=None):
     """
-    물리 본 경계면에서 급격한 가중치 절벽(예: 0.35 -> 0.00)으로 인해 폴리곤이 찢어지는
-    현상을 방지하기 위해, 연결된 메쉬 엣지(Edge)를 따라 매끄러운 그라데이션 감쇠(Taper)를 적용합니다.
-    어떤 단일 엣지도 max_delta를 초과하는 가중치 급변을 겪지 않도록 보장합니다.
+    물리 본 경계면에서 급격한 가중치 절벽(예: 0.35 -> 0.00)이나 강체-연질 봉합선(Seam)의
+    급격한 단차로 인해 폴리곤이 찢어지는 현상을 방지하기 위해,
+    연결된 메쉬 엣지(Edge)를 따라 양방향 그라데이션 완만화(Taper)를 적용합니다.
     """
     valid_objs = [o for o in target_objs if o and o.type == 'MESH' and len(o.data.vertices) > 0]
     if not valid_objs or not vg_names:
@@ -699,6 +705,22 @@ def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes
             r_data = read_vertex_group_arrays(obj, {vg_rigid.index: "r"}).get("r")
             if r_data is not None:
                 r_arr = (r_data > 0.5)
+
+        seam_locked = None
+        if seam_locked_by_obj and obj in seam_locked_by_obj:
+            seam_locked = seam_locked_by_obj[obj]
+        if seam_locked is None:
+            seam_locked = np.zeros(n_verts, dtype=bool)
+
+        locked_mask = r_arr | seam_locked
+
+        # 강체-연질 봉합선(seam_locked) 주변 6엣지 이내 영역만 상향 완만화(Upward Taper) 허용
+        # (일반 외곽 경계의 w=0 체간부 정점까지 상향 견인하면 외곽 경계가 들뜨고 곡면 굴절이 발생하므로 차단)
+        if np.any(seam_locked):
+            e0, e1 = mesh_edge_arrays(mesh)
+            near_seam_mask = dilate_mask_topological(seam_locked, e0, e1, steps=6) & ~locked_mask
+        else:
+            near_seam_mask = np.zeros(n_verts, dtype=bool)
 
         # 엣지 인접 리스트 구축
         adj = [[] for _ in range(n_verts)]
@@ -719,23 +741,38 @@ def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes
 
             changed = False
             for _ in range(passes):
-                active_idx = np.nonzero((w > 0.01) & ~r_arr)[0]
+                # 1. 상향 완만화: 강체-연질 봉합선(seam_locked) 인접 연질 정점이 봉합선으로 부드럽게 이어지도록 보간
+                if np.any(near_seam_mask):
+                    w_up = w.copy()
+                    for vi in np.nonzero(near_seam_mask)[0]:
+                        neighbors = adj[vi]
+                        if not neighbors:
+                            continue
+                        max_nb = max(float(w_up[nb]) for nb in neighbors)
+                        cur_w = float(w_up[vi])
+                        if max_nb - cur_w > max_delta:
+                            w[vi] = cur_w + (max_nb - cur_w - max_delta) * 0.45
+                            changed = True
+                            total_smoothed += 1
+
+                # 2. 하향 완만화: 외곽 경계면에서 절벽 정점의 가중치를 부드럽게 감쇠 (봉합선 근방은 제외)
+                w_prev = w.copy()
+                active_idx = np.nonzero((w_prev > 0.005) & ~locked_mask & ~near_seam_mask)[0]
                 for vi in active_idx:
-                    cur_w = float(w[vi])
+                    cur_w = float(w_prev[vi])
                     neighbors = adj[vi]
                     if not neighbors:
                         continue
-                    min_nb = min(float(w[nb]) for nb in neighbors)
+                    min_nb = min(float(w_prev[nb]) for nb in neighbors)
                     diff = cur_w - min_nb
                     if diff > max_delta:
-                        # 경계면 완만화: 절벽 정점의 가중치를 부드럽게 감쇠
                         w[vi] = cur_w - (diff - max_delta) * 0.45
                         changed = True
                         total_smoothed += 1
 
             if changed:
                 for vi in range(n_verts):
-                    if r_arr[vi]:
+                    if locked_mask[vi]:
                         continue
                     new_val = float(w[vi])
                     if new_val > 0.0005:
@@ -746,21 +783,46 @@ def smooth_boundary_gradient_taper(target_objs, vg_names, max_delta=0.08, passes
     return total_smoothed
 
 
-def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bones, search_radius=0.015):
+def _barycentric_weights_3d(p, a, b, c):
+    """3D 공간의 점 p를 삼각형 (a, b, c) 평면에 투영한 무게중심 좌표 (u, v, w)를 반환합니다."""
+    v0 = b - a
+    v1 = c - a
+    v2 = p - a
+    d00 = v0.dot(v0)
+    d01 = v0.dot(v1)
+    d11 = v1.dot(v1)
+    d20 = v2.dot(v0)
+    d21 = v2.dot(v1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-12:
+        return 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0
+    v = (d11 * d20 - d01 * d21) / denom
+    w = (d00 * d21 - d01 * d20) / denom
+    u = 1.0 - v - w
+    u = max(0.0, min(1.0, u))
+    v = max(0.0, min(1.0, v))
+    w = max(0.0, min(1.0, w))
+    s = u + v + w
+    if s > 1e-8:
+        return u / s, v / s, w / s
+    return 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0
+
+
+def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bones, search_radius=0.014):
     """
-    [절대 다층 방사형 비침투 제약 (Strict Radial Multi-Layer Non-Penetration Constraint)]:
-    "본 중심에 가까운 안쪽 메쉬(속살)는 본 중심에서 더 먼 바깥쪽 메쉬(겉옷)를 절대로 넘지 못한다 (w_inner <= w_outer)."
-    
-    기하학적 원리:
-    1. 본의 흉벽 앵커(Head)를 원점으로 하여, 각 정점의 방사 거리 r = ||P - Head|| 및 방사 방향 단위벡터 u = (P - Head)/r 산출.
-    2. 본 중심에서 바라본 동일 방사선(Ray, 각도 10도 이내 또는 각거리 3.5mm 이내) 선상에 놓인 정점들을 매칭.
-    3. 방사 거리 차이가 0.8mm ~ 15mm인 서로 다른 층(속살 vs 겉옷)에 대해:
-       - r_inner < r_outer (본 중심에 가까운 살 vs 먼 옷)
-       - 절대 비침투: w_inner <= w_outer
-       - 만약 w_inner > w_outer 이면:
-         - 겉옷(outer)은 최소한 속살 이상으로 상향 일치: w_outer = max(w_outer, w_inner)
-         - 속살(inner)은 겉옷을 넘지 못하도록 엄격 제한: w_inner = min(w_inner, w_outer)
-    4. 표면 법선(Normal) 오차에 취약하지 않고 곡면 전체에서 속살 돌출을 100% 원천 봉쇄합니다.
+    [BVH 삼각망 무게중심 투영 기반 다층 쉘 등각 동기화 (Conformal Multi-Shell Synchronization)]:
+    3D 스프링은 전방(-Z), 후방(+Z), 상하(±Y), 좌우(±X) 모든 방향으로 진동하므로,
+    밀착된 다층 메쉬(0.3mm ~ 8mm 간격의 속살과 겉옷) 사이에서 가중치 벡터가 조금이라도 다르면
+    전진 시 속살이 뚫고 나오거나 후진/하강 시 겉옷이 속살 안으로 파고드는 관통이 발생합니다.
+
+    해결 원리:
+    1. 각 연결 컴포넌트(Mesh Island)별로 BVHTree 삼각망을 구축합니다 (경계면 w=0 폴리곤 포함).
+    2. 본 앵커(Head)에서 바깥쪽을 향하는 외향 법선(Outward Normal) 기준으로 컴포넌트 간
+       피복 관계(Outer Shell vs Inner Shell)를 비대칭 판별합니다.
+    3. 가장 바깥쪽 쉘(겉옷)에서 안쪽 쉘(속살) 순서로, 안쪽 정점 P_inner에서 가장 가까운
+       바깥쪽 삼각형 위 투영점의 무게중심 가중치(Barycentric Weight Vector)를 전 본에 대해 동시 전사합니다.
+    4. 의상 외곽 경계선 밖으로 노출되는 피부는 접평면 거리(d_tang: 2.5mm -> 8.0mm)에 따라
+       부드럽게 원래 피부 가중치로 블렌딩하여 경계 단차와 관통을 동시에 0으로 만듭니다.
     """
     if not target_objs or not active_bones or not bone_info:
         return 0
@@ -769,8 +831,8 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
     if not valid_objs:
         return 0
 
-    total_adjusted = 0
-
+    bone_heads = []
+    bone_radii = []
     for bname in active_bones:
         bentry = bone_info.get(bname)
         if not bentry:
@@ -779,136 +841,419 @@ def enforce_radial_monotonic_non_penetration(target_objs, bone_info, active_bone
                 if k.lower() == b_low or e["bname"].lower() == b_low:
                     bentry = e
                     break
-        if not bentry:
+        if bentry:
+            bone_heads.append(Vector(bentry["head"]))
+            bone_radii.append(max(0.02, float(bentry.get("radius", 0.08))))
+
+    if not bone_heads:
+        return 0
+
+    num_bones = len(active_bones)
+    vg_names = [f"XXMI_{bn}" for bn in active_bones]
+
+    # 오브젝트별 월드 좌표, 외향 법선, 본 가중치 행렬, 컴포넌트, 삼각망 수집
+    obj_states = []
+    cand_shells = {}  # key: (o_idx, comp_id)
+
+    for o_idx, obj in enumerate(valid_objs):
+        mesh = obj.data
+        mesh.calc_loop_triangles()
+        world = world_vertex_positions(obj)
+        n_v = len(world)
+        if n_v == 0:
             continue
 
-        head = Vector(bentry["head"])
-        vg_name = f"XXMI_{bname}"
+        out_dirs = []
+        near_bone_dist = np.full(n_v, 1e9, dtype=np.float64)
+        for vi in range(n_v):
+            p_v = Vector(world[vi])
+            best_h = bone_heads[0]
+            best_d = 1e9
+            for bh in bone_heads:
+                d = (p_v - bh).length
+                if d < best_d:
+                    best_d = d
+                    best_h = bh
+            near_bone_dist[vi] = best_d
+            od = (p_v - best_h)
+            out_dirs.append(od.normalized() if od.length > 1e-8 else Vector((0.0, -1.0, 0.0)))
 
-        # 본의 대상 정점, 월드 좌표 및 참조 수집
-        all_pts = []
-        all_weights = []
-        all_refs = []  # (obj, vi)
+        gmap = {}
+        vg_rigid = obj.vertex_groups.get(VG_RIGID)
+        if vg_rigid:
+            gmap[vg_rigid.index] = "rigid"
+        for bi, vgn in enumerate(vg_names):
+            vg = obj.vertex_groups.get(vgn)
+            if vg:
+                gmap[vg.index] = f"b_{bi}"
 
-        for obj in valid_objs:
-            vg = obj.vertex_groups.get(vg_name)
-            if not vg:
+        arrs = read_vertex_group_arrays(obj, gmap)
+        rigid_mask = (arrs.get("rigid", np.zeros(n_v, dtype=np.float32)) > 0.5)
+        w_mat = np.zeros((num_bones, n_v), dtype=np.float32)
+        for bi in range(num_bones):
+            w_mat[bi] = arrs.get(f"b_{bi}", np.zeros(n_v, dtype=np.float32))
+
+        e0, e1 = mesh_edge_arrays(mesh)
+        comp_labels = label_components(n_v, e0, e1)
+
+        adj = [[] for _ in range(n_v)]
+        for u_e, v_e in zip(e0.tolist(), e1.tolist()):
+            adj[u_e].append(v_e)
+            adj[v_e].append(u_e)
+
+        comp_tris_map = {}
+        for lt in mesh.loop_triangles:
+            t0, t1, t2 = int(lt.vertices[0]), int(lt.vertices[1]), int(lt.vertices[2])
+            cid = int(comp_labels[t0])
+            comp_tris_map.setdefault(cid, []).append((t0, t1, t2))
+
+        max_rad = max(bone_radii) * 1.65
+        in_region_mask = (near_bone_dist <= max_rad) | (w_mat.sum(axis=0) > 0.0005)
+
+        obj_states.append({
+            "obj": obj,
+            "world": world,
+            "out_dirs": out_dirs,
+            "rigid_mask": rigid_mask,
+            "w_mat": w_mat,
+            "w_orig": w_mat.copy(),
+            "comp_labels": comp_labels,
+            "adj": adj,
+            "in_region_mask": in_region_mask,
+        })
+
+        uniq_c = np.unique(comp_labels)
+        for cid in uniq_c.tolist():
+            cid = int(cid)
+            c_mask = (comp_labels == cid)
+            if float(np.mean(rigid_mask[c_mask])) > 0.5:
                 continue
-            world = world_vertex_positions(obj)
-            arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
-            w_arr = arrs.get("w", np.zeros(len(world), dtype=np.float32))
-
-            e0, e1 = mesh_edge_arrays(obj.data)
-            comp_labels = label_components(len(world), e0, e1)
-
-            for vi in range(len(world)):
-                w = float(w_arr[vi])
-                if w > 0.0005:
-                    all_pts.append(Vector(world[vi]))
-                    all_weights.append(w)
-                    all_refs.append((obj, comp_labels[vi], vi))
-
-        if len(all_pts) < 2:
-            continue
-
-        weights_arr = np.array(all_weights, dtype=np.float32)
-        n_pts = len(all_pts)
-
-        # 본 앵커로부터의 방사 벡터 및 거리 계산
-        dists = np.empty(n_pts, dtype=np.float64)
-        uvecs = []
-        for k in range(n_pts):
-            v_head = all_pts[k] - head
-            d = v_head.length
-            dists[k] = d
-            uvecs.append(v_head / max(d, 1e-6))
-
-        kd = KDTree(n_pts)
-        for k, p in enumerate(all_pts):
-            kd.insert(p, k)
-        kd.balance()
-
-        for pass_idx in range(2):
-            orig_weights = weights_arr.copy()
-            promotions = {}
-            clamps = {}
-
-            for k in range(n_pts):
-                cur_w = float(orig_weights[k])
-                if cur_w <= 0.005:
+            active_c_vis = np.nonzero(c_mask & (w_mat.sum(axis=0) > 0.0005) & ~rigid_mask)[0]
+            if len(active_c_vis) < 3:
+                continue
+            tris_c = comp_tris_map.get(cid, [])
+            if not tris_c:
+                continue
+            c_vis = np.nonzero(c_mask)[0]
+            global_to_local = {int(gv): li for li, gv in enumerate(c_vis.tolist())}
+            local_verts = [Vector(world[gv]) for gv in c_vis.tolist()]
+            local_tris = []
+            valid_global_tris = []
+            for t0, t1, t2 in tris_c:
+                if not (in_region_mask[t0] or in_region_mask[t1] or in_region_mask[t2]):
                     continue
-                cur_p = all_pts[k]
-                cur_d = dists[k]
-                cur_u = uvecs[k]
-
-                hits = kd.find_range(cur_p, search_radius)
-                obj_k, comp_k, vi_k = all_refs[k]
-
-                for _, hit_k, _ in hits:
-                    if hit_k == k:
-                        continue
-                    obj_hit, comp_hit, vi_hit = all_refs[hit_k]
-
-                    # 동일 오브젝트의 동일 연결 컴포넌트(연속된 메쉬 표면) 내부의 정점끼리는 비교하지 않음 (표면 감쇠 보존)
-                    if obj_k == obj_hit and comp_k == comp_hit:
-                        continue
-
-                    hit_d = dists[hit_k]
-                    diff_d = hit_d - cur_d
-                    abs_diff_d = abs(diff_d)
-
-                    # 1. 서로 다른 층(Shell) 사이인지 확인 (0.8mm ~ search_radius)
-                    if abs_diff_d < 0.0008 or abs_diff_d > search_radius:
-                        continue
-
-                    # 2. 동일한 방사 각도 선상에 놓여 있는지 확인 (내적 >= 0.985 또는 접평면 오차 <= 3.5mm)
-                    hit_u = uvecs[hit_k]
-                    dot_u = cur_u.dot(hit_u)
-                    if dot_u < 0.985:
-                        continue
-
-                    hit_w = float(orig_weights[hit_k])
-
-                    if diff_d > 0:
-                        # hit_k가 cur_p보다 바깥쪽(겉옷): cur_p(살) <= hit_k(옷)
-                        # 겉옷(outer)은 최소한 속살(inner) 이상으로 움직이도록 상향 일치
-                        if cur_w > hit_w:
-                            promotions[hit_k] = max(promotions.get(hit_k, hit_w), cur_w)
-                    else:
-                        # hit_k가 cur_p보다 안쪽(속살): hit_k(살) <= cur_p(옷)
-                        # 겉옷(cur_p)은 최소한 속살(hit_k) 이상으로 움직이도록 상향 일치
-                        if hit_w > cur_w:
-                            promotions[k] = max(promotions.get(k, cur_w), hit_w)
-
-            # 비연쇄적 일괄 반영
-            changed = False
-            for vi_k, val in promotions.items():
-                if val > weights_arr[vi_k]:
-                    weights_arr[vi_k] = val
-                    total_adjusted += 1
-                    changed = True
-            for vi_k, val in clamps.items():
-                if val < weights_arr[vi_k]:
-                    weights_arr[vi_k] = val
-                    total_adjusted += 1
-                    changed = True
-
-            if not changed:
-                break
-
-        # 버텍스 그룹에 반영
-        updates_per_obj = {}
-        for k in range(n_pts):
-            obj, comp_id, vi = all_refs[k]
-            new_w = float(weights_arr[k])
-            if abs(new_w - all_weights[k]) > 1e-4:
-                updates_per_obj.setdefault(obj, []).append((vi, new_w))
-
-        for obj, v_list in updates_per_obj.items():
-            vg = obj.vertex_groups.get(vg_name)
-            if not vg:
+                if t0 in global_to_local and t1 in global_to_local and t2 in global_to_local:
+                    local_tris.append((global_to_local[t0], global_to_local[t1], global_to_local[t2]))
+                    valid_global_tris.append((t0, t1, t2))
+            if not local_tris:
                 continue
-            for vi, new_w in v_list:
+            bvh = BVHTree.FromPolygons(local_verts, local_tris)
+            cand_shells[(o_idx, cid)] = {
+                "o_idx": o_idx,
+                "cid": cid,
+                "c_vis": c_vis,
+                "active_c_vis": active_c_vis,
+                "bvh": bvh,
+                "local_tris": local_tris,
+                "global_tris": valid_global_tris,
+            }
+
+    if len(cand_shells) < 2:
+        return 0
+
+    # 컴포넌트 쌍별 외피(Outer Shell) 피복 관계 판별 (삼각형 면 법선 norm 및 본 외향 벡터 out_dirs 기준)
+    shell_keys = list(cand_shells.keys())
+    outer_of = {k: set() for k in shell_keys}
+    for key_i in shell_keys:
+        sh_i = cand_shells[key_i]
+        st_i = obj_states[sh_i["o_idx"]]
+        world_i = st_i["world"]
+        out_dirs_i = st_i["out_dirs"]
+        act_vis_i = sh_i["active_c_vis"]
+
+        for key_j in shell_keys:
+            if key_i == key_j:
+                continue
+            bvh_j = cand_shells[key_j]["bvh"]
+            ds_list = []
+            for vi in act_vis_i.tolist():
+                p_i = Vector(world_i[vi])
+                loc, norm, tidx, dist = bvh_j.find_nearest(p_i, 0.008)
+                if loc is not None and norm is not None and 0.00025 <= dist <= 0.008:
+                    n_vec = Vector(norm)
+                    if n_vec.dot(out_dirs_i[vi]) < 0.0:
+                        n_vec = -n_vec
+                    ds = (loc - p_i).dot(n_vec)
+                    ds_list.append(ds)
+            min_req = max(6, int(len(act_vis_i) * 0.12))
+            if len(ds_list) >= min_req:
+                arr = np.array(ds_list, dtype=np.float64)
+                if float(np.mean(arr > 0.0003)) >= 0.75 and float(np.median(arr)) >= 0.0005:
+                    outer_of[key_i].add(key_j)
+
+    # 외곽 쉘 -> 내부 쉘 위상 정렬 순서로 무게중심 가중치 등각 투영
+    ordered_keys = sorted(shell_keys, key=lambda k: len(outer_of[k]))
+    total_adjusted = 0
+
+    for key_i in ordered_keys:
+        outers = outer_of[key_i]
+        if not outers:
+            continue
+        sh_i = cand_shells[key_i]
+        st_i = obj_states[sh_i["o_idx"]]
+        world_i = st_i["world"]
+        out_dirs_i = st_i["out_dirs"]
+        w_mat_i = st_i["w_mat"]
+
+        proj_map_i = {}
+        for vi in sh_i["active_c_vis"].tolist():
+            p_i = Vector(world_i[vi])
+            od_i = out_dirs_i[vi]
+
+            best_hit = None
+            best_dist = 1e9
+            for key_j in outers:
+                sh_j = cand_shells[key_j]
+                loc, norm, tidx, dist = sh_j["bvh"].find_nearest(p_i, search_radius)
+                if loc is not None and norm is not None and tidx is not None and dist < best_dist:
+                    n_vec = Vector(norm)
+                    if n_vec.dot(od_i) < 0.0:
+                        n_vec = -n_vec
+                    dvec = loc - p_i
+                    d_norm = dvec.dot(n_vec)
+                    d_tang = (dvec - d_norm * n_vec).length
+                    if d_norm >= -0.0005 and d_tang <= 0.008:
+                        best_dist = dist
+                        best_hit = (sh_j, loc, int(tidx), d_norm, d_tang)
+
+            if best_hit is not None:
+                sh_j, loc, tidx, d_norm, d_tang = best_hit
+                st_j = obj_states[sh_j["o_idx"]]
+                world_j = st_j["world"]
+                w_mat_j = st_j["w_mat"]
+                t0, t1, t2 = sh_j["global_tris"][tidx]
+                bu, bv, bw = _barycentric_weights_3d(
+                    loc, Vector(world_j[t0]), Vector(world_j[t1]), Vector(world_j[t2])
+                )
+
+                alpha = 1.0 if d_tang <= 0.0025 else max(0.0, (0.008 - d_tang) / 0.0055)
+                proj_map_i[vi] = (sh_j, t0, t1, t2, bu, bv, bw, alpha, float(w_mat_i[0, vi]) if num_bones > 0 else 0.0)
+                for bi in range(num_bones):
+                    w_tri = float(bu * w_mat_j[bi, t0] + bv * w_mat_j[bi, t1] + bw * w_mat_j[bi, t2])
+                    w_mat_i[bi, vi] = alpha * w_tri + (1.0 - alpha) * float(w_mat_i[bi, vi])
+                total_adjusted += 1
+        sh_i["proj_map"] = proj_map_i
+
+    # 오브젝트 내부 동일 좌표(UV 심/하드 엣지) 그룹 사전 구축 (인메모리 동기화용)
+    for st in obj_states:
+        world = st["world"]
+        n_v = len(world)
+        kd_self = KDTree(n_v)
+        for vi in range(n_v):
+            kd_self.insert(Vector(world[vi]), vi)
+        kd_self.balance()
+        coincident_groups = []
+        coincident_map = {}
+        visited = np.zeros(n_v, dtype=bool)
+        for vi in range(n_v):
+            if visited[vi]:
+                continue
+            hits = kd_self.find_range(Vector(world[vi]), 0.0002)
+            grp = [h[1] for h in hits]
+            for g_vi in grp:
+                visited[g_vi] = True
+                coincident_map[g_vi] = grp
+            if len(grp) > 1:
+                coincident_groups.append(grp)
+        st["coincident_groups"] = coincident_groups
+        st["coincident_map"] = coincident_map
+
+    def _sync_in_memory_coincident(st):
+        w_m = st["w_mat"]
+        rig_m = st["rigid_mask"]
+        for grp in st["coincident_groups"]:
+            rig_vs = [v for v in grp if rig_m[v]]
+            for bi in range(num_bones):
+                if rig_vs:
+                    val = float(w_m[bi, rig_vs[0]])
+                else:
+                    val = float(np.mean([w_m[bi, v] for v in grp]))
+                for v in grp:
+                    if not rig_m[v]:
+                        w_m[bi, v] = val
+
+    for st in obj_states:
+        _sync_in_memory_coincident(st)
+
+    # [다층 삼각망 변형 교차 검증 및 국소 등각 평탄화 (Deformed BVH Overlap Elimination)]:
+    # 0.3mm ~ 1.5mm 초밀착 경계(예: 밑가슴/가슴골 의상 경계)에서 내피와 외피의 삼각 분할(Triangulation) 방향이 다르면,
+    # 정점 무게중심 투영만으로는 급격한 가중치 경사 구간에서 모서리 대각선 교차가 발생할 수 있습니다.
+    # 6방향 극한 변위 시뮬레이션으로 실제 교차하는 삼각형 쌍을 검출하여 외피 국소 경사를 완만화하고 재투영합니다.
+    test_motions = [
+        [Vector((0.0, -0.035, -0.025)) for _ in range(num_bones)],
+        [Vector((0.0, 0.035, -0.025)) for _ in range(num_bones)],
+        [Vector((0.0, 0.0, -0.040)) for _ in range(num_bones)],
+        [Vector((0.0, -0.035, 0.035)) for _ in range(num_bones)],
+        [Vector((0.0, 0.035, 0.035)) for _ in range(num_bones)],
+        [Vector((0.0, -0.030, 0.015)) for _ in range(num_bones)],
+        [Vector((0.0, 0.030, 0.015)) for _ in range(num_bones)],
+        [
+            Vector((0.015, 0.030, -0.030)) if (bi % 2 == 0) else Vector((-0.015, -0.020, 0.030))
+            for bi in range(num_bones)
+        ],
+        [
+            Vector((0.015, -0.030, -0.030)) if (bi % 2 == 0) else Vector((-0.015, 0.020, 0.030))
+            for bi in range(num_bones)
+        ],
+    ]
+
+    rest_overlaps = {}
+    for key_i in ordered_keys:
+        for key_j in outer_of[key_i]:
+            sh_i = cand_shells[key_i]
+            sh_j = cand_shells[key_j]
+            rest_overlaps[(key_i, key_j)] = set(sh_j["bvh"].overlap(sh_i["bvh"]))
+
+    for _iter in range(20):
+        any_overlap_fixed = False
+        for key_i in ordered_keys:
+            outers = outer_of[key_i]
+            if not outers:
+                continue
+            sh_i = cand_shells[key_i]
+            st_i = obj_states[sh_i["o_idx"]]
+            world_i = st_i["world"]
+            w_mat_i = st_i["w_mat"]
+            rig_i = st_i["rigid_mask"]
+            c_vis_i = sh_i["c_vis"].tolist()
+            local_tris_i = sh_i["local_tris"]
+            global_tris_i = sh_i["global_tris"]
+            proj_map_i = sh_i.get("proj_map", {})
+
+            for key_j in outers:
+                sh_j = cand_shells[key_j]
+                st_j = obj_states[sh_j["o_idx"]]
+                world_j = st_j["world"]
+                w_mat_j = st_j["w_mat"]
+                rig_j = st_j["rigid_mask"]
+                c_vis_j = sh_j["c_vis"].tolist()
+                local_tris_j = sh_j["local_tris"]
+                global_tris_j = sh_j["global_tris"]
+                rest_ov = rest_overlaps.get((key_i, key_j), set())
+
+                bad_pairs = set()
+                for disp_vecs in test_motions:
+                    verts_i_def = []
+                    for gv in c_vis_i:
+                        p = Vector(world_i[gv])
+                        for bi in range(num_bones):
+                            w_val = float(w_mat_i[bi, gv])
+                            if w_val > 1e-5:
+                                p = p + disp_vecs[bi] * w_val
+                        verts_i_def.append(p)
+
+                    verts_j_def = []
+                    for gv in c_vis_j:
+                        p = Vector(world_j[gv])
+                        for bi in range(num_bones):
+                            w_val = float(w_mat_j[bi, gv])
+                            if w_val > 1e-5:
+                                p = p + disp_vecs[bi] * w_val
+                        verts_j_def.append(p)
+
+                    bvh_i_def = BVHTree.FromPolygons(verts_i_def, local_tris_i)
+                    bvh_j_def = BVHTree.FromPolygons(verts_j_def, local_tris_j)
+                    ov = set(bvh_j_def.overlap(bvh_i_def)) - rest_ov
+                    if ov:
+                        bad_pairs.update(ov)
+
+                if not bad_pairs:
+                    continue
+
+                any_overlap_fixed = True
+                # 1. 외피(sh_j) 변경 전 각 내피 정점의 투영 기준값(prev_w_tri) 기록
+                prev_proj = {}
+                for vi, (p_sh_j, t0, t1, t2, bu, bv, bw, alpha, _) in proj_map_i.items():
+                    if p_sh_j is sh_j and not rig_i[vi]:
+                        prev_proj[vi] = [
+                            float(bu * w_mat_j[bi, t0] + bv * w_mat_j[bi, t1] + bw * w_mat_j[bi, t2])
+                            for bi in range(num_bones)
+                        ]
+
+                # 2. 교차 삼각형 쌍의 외피(c0,c1,c2) 국소 구배 완화 (동일 좌표 UV 심 쌍둥이 정점 일괄 포함)
+                cmap_j = st_j["coincident_map"]
+                cmap_i = st_i["coincident_map"]
+                c_accum = {}
+                for tj_idx, ti_idx in bad_pairs:
+                    c0, c1, c2 = global_tris_j[tj_idx]
+                    s0, s1, s2 = global_tris_i[ti_idx]
+                    tw_vec = [
+                        float(
+                            w_mat_j[bi, c0] + w_mat_j[bi, c1] + w_mat_j[bi, c2]
+                            + w_mat_i[bi, s0] + w_mat_i[bi, s1] + w_mat_i[bi, s2]
+                        ) / 6.0
+                        for bi in range(num_bones)
+                    ]
+                    for cv in (c0, c1, c2):
+                        for cv_twin in cmap_j.get(cv, [cv]):
+                            if not rig_j[cv_twin]:
+                                c_accum.setdefault(cv_twin, []).append(tw_vec)
+
+                for cv, tw_list in c_accum.items():
+                    n_h = float(len(tw_list))
+                    for bi in range(num_bones):
+                        tw = sum(v[bi] for v in tw_list) / n_h
+                        w_mat_j[bi, cv] = 0.50 * tw + 0.50 * float(w_mat_j[bi, cv])
+
+                _sync_in_memory_coincident(st_j)
+
+                # 3. 외피 변화량(Delta Projection)만큼 내피에 등각 반영 (이전 반복의 내피 보정치를 지우지 않고 보존)
+                for vi, (p_sh_j, t0, t1, t2, bu, bv, bw, alpha, _) in proj_map_i.items():
+                    if vi in prev_proj:
+                        old_vec = prev_proj[vi]
+                        for bi in range(num_bones):
+                            new_w_tri = float(bu * w_mat_j[bi, t0] + bv * w_mat_j[bi, t1] + bw * w_mat_j[bi, t2])
+                            w_mat_i[bi, vi] = max(0.0, float(w_mat_i[bi, vi]) + alpha * (new_w_tri - old_vec[bi]))
+
+                # 4. 교차 삼각형 쌍의 내피 정점(s0,s1,s2) 및 UV 심 쌍둥이 정점을 충돌 외피 삼각형 평균으로 수렴
+                s_accum = {}
+                for tj_idx, ti_idx in bad_pairs:
+                    c0, c1, c2 = global_tris_j[tj_idx]
+                    s0, s1, s2 = global_tris_i[ti_idx]
+                    c_mean_vec = [
+                        float(w_mat_j[bi, c0] + w_mat_j[bi, c1] + w_mat_j[bi, c2]) / 3.0
+                        for bi in range(num_bones)
+                    ]
+                    for sv in (s0, s1, s2):
+                        for sv_twin in cmap_i.get(sv, [sv]):
+                            if not rig_i[sv_twin]:
+                                s_accum.setdefault(sv_twin, []).append(c_mean_vec)
+
+                for sv, cm_list in s_accum.items():
+                    n_h = float(len(cm_list))
+                    for bi in range(num_bones):
+                        cm = sum(v[bi] for v in cm_list) / n_h
+                        w_mat_i[bi, sv] = 0.70 * cm + 0.30 * float(w_mat_i[bi, sv])
+                    total_adjusted += 1
+
+                _sync_in_memory_coincident(st_i)
+
+        if not any_overlap_fixed:
+            break
+
+    # 변경된 가중치를 버텍스 그룹에 일괄 반영
+    for st in obj_states:
+        obj = st["obj"]
+        w_mat = st["w_mat"]
+        w_orig = st["w_orig"]
+        rigid_mask = st["rigid_mask"]
+        n_v = len(st["world"])
+
+        for bi, vgn in enumerate(vg_names):
+            vg = obj.vertex_groups.get(vgn) or obj.vertex_groups.new(name=vgn)
+            diff_vis = np.nonzero((np.abs(w_mat[bi] - w_orig[bi]) > 1e-4) & ~rigid_mask)[0]
+            for vi in diff_vis.tolist():
+                new_w = float(w_mat[bi, vi])
                 if new_w > 0.0005:
                     vg.add([vi], max(0.0, min(1.0, new_w)), 'REPLACE')
                 else:
@@ -970,6 +1315,15 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     updated_obj_count = 0
     total_recomputed_verts = 0
 
+    slot_rigid_by_obj = {}
+    for item in getattr(props, "rigid_items", []):
+        rdata = get_rigid_data(item)
+        if rdata:
+            for oname, vis in rdata.items():
+                if vis:
+                    slot_rigid_by_obj.setdefault(oname, set()).update(vis)
+    has_slot_rigid = bool(slot_rigid_by_obj)
+
     obj_data = {}
     for obj in target_objs:
         ensure_object_visible(context, obj)
@@ -979,27 +1333,37 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         n_verts = len(world)
 
         rigid_mask = np.zeros(n_verts, dtype=bool)
-        if vg_rigid:
-            r_arr = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"}).get("rigid")
-            if r_arr is not None:
-                rigid_mask = (r_arr > 0.5)
+        if has_slot_rigid:
+            reg_r_vis = [v for v in sorted(slot_rigid_by_obj.get(obj.name, set())) if 0 <= v < n_verts]
+            if vg_rigid:
+                vg_rigid.remove(list(range(n_verts)))
+            if reg_r_vis:
+                if not vg_rigid:
+                    vg_rigid = obj.vertex_groups.new(name=VG_RIGID)
+                vg_rigid.add(reg_r_vis, 1.0, 'REPLACE')
+                rigid_mask[reg_r_vis] = True
+        else:
+            if vg_rigid:
+                r_arr = read_vertex_group_arrays(obj, {vg_rigid.index: "rigid"}).get("rigid")
+                if r_arr is not None:
+                    rigid_mask = (r_arr > 0.5)
 
-        if vg_rigid and np.any(rigid_mask):
-            e0, e1 = mesh_edge_arrays(obj.data)
-            lab_all = label_components(n_verts, e0, e1)
-            uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
-            to_add_list = []
-            for lab_id, cnt in zip(uniq_labs, lab_counts):
-                if cnt <= 2500:
-                    isl_mask = (lab_all == lab_id)
-                    n_rig = np.count_nonzero(rigid_mask & isl_mask)
-                    if n_rig >= 5 or (n_rig / cnt) >= 0.15:
-                        diff = np.nonzero(isl_mask & ~rigid_mask)[0]
-                        if len(diff) > 0:
-                            rigid_mask[isl_mask] = True
-                            to_add_list.extend(diff.tolist())
-            if to_add_list:
-                vg_rigid.add(to_add_list, 1.0, 'REPLACE')
+            if vg_rigid and np.any(rigid_mask):
+                e0, e1 = mesh_edge_arrays(obj.data)
+                lab_all = label_components(n_verts, e0, e1)
+                uniq_labs, lab_counts = np.unique(lab_all, return_counts=True)
+                to_add_list = []
+                for lab_id, cnt in zip(uniq_labs, lab_counts):
+                    if cnt <= 2500:
+                        isl_mask = (lab_all == lab_id)
+                        n_rig = np.count_nonzero(rigid_mask & isl_mask)
+                        if (n_rig / cnt) >= 0.50:
+                            diff = np.nonzero(isl_mask & ~rigid_mask)[0]
+                            if len(diff) > 0:
+                                rigid_mask[isl_mask] = True
+                                to_add_list.extend(diff.tolist())
+                if to_add_list:
+                    vg_rigid.add(to_add_list, 1.0, 'REPLACE')
 
         obj_data[obj] = {
             "world": world,
@@ -1263,14 +1627,9 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
                     )
 
     target_peak_cap = float(peak_w)
+    active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
 
-    # 5. 다층 레이어 절대 비침투 제약 (Strict Multi-Layer Non-Penetration Constraint):
-    # 본 중심에 가까운 안쪽 메쉬(속살)는 바깥쪽 메쉬(겉옷)를 넘지 못하도록 보장 (w_outer >= w_inner, w_inner <= w_outer)
-    enforce_radial_monotonic_non_penetration(
-        target_objs, bone_info, active_bones, search_radius=0.015
-    )
-
-    # 7. 강체(액세서리) 표면 밀착 가중치 동기화
+    # 5. 강체(액세서리) 표면 밀착 가중치 동기화 (단일 통합 소프트 표면 KD-Tree 기반)
     slot_exclude = {}
     for item in props.rigid_items:
         rdata = get_rigid_data(item)
@@ -1284,31 +1643,37 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         target_objs, bone_info, falloff_p, peak_w, exclude_verts_by_obj=slot_exclude
     )
 
-    # 활성 본별 주변 연질(Soft) 표면 KD-Tree 구성
-    bone_kd_map = {}
-    for bname in active_bones:
-        vg_name = f"XXMI_{bname}"
-        soft_pts = []
-        soft_weights = []
-        for obj, odata in obj_data.items():
-            world = odata["world"]
-            rigid_mask = odata["rigid_mask"]
-            vg = obj.vertex_groups.get(vg_name)
-            if not vg:
+    # 모든 활성 본의 가중치 벡터를 포함한 단일 통합 연질(Soft) 표면 KD-Tree 구축
+    # (본별 개별 KD-Tree 사용 시 좌/우 본에 걸친 단일 강체 슬롯이 양쪽 피크치를 각각 평균내어 합이 2배로 뛰는 현상 원천 차단)
+    soft_pts = []
+    soft_weight_vecs = []
+    for obj, odata in obj_data.items():
+        world = odata["world"]
+        rigid_mask = odata["rigid_mask"]
+        n_v = len(world)
+        gmap = {}
+        for bi, bname in enumerate(active_bones):
+            vg = obj.vertex_groups.get(f"XXMI_{bname}")
+            if vg:
+                gmap[vg.index] = bname
+        if not gmap:
+            continue
+        cur_arrs = read_vertex_group_arrays(obj, gmap)
+        w_cols = {bn: cur_arrs.get(bn, np.zeros(n_v, dtype=np.float32)) for bn in active_bones}
+        for vi in range(n_v):
+            if rigid_mask[vi]:
                 continue
-            cur_arrs = read_vertex_group_arrays(obj, {vg.index: "w"})
-            w_arr = cur_arrs["w"]
-            for vi in range(len(world)):
-                if not rigid_mask[vi] and w_arr[vi] > 0.001:
-                    soft_pts.append(Vector(world[vi]))
-                    soft_weights.append(float(w_arr[vi]))
+            total_w_vi = sum(float(w_cols[bn][vi]) for bn in active_bones)
+            if total_w_vi > 0.001:
+                soft_pts.append(Vector(world[vi]))
+                soft_weight_vecs.append({bn: float(w_cols[bn][vi]) for bn in active_bones})
 
-        if soft_pts:
-            kd = KDTree(len(soft_pts))
-            for k, p in enumerate(soft_pts):
-                kd.insert(p, k)
-            kd.balance()
-            bone_kd_map[bname] = (kd, soft_weights)
+    soft_kd = None
+    if soft_pts:
+        soft_kd = KDTree(len(soft_pts))
+        for k, p in enumerate(soft_pts):
+            soft_kd.insert(p, k)
+        soft_kd.balance()
 
     # 다중 강체 슬롯 가중치 계산 및 할당 (통합 표면 간접 추종 / Universal Surface Proximity Transfer)
     # 단일 본 부품(단추/배지) 및 다중 본 브릿지 부품(앞쪽 끈/리본 매듭), 다중 오브젝트 결합 부품(무전기+케이스) 모두 지원
@@ -1340,32 +1705,39 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
         #    하부 소프트 표면과의 밀착 접촉면(Mounting Base)을 기준으로 단일 통합 가중치 벡터 산출
         slot_unified_weights = {bn: 0.0 for bn in active_bones}
 
-        for bn in active_bones:
-            if bn not in bone_kd_map:
-                continue
-            kd, s_weights = bone_kd_map[bn]
-
-            dists_and_weights = []
+        if soft_kd is not None:
+            dists_and_vecs = []
             for pt in all_pts_slot:
-                res = kd.find(pt)
+                res = soft_kd.find(pt)
                 if res is not None and res[0] is not None:
-                    dists_and_weights.append((res[2], s_weights[res[1]]))
+                    dists_and_vecs.append((res[2], soft_weight_vecs[res[1]]))
 
-            if dists_and_weights:
-                min_d = min(d for d, _ in dists_and_weights)
+            if dists_and_vecs:
+                min_d = min(d for d, _ in dists_and_vecs)
                 if min_d < 0.08:
-                    # 강체 부품이 신체/의상에 맞닿아 있는 접촉면(최단 거리 근방 15mm 이내) 정점들의 가중치를 기준으로 슬롯 가중치 결정
-                    contact_pts = [(d, w) for d, w in dists_and_weights if d <= min_d + 0.015]
+                    contact_pts = [(d, wvec) for d, wvec in dists_and_vecs if d <= min_d + 0.015]
                     inv_d_sum = sum(1.0 / max(d, 0.002) for d, _ in contact_pts)
-                    base_w = sum(w * (1.0 / max(d, 0.002)) for d, w in contact_pts) / max(1e-6, inv_d_sum)
                     dist_factor = max(0.0, 1.0 - max(0.0, min_d - 0.04) / 0.04)
-                    slot_unified_weights[bn] = base_w * dist_factor * w_scale
+                    for bn in active_bones:
+                        base_w = sum(wvec[bn] * (1.0 / max(d, 0.002)) for d, wvec in contact_pts) / max(1e-6, inv_d_sum)
+                        slot_unified_weights[bn] = base_w * dist_factor * w_scale
+
+                    sum_slot_w = sum(slot_unified_weights.values())
+                    max_allowed_slot = target_peak_cap * w_scale
+                    if sum_slot_w > max_allowed_slot and sum_slot_w > 1e-6:
+                        sc = max_allowed_slot / sum_slot_w
+                        for bn in active_bones:
+                            slot_unified_weights[bn] *= sc
 
         # 3. 강체 슬롯에 속한 모든 오브젝트(예: Hair의 무전기 본체, Body의 무전기 케이스)의
         #    모든 정점에 100.000% 완벽히 동일한 단일 가중치 부여 (상대 변위 0 -> 뚫림 원천 차단)
         for robj, vis, _ in slot_objs_data:
             vg_rigid = robj.vertex_groups.get(VG_RIGID) or robj.vertex_groups.new(name=VG_RIGID)
             vg_rigid.add(vis, 1.0, 'REPLACE')
+            if robj in obj_data:
+                valid_vis = [v for v in vis if v < len(obj_data[robj]["rigid_mask"])]
+                if valid_vis:
+                    obj_data[robj]["rigid_mask"][valid_vis] = True
 
             for bn in active_bones:
                 vg_target = robj.vertex_groups.get(f"XXMI_{bn}") or robj.vertex_groups.new(name=f"XXMI_{bn}")
@@ -1377,16 +1749,76 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
 
         applied_slots += 1
 
-    # 7.5. 경계면 완만화(Boundary Taper)로 절벽 찢어짐 원천 차단
-    active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
-    smooth_boundary_gradient_taper(target_objs, active_vg_names, max_delta=0.08, passes=3)
+    # 5.5. 강체와 동일 좌표를 공유하는 연질 봉합선(Seam) 정점 선행 동기화 및 잠금
+    #      (테이퍼 단계에서 봉합선 인접 연질 폴리곤들이 부드럽게 이어지도록 유도하여 칼라/버클 경계 찢어짐 원천 방지)
+    seam_locked_by_obj = {obj: np.zeros(len(odata["world"]), dtype=bool) for obj, odata in obj_data.items()}
+    rigid_seam_pts = []
+    rigid_seam_wvecs = []
+    for obj, odata in obj_data.items():
+        world = odata["world"]
+        rigid_mask = odata["rigid_mask"]
+        if not np.any(rigid_mask):
+            continue
+        n_v = len(world)
+        gmap = {}
+        for bname in active_bones:
+            vg = obj.vertex_groups.get(f"XXMI_{bname}")
+            if vg:
+                gmap[vg.index] = bname
+        cur_arrs = read_vertex_group_arrays(obj, gmap)
+        w_cols = {bn: cur_arrs.get(bn, np.zeros(n_v, dtype=np.float32)) for bn in active_bones}
+        for vi in np.nonzero(rigid_mask)[0].tolist():
+            rigid_seam_pts.append(Vector(world[vi]))
+            rigid_seam_wvecs.append({bn: float(w_cols[bn][vi]) for bn in active_bones})
 
-    # 7.6. 가슴 중앙선 중복 가중치 재정규화 (가슴골 2배 돌출 원천 차단)
+    if rigid_seam_pts:
+        kd_rseam = KDTree(len(rigid_seam_pts))
+        for k, p in enumerate(rigid_seam_pts):
+            kd_rseam.insert(p, k)
+        kd_rseam.balance()
+
+        for obj, odata in obj_data.items():
+            world = odata["world"]
+            rigid_mask = odata["rigid_mask"]
+            seam_locked = seam_locked_by_obj[obj]
+            for vi in range(len(world)):
+                if rigid_mask[vi]:
+                    continue
+                res = kd_rseam.find(Vector(world[vi]))
+                if res is not None and res[0] is not None and res[2] <= 0.0002:
+                    seam_locked[vi] = True
+                    wvec = rigid_seam_wvecs[res[1]]
+                    for bn in active_bones:
+                        vg_t = obj.vertex_groups.get(f"XXMI_{bn}") or obj.vertex_groups.new(name=f"XXMI_{bn}")
+                        rw = float(wvec[bn])
+                        if rw > 0.0005:
+                            vg_t.add([vi], min(1.0, rw), 'REPLACE')
+                        else:
+                            vg_t.remove([vi])
+
+    # 6. 경계면 양방향 완만화(Boundary Gradient Taper)로 외곽 및 강체 봉합선 절벽 찢어짐 원천 차단
+    smooth_boundary_gradient_taper(
+        target_objs, active_vg_names, max_delta=0.07, passes=5, seam_locked_by_obj=seam_locked_by_obj
+    )
+
+    # 7. 가슴 중앙선 중복 가중치 재정규화 (가슴골 2배 돌출 원천 차단)
     normalize_overlapping_bone_weights(
         target_objs, active_bones, max_total_weight=target_peak_cap
     )
 
-    # 7.7. [절대 최종 단계]: 모든 동일 위치 공유 정점(UV 심/하드 엣지) 100% 완전 동기화
+    # 7.5. 외피(겉옷)의 UV 심/하드 엣지 분리 정점들을 먼저 동기화하여 등각 투영 시 삼각형 내부 단차 제거
+    synchronize_coincident_vertices_across_objects(
+        target_objs, vg_names=active_vg_names, tol=0.0002
+    )
+
+    # 8. 다층 쉘 무게중심 등각 동기화 (Conformal Multi-Shell Synchronization):
+    #    경계면 테이퍼까지 완료된 최종 외피(겉옷) 삼각망의 가중치 장을 내피(속살) 정점에 무게중심 투영하여
+    #    전진/후진/상하 모든 진동 위상에서 다층 메쉬 관통을 0으로 원천 봉쇄합니다.
+    enforce_radial_monotonic_non_penetration(
+        target_objs, bone_info, active_bones, search_radius=0.014
+    )
+
+    # 9. [절대 최종 단계]: 모든 동일 위치 공유 정점(UV 심/하드 엣지) 100% 완전 동기화
     num_synced = synchronize_coincident_vertices_across_objects(
         target_objs, vg_names=active_vg_names, tol=0.0002
     )

@@ -187,10 +187,6 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     }}
 
     if (sum_w > 0.0001) {{
-        if (sum_w > max_w && sum_w > 1e-5) {{
-            total_disp *= (max_w / sum_w);
-        }}
-
         float d_len = length(total_disp);
         if (d_len > MAX_DISP && d_len > 1e-5) {{
             total_disp = (total_disp / d_len) * MAX_DISP;

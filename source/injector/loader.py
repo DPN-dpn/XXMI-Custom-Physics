@@ -293,10 +293,20 @@ def _load_physics_from_mod(mod_folder, context, props):
 
             pair_caches.append({
                 "map_data": map_data,
+                "buf_positions": buf_positions,
                 "kd": kd,
                 "n": n,
                 "pos_name": os.path.basename(pp),
             })
+
+        from ..rigid.data import get_rigid_data
+        json_rigid_by_obj = {}
+        for rit in props.rigid_items:
+            rdata = get_rigid_data(rit)
+            for oname, vis in rdata.items():
+                if vis:
+                    json_rigid_by_obj.setdefault(oname, set()).update(vis)
+        has_json_rigid = bool(json_rigid_by_obj)
 
         for obj in bpy.data.objects:
             if obj.type != 'MESH':
@@ -346,10 +356,20 @@ def _load_physics_from_mod(mod_folder, context, props):
             n_floats = max(2, len(map_data) // (best_pcache["n"] * 4))
             stride_bytes = n_floats * 4
             fmt_str = f'<{n_floats}f'
+            buf_positions = best_pcache["buf_positions"]
+            n_buf_p = best_pcache["n"]
+
+            all_v_indices = list(range(len(mesh.vertices)))
+            if all_v_indices:
+                vg_rigid.remove(all_v_indices)
 
             for vi, v in enumerate(mesh.vertices):
                 p_buf = best_mat @ v.co
-                _, b_idx, dist = kd.find(p_buf)
+                if vi < n_buf_p and (p_buf - buf_positions[vi]).length_squared < 2.5e-7:
+                    b_idx = vi
+                    dist = 0.0
+                else:
+                    _, b_idx, dist = kd.find(p_buf)
                 if dist < 0.02:
                     vals = struct.unpack_from(fmt_str, map_data, b_idx * stride_bytes)
                     w0 = vals[0]
@@ -363,10 +383,17 @@ def _load_physics_from_mod(mod_folder, context, props):
                         vg_1.add([vi], w1, 'REPLACE')
                         b1_vis.append(vi)
                         non_zero_phys += 1
-                    if vrigid > 0.5:
+                    if not has_json_rigid and vrigid > 0.5:
                         vg_rigid.add([vi], 1.0, 'REPLACE')
                         rigid_vis.append(vi)
                         rigid_count += 1
+
+            if has_json_rigid and obj.name in json_rigid_by_obj:
+                valid_r_vis = [v for v in sorted(json_rigid_by_obj[obj.name]) if 0 <= v < len(mesh.vertices)]
+                if valid_r_vis:
+                    vg_rigid.add(valid_r_vis, 1.0, 'REPLACE')
+                    rigid_vis = valid_r_vis
+                    rigid_count = len(valid_r_vis)
 
             if b0 and b0_vis:
                 all_b0_verts[obj.name] = b0_vis

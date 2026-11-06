@@ -205,11 +205,6 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     }}
 
     if (sum_w > 0.0001) {{
-        // 다중 본 영향이 겹치는 부위에서 변위 과도 폭발 방지 (Convex Combination)
-        if (sum_w > max_w && sum_w > 1e-5) {{
-            total_disp *= (max_w / sum_w);
-        }}
-
         float d_len = length(total_disp);
         if (d_len > GLOBAL_MAX_DISP && d_len > 1e-5) {{
             total_disp = (total_disp / d_len) * GLOBAL_MAX_DISP;

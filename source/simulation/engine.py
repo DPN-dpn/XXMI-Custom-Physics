@@ -191,10 +191,6 @@ def preview_frame_handler(scene):
                         if eff_w > max_eff:
                             max_eff = eff_w
 
-            # 가슴 중앙/클리비지에서 양쪽 본 변위가 단순 합산되어 2배로 폭발하는 현상 원천 방지 (가중 평균 볼록 결합)
-            if sum_eff > max_eff and sum_eff > 1e-5:
-                total_disp *= (max_eff / sum_eff)
-
             d_len = total_disp.length
             if d_len > max_disp and d_len > 1e-5:
                 total_disp = (total_disp / d_len) * max_disp
