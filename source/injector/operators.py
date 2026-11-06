@@ -278,8 +278,8 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
 
                 for vi in range(n_buf):
                     pt = Vector(buf_in_world[vi])
-                    res = kd_unified.find_nearest(pt)
-                    if res is not None:
+                    res = kd_unified.find(pt)
+                    if res is not None and res[0] is not None:
                         near_p, near_idx, near_d = res
                         if near_d < 0.02:  # 2cm 이내 정점만 가중치 매칭 (찢어짐 방지)
                             if near_d < 0.0002:  # 0.2mm 이내 정확 일치
