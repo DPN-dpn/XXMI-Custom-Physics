@@ -113,7 +113,7 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
         precision=2
     )
     falloff_power: bpy.props.FloatProperty(
-        name="가중치 퍼짐 (Falloff)",
+        name="가중치 퍼짐",
         description="가중치가 퍼지는 감쇠 곡선 지수입니다 (기본값: 1.0)",
         default=1.0,
         min=0.1,
@@ -122,7 +122,7 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
         precision=2
     )
     smooth_iterations: bpy.props.IntProperty(
-        name="경계 부드러움 (스무딩)",
+        name="경계 부드러움",
         description="메쉬 표면을 따라 가중치를 부드럽게 블렌딩하는 횟수입니다 (기본값: 2)",
         default=2,
         min=0,
