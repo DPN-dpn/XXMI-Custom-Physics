@@ -405,8 +405,8 @@ class XXMI_OT_bone_item_remove(bpy.types.Operator):
 
 class XXMI_OT_bone_item_assign(bpy.types.Operator):
     bl_idname = "object.xxmi_bone_item_assign"
-    bl_label = "선택 정점 이 본에 할당"
-    bl_description = "에디트 모드에서 현재 선택된 정점들을 이 물리 본 슬롯에 할당합니다"
+    bl_label = "선택 정점 재할당"
+    bl_description = "에디트 모드에서 현재 선택된 정점들로 이 물리 본 슬롯의 정점 목록을 새로 교체(재할당)합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -417,7 +417,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
         item = props.bone_items[props.bone_item_index]
-        data = get_bone_data(item)
+        old_data = get_bone_data(item)
 
         target_objs = get_target_mesh_objects(context)
         if not target_objs:
@@ -428,7 +428,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
         if was_edit:
             ensure_all_objects_in_object_mode(context)
 
-        assigned_any = False
+        new_data = {}
         vg_target_name = f"XXMI_{item.name}"
 
         for obj in target_objs:
@@ -437,29 +437,40 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
             sel_mask = np.zeros(n_verts, dtype=bool)
             mesh.vertices.foreach_get("select", sel_mask)
             sel_indices = np.nonzero(sel_mask)[0].tolist()
-            if not sel_indices:
+            if sel_indices:
+                new_data[obj.name] = sel_indices
+
+        if not new_data:
+            if was_edit:
+                for obj in target_objs:
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+            self.report({'WARNING'}, "에디트 모드에서 슬롯에 재할당할 정점을 먼저 선택해주세요.")
+            return {'CANCELLED'}
+
+        # 기존 슬롯 정점들의 버텍스 그룹 초기화 후 새 선택 정점으로 교체
+        affected_obj_names = set(old_data.keys()) | set(new_data.keys())
+        for oname in affected_obj_names:
+            obj = bpy.data.objects.get(oname)
+            if not obj or obj.type != 'MESH':
                 continue
-
-            existing = set(data.get(obj.name, []))
-            existing.update(sel_indices)
-            data[obj.name] = sorted(list(existing))
-            assigned_any = True
-
-            vg = obj.vertex_groups.get(vg_target_name) or obj.vertex_groups.new(name=vg_target_name)
-            vg.add(sel_indices, 0.05, 'REPLACE')
+            vg = obj.vertex_groups.get(vg_target_name)
+            if vg:
+                vg.remove(list(range(len(obj.data.vertices))))
+            new_indices = new_data.get(oname, [])
+            if new_indices:
+                if not vg:
+                    vg = obj.vertex_groups.new(name=vg_target_name)
+                vg.add(new_indices, 0.05, 'REPLACE')
 
         if was_edit:
             for obj in target_objs:
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
 
-        if not assigned_any:
-            self.report({'WARNING'}, "에디트 모드에서 본에 할당할 정점을 먼저 선택해주세요.")
-            return {'CANCELLED'}
-
-        set_bone_data(item, data)
+        set_bone_data(item, new_data)
         sync_slot_bone_to_rig(context, item)
-        self.report({'INFO'}, f"본 '{item.name}'에 정점 할당 및 본 위치 갱신 완료 (총 {item.vert_count}개).")
+        self.report({'INFO'}, f"본 '{item.name}'의 정점을 현재 선택된 {item.vert_count}개 정점으로 재할당 및 본 위치 갱신 완료!")
         return {'FINISHED'}
 
 

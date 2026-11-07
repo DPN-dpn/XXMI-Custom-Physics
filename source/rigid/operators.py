@@ -101,8 +101,8 @@ class XXMI_OT_rigid_item_remove(bpy.types.Operator):
 
 class XXMI_OT_rigid_item_assign(bpy.types.Operator):
     bl_idname = "object.xxmi_rigid_item_assign"
-    bl_label = "선택 정점 이 강체에 할당"
-    bl_description = "에디트 모드에서 현재 선택된 정점들을 이 강체 슬롯에 등록합니다 (여러 메쉬 오브젝트 지원)"
+    bl_label = "선택 정점 강체 재할당"
+    bl_description = "에디트 모드에서 현재 선택된 정점들로 이 강체 슬롯의 정점 목록을 새로 교체(재할당)합니다 (여러 메쉬 오브젝트 지원)"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -113,7 +113,7 @@ class XXMI_OT_rigid_item_assign(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
         item = props.rigid_items[props.rigid_item_index]
-        data = get_rigid_data(item)
+        old_data = get_rigid_data(item)
 
         target_objs = get_target_mesh_objects(context)
         if not target_objs:
@@ -124,35 +124,56 @@ class XXMI_OT_rigid_item_assign(bpy.types.Operator):
         if was_edit:
             ensure_all_objects_in_object_mode(context)
 
-        assigned_any = False
+        new_data = {}
         for obj in target_objs:
             mesh = obj.data
             n_verts = len(mesh.vertices)
             sel_mask = np.zeros(n_verts, dtype=bool)
             mesh.vertices.foreach_get("select", sel_mask)
             sel_indices = np.nonzero(sel_mask)[0].tolist()
-            if not sel_indices:
+            if sel_indices:
+                new_data[obj.name] = sel_indices
+
+        if not new_data:
+            if was_edit:
+                for obj in target_objs:
+                    context.view_layer.objects.active = obj
+                    bpy.ops.object.mode_set(mode='EDIT')
+            self.report({'ERROR'}, "에디트 모드에서 강체 슬롯에 재할당할 정점을 먼저 선택해주세요.")
+            return {'CANCELLED'}
+
+        # 다른 강체 슬롯에 등록된 정점 파악 (보호용)
+        other_rigid_by_obj = {}
+        for idx_r, r_item in enumerate(props.rigid_items):
+            if idx_r == props.rigid_item_index:
                 continue
+            r_d = get_rigid_data(r_item)
+            for oname, vis in r_d.items():
+                if vis:
+                    other_rigid_by_obj.setdefault(oname, set()).update(vis)
 
-            existing = set(data.get(obj.name, []))
-            existing.update(sel_indices)
-            data[obj.name] = sorted(list(existing))
-            assigned_any = True
-
-            vg_rigid = obj.vertex_groups.get(VG_RIGID) or obj.vertex_groups.new(name=VG_RIGID)
-            vg_rigid.add(sel_indices, 1.0, 'REPLACE')
+        affected_obj_names = set(old_data.keys()) | set(new_data.keys())
+        for oname in affected_obj_names:
+            obj = bpy.data.objects.get(oname)
+            if not obj or obj.type != 'MESH':
+                continue
+            vg_rigid = obj.vertex_groups.get(VG_RIGID)
+            old_vis = set(old_data.get(oname, [])) - other_rigid_by_obj.get(oname, set())
+            if vg_rigid and old_vis:
+                vg_rigid.remove(list(old_vis))
+            new_vis = new_data.get(oname, [])
+            if new_vis:
+                if not vg_rigid:
+                    vg_rigid = obj.vertex_groups.new(name=VG_RIGID)
+                vg_rigid.add(new_vis, 1.0, 'REPLACE')
 
         if was_edit:
             for obj in target_objs:
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
 
-        if not assigned_any:
-            self.report({'ERROR'}, "에디트 모드에서 강체로 등록할 정점을 먼저 선택해주세요.")
-            return {'CANCELLED'}
-
-        set_rigid_data(item, data)
-        self.report({'INFO'}, f"'{item.name}' 슬롯에 정점 할당 완료! (현재 총 {item.vert_count}개 정점)")
+        set_rigid_data(item, new_data)
+        self.report({'INFO'}, f"'{item.name}' 슬롯의 정점을 현재 선택된 {item.vert_count}개 정점으로 재할당했습니다!")
         return {'FINISHED'}
 
 

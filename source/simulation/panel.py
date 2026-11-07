@@ -10,6 +10,7 @@ class XXMI_PHYS_PT_simulation(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "XXMI Physics"
     bl_order = 2
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
         layout = self.layout

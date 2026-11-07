@@ -10,6 +10,7 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'XXMI Physics'
     bl_order = 0
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
         self.layout.label(text="1. 물리 본 & 영역 설정", icon='BONE_DATA')
@@ -36,9 +37,7 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
         layout.use_property_decorate = False
 
         # 1. 새 본 생성 옵션
-        row_new = layout.row(align=True)
-        row_new.prop(props, "bone_type", text="본 종류 선택")
-        row_new.operator("object.xxmi_bone_item_add", text="새 본 슬롯 추가", icon='ADD')
+        layout.prop(props, "bone_type", text="본 종류 선택")
 
         row_split = layout.row(align=True)
         row_split.operator(
@@ -82,9 +81,8 @@ class XXMI_PHYS_PT_bone(bpy.types.Panel):
                 box_chain.prop(item, "stiffness", text="관절 뻣뻣함")
 
             row_acts = box_item.row(align=True)
-            row_acts.operator("object.xxmi_bone_item_assign", text="선택 정점 할당", icon='PLUS')
+            row_acts.operator("object.xxmi_bone_item_assign", text="선택 정점 재할당", icon='FILE_REFRESH')
             row_acts.operator("object.xxmi_bone_item_select_verts", text="확인", icon='RESTRICT_SELECT_OFF')
-            row_acts.operator("object.xxmi_bone_item_remove_verts", text="제외", icon='X')
 
             # 모핑 슬롯에서 강체 정점 자동 제외 (경계 버텍스 유지)
             row_sub = box_item.row(align=True)

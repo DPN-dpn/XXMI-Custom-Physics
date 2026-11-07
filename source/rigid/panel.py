@@ -10,6 +10,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'XXMI Physics'
     bl_order = 1
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
         self.layout.label(text="2. 강체 설정", icon='PINNED')
@@ -55,9 +56,8 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
             box_item.prop(item, "weight_scale", text="간접 영향력 배율")
 
             row_acts = box_item.row(align=True)
-            row_acts.operator("object.xxmi_rigid_item_assign", text="선택 정점 할당", icon='PLUS')
+            row_acts.operator("object.xxmi_rigid_item_assign", text="선택 정점 재할당", icon='FILE_REFRESH')
             row_acts.operator("object.xxmi_rigid_item_select_verts", text="확인", icon='RESTRICT_SELECT_OFF')
-            row_acts.operator("object.xxmi_rigid_item_remove_verts", text="제외", icon='X')
         else:
             layout.label(text="등록된 강체가 없습니다. [+]를 눌러 추가하세요.", icon='INFO')
 
