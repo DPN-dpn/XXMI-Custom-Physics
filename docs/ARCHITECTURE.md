@@ -16,7 +16,7 @@ flowchart TD
         A3 --> A4["XXMI_Physics_Rig 아마추어 생성<br/>본 위치/각도/반경 뷰포트 기즈모 배치"]
     end
 
-    subgraph P2["[2. 강체(액세서리) 설정] (source/rigid/)"]
+    subgraph P2["[2. 강체 설정] (source/rigid/)"]
         B1["단추, 브로치, 벨트 버클 등 메쉬 선택"] --> B2["[선택 정점을 강체 슬롯에 등록]"]
         B2 --> B3["XXMI_Role_Rigid 버텍스 그룹 할당<br/>연결된 메쉬 섬(Island) 자동 완결"]
     end
@@ -80,7 +80,7 @@ flowchart TD
 | 버텍스 그룹 이름 | 역할 및 성격 |
 |---|---|
 | `XXMI_<본이름>` | 각 물리 본 슬롯별 변위 가중치 (예: `XXMI_Breast.L`, `XXMI_Morph_1` 등) |
-| `XXMI_Role_Rigid` | 강체(액세서리) 마스크 (가중치 1.0: 완전 강체로 간주되어 내부 모핑 배제) |
+| `XXMI_Role_Rigid` | 강체 마스크 (가중치 1.0: 완전 강체로 간주되어 내부 모핑 배제) |
 | `XXMI_Role_Static` | 물리 계산에서 완전 제외되는 고정 베이스 정점 마스크 |
 | `XXMI_Breast_L` / `_R` | 레거시 2본 버전 호환용 폴백 그룹 |
 

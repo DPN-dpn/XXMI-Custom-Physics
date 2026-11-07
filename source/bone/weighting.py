@@ -1629,7 +1629,7 @@ def rebake_mesh_weights_from_rig(context, rig, props=None):
     target_peak_cap = float(peak_w)
     active_vg_names = [f"XXMI_{bn}" for bn in active_bones]
 
-    # 5. 강체(액세서리) 표면 밀착 가중치 동기화 (단일 통합 소프트 표면 KD-Tree 기반)
+    # 5. 강체 표면 밀착 가중치 동기화 (단일 통합 소프트 표면 KD-Tree 기반)
     slot_exclude = {}
     for item in props.rigid_items:
         rdata = get_rigid_data(item)

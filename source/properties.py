@@ -94,7 +94,7 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
 
     # ── 개별 본 가중치(웨이트) 설정 ──
     radius_scale: bpy.props.FloatProperty(
-        name="본 반경 배율 (영역/겹침 크기)",
+        name="본 반경 배율",
         description="스켈레톤 본의 반경(원통 두께) 및 인접 본과의 가중치 중첩 범위를 조절합니다. 값을 키우면 두 본 사이의 중앙 경계가 넓게 겹쳐 일체형 의상이 자연스럽게 움직입니다 (기본값: 1.15)",
         default=1.15,
         min=0.3,
@@ -257,7 +257,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
 
     # ── 2. 물리 가중치 감쇠 옵션 ──
     radius_scale: bpy.props.FloatProperty(
-        name="본 반경 배율 (영역/겹침 크기)",
+        name="본 반경 배율",
         description="새로 생성할 물리 본의 기본 반경 배율입니다 (기본값: 1.15)",
         default=1.15,
         min=0.3,
@@ -267,7 +267,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     show_envelope_gizmo: bpy.props.BoolProperty(
-        name="뷰포트 본 반경(Envelope) 기즈모 표시",
+        name="뷰포트 본 반경 기즈모 표시",
         description="3D 뷰포트에서 물리 본의 실제 원통/캡슐 반경(Envelope)을 눈으로 보면서 조절할 수 있도록 표시 방식을 전환합니다",
         default=False,
         update=on_show_envelope_update
@@ -284,7 +284,7 @@ class XXMI_PG_custom_physics_props(bpy.types.PropertyGroup):
     )
 
     smooth_iterations: bpy.props.IntProperty(
-        name="경계 부드러움 (스무딩)",
+        name="경계 부드러움",
         description="경계선이 각지거나 접히지 않도록 메쉬 표면을 따라 가중치를 부드럽게 블렌딩합니다 (0이면 스무딩 끔, 기본값: 2)",
         default=2,
         min=0,

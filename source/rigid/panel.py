@@ -3,7 +3,7 @@ from ..utils import draw_help_button
 
 
 class XXMI_PHYS_PT_rigid(bpy.types.Panel):
-    """XXMI Custom Physics - 2. 강체(액세서리) 설정 패널"""
+    """XXMI Custom Physics - 2. 강체 설정 패널"""
     bl_label = ""
     bl_idname = "XXMI_PHYS_PT_rigid"
     bl_space_type = 'VIEW_3D'
@@ -12,7 +12,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
     bl_order = 1
 
     def draw_header(self, context):
-        self.layout.label(text="2. 강체(액세서리) 설정", icon='PINNED')
+        self.layout.label(text="2. 강체 설정", icon='PINNED')
 
     def draw(self, context):
         layout = self.layout
@@ -22,7 +22,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
         draw_help_button(
             layout,
             (
-                "[2단계: 강체(액세서리) 설정 가이드]\n\n"
+                "[2단계: 강체 설정 가이드]\n\n"
                 "• 물리 파츠 위에 부착된 단추, 배지, 리본 끈, 브로치 등은 모핑 동작 시 형태를 유지(강체)해야 합니다.\n"
                 "• [+] 버튼으로 강체 슬롯을 추가하고 [선택 정점 할당]으로 부품 정점들을 등록하세요.\n"
                 "• [표면 간접 추종]: 모든 강체는 맞닿은 메쉬 표면의 움직임을 자동으로 이어받아 형태를 유지합니다.\n"
@@ -68,7 +68,7 @@ class XXMI_PHYS_PT_rigid(bpy.types.Panel):
         col_q = box_quick.column(align=True)
         col_q.operator(
             "object.xxmi_subtract_rigid_from_all_bones",
-            text="모핑 본에서 강체 정점 자동 제외 (경계 유지)",
+            text="모핑 본에서 강체 정점 자동 제외",
             icon='SELECT_SUBTRACT'
         )
         col_q.operator("object.xxmi_rebake_breast_weights", text="강체 가중치 즉시 갱신", icon='FILE_REFRESH')

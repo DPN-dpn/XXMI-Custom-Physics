@@ -43,7 +43,7 @@ XXMI-Custom-Physics/
     │   ├── __init__.py
     │   ├── operators.py        # 본 종류별 생성, 해부학적 물리 본 배치, Envelope 기반 가중치 베이크 및 동기화
     │   └── panel.py            # XXMI_PHYS_PT_bone 패널 UI
-    ├── rigid/                  # [패널 2] 2. 강체(액세서리) 설정 (bl_order = 1)
+    ├── rigid/                  # [패널 2] 2. 강체 설정 (bl_order = 1)
     │   ├── __init__.py
     │   ├── operators.py        # 다중 강체 슬롯 UIList 관리, 다중 메쉬 정점 바인딩 및 목표 본(Target Bone) 지정
     │   └── panel.py            # XXMI_PHYS_PT_rigid 패널 UI

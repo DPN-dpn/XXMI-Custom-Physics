@@ -60,7 +60,7 @@ XXMI-Custom-Physics/
     │   ├── rig.py              # XXMI_Physics_Rig 아마추어 생성 및 본 변환 추출
     │   ├── ui_list.py          # 본 슬롯 UIList
     │   └── weighting.py        # 해부학적 가중치 계산, 비침투 제약, 라플라시안 스무딩
-    ├── rigid/                  # [패널 2] 강체(액세서리) 슬롯 관리
+    ├── rigid/                  # [패널 2] 강체 슬롯 관리
     │   ├── data.py             # 강체 슬롯 정점 등록/조회
     │   ├── operators.py        # 강체 추가, 삭제, 정점 등록 오퍼레이터
     │   ├── panel.py            # XXMI_PHYS_PT_rigid 패널 UI (bl_order = 1)

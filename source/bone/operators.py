@@ -465,7 +465,7 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
 
 class XXMI_OT_bone_item_subtract_rigid_verts(bpy.types.Operator):
     bl_idname = "object.xxmi_bone_item_subtract_rigid_verts"
-    bl_label = "강체 정점 자동 제외 (경계 유지)"
+    bl_label = "강체 정점 자동 제외"
     bl_description = "현재 물리 본 슬롯에서 등록된 강체 정점들을 자동 제외합니다 (표면과 맞닿아 있는 접합부 경계 버텍스는 자연스러운 연결을 위해 유지)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -480,7 +480,7 @@ class XXMI_OT_bone_item_subtract_rigid_verts(bpy.types.Operator):
 
         rigid_verts_by_obj = get_all_rigid_verts_by_obj(props)
         if not rigid_verts_by_obj:
-            self.report({'WARNING'}, "등록된 강체 정점이 없습니다. 먼저 [2. 강체(액세서리) 설정]에서 강체를 등록해주세요.")
+            self.report({'WARNING'}, "등록된 강체 정점이 없습니다. 먼저 [2. 강체 설정]에서 강체를 등록해주세요.")
             return {'CANCELLED'}
 
         was_edit = (context.mode == 'EDIT_MESH')
@@ -508,7 +508,7 @@ class XXMI_OT_bone_item_subtract_rigid_verts(bpy.types.Operator):
 
 class XXMI_OT_subtract_rigid_from_all_bones(bpy.types.Operator):
     bl_idname = "object.xxmi_subtract_rigid_from_all_bones"
-    bl_label = "모든 물리 본에서 강체 정점 자동 제외 (경계 유지)"
+    bl_label = "모든 물리 본에서 강체 정점 자동 제외"
     bl_description = "모든 물리 본 슬롯에서 등록된 강체 정점들을 일괄 제외합니다 (표면 접합부 경계 정점 보존)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -780,7 +780,7 @@ XXMI_OT_generate_breast_rig = XXMI_OT_reposition_physics_bones
 class XXMI_OT_rebake_physics_weights(bpy.types.Operator):
     bl_idname = "object.xxmi_rebake_breast_weights"  # 하위 호환 유지
     bl_label = "본 & 강체 가중치 자동 계산 & 블렌딩"
-    bl_description = "물리 본들을 기준으로 거리 감쇄 가중치를 계산하고 강체(액세서리)를 포함하여 자연스럽게 블렌딩합니다"
+    bl_description = "물리 본들을 기준으로 거리 감쇄 가중치를 계산하고 강체를 포함하여 자연스럽게 블렌딩합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
