@@ -50,9 +50,12 @@ class XXMI_PHYS_PT_injector(bpy.types.Panel):
             bcol.prop(props, "debug_toggle_key")
 
         layout.separator()
-        layout.operator("object.xxmi_apply_custom_physics", text="모드에 물리 주입", icon='SHADERFX')
-        layout.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 물리 설정 불러오기", icon='IMPORT')
-        layout.operator("object.xxmi_rollback_custom_physics", text="물리 효과 롤백 (원본 복원)", icon='RECOVER_LAST')
+
+        col_mod_actions = layout.column(align=True)
+        col_mod_actions.enabled = bool(props.target_mod_dir and props.target_mod_dir.strip())
+        col_mod_actions.operator("object.xxmi_apply_custom_physics", text="모드에 물리 주입", icon='SHADERFX')
+        col_mod_actions.operator("object.xxmi_load_physics_from_mod", text="모드 폴더에서 물리 설정 불러오기", icon='IMPORT')
+        col_mod_actions.operator("object.xxmi_rollback_custom_physics", text="물리 효과 롤백 (원본 복원)", icon='RECOVER_LAST')
 
 
 classes = (

@@ -531,6 +531,11 @@ class XXMI_OT_rollback_custom_physics(bpy.types.Operator):
     bl_label = "물리 효과 롤백 (원본 복원)"
     bl_description = "주입된 물리 효과를 완전히 제거하고 모드를 원본 상태로 복원합니다"
 
+    @classmethod
+    def poll(cls, context):
+        props = getattr(context.scene, "xxmi_custom_physics_props", None)
+        return bool(props and getattr(props, "target_mod_dir", "").strip())
+
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
         target_mod_input = props.target_mod_dir.strip()
@@ -601,6 +606,11 @@ class XXMI_OT_load_physics_from_mod(bpy.types.Operator):
     bl_label = "모드 폴더에서 물리 설정 불러오기"
     bl_description = "지정된 모드 폴더의 설정 파일에서 물리 가중치와 파라미터를 복원합니다"
     bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = getattr(context.scene, "xxmi_custom_physics_props", None)
+        return bool(props and getattr(props, "target_mod_dir", "").strip())
 
     def execute(self, context):
         props = context.scene.xxmi_custom_physics_props
