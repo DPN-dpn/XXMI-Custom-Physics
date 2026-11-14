@@ -2,7 +2,8 @@ import bpy
 
 
 BONE_TYPE_ICONS = {
-    'MORPH': 'SHAPEKEY_DATA',
+    'MORPH': 'HEART',
+    'HIP_MORPH': 'FORCE_HARMONIC',
     'TAIL': 'BONE_DATA',
     'HAIR': 'STRANDS',
     'SKIRT': 'MESH_GRID',
@@ -10,7 +11,8 @@ BONE_TYPE_ICONS = {
 }
 
 BONE_TYPE_LABELS = {
-    'MORPH': '모핑',
+    'MORPH': '바스트',
+    'HIP_MORPH': '힙',
     'TAIL': '꼬리',
     'HAIR': '헤어',
     'SKIRT': '스커트',

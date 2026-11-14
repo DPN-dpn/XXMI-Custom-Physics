@@ -127,6 +127,31 @@ def get_bone_item(props, bname):
     return None
 
 
+def apply_bone_type_defaults(target, bone_type='MORPH'):
+    """지정된 본 종류('MORPH' 바스트 모핑 vs 'HIP_MORPH' 힙 모핑)에 최적화된 가중치 및 물리 초기값을 적용합니다."""
+    if bone_type == 'HIP_MORPH':
+        # 힙 모핑: 바스트보다 절제된 진폭과 높은 감쇠, 넓은 일체형 볼륨 분포로 과도한 출렁임 및 인장/압축 왜곡 방지
+        target.peak_weight = 0.32
+        target.falloff_power = 0.70
+        target.smooth_iterations = 4
+        target.lock_registered_verts = True
+        target.strength = 0.65
+        target.speed = 1.35
+        target.damping = 1.05
+        target.inertia = 0.90
+        target.idle_motion = 0.05
+    else:
+        target.peak_weight = 0.40
+        target.falloff_power = 1.00
+        target.smooth_iterations = 2
+        target.lock_registered_verts = True
+        target.strength = 1.00
+        target.speed = 1.10
+        target.damping = 0.85
+        target.inertia = 1.20
+        target.idle_motion = 0.40
+
+
 def get_bone_params(props, bname):
     """
     지정된 본의 개별 가중치 및 물리 파라미터를 dict로 반환합니다.
@@ -136,6 +161,7 @@ def get_bone_params(props, bname):
     if item:
         return {
             "name": getattr(item, "name", bname),
+            "bone_type": str(getattr(item, "bone_type", "MORPH")),
             "radius_scale": float(getattr(item, "radius_scale", getattr(props, "radius_scale", 1.15))),
             "peak_weight": float(getattr(item, "peak_weight", getattr(props, "peak_weight", 0.40))),
             "falloff_power": float(getattr(item, "falloff_power", getattr(props, "falloff_power", 1.0))),
@@ -150,6 +176,7 @@ def get_bone_params(props, bname):
 
     return {
         "name": bname,
+        "bone_type": str(getattr(props, "bone_type", "MORPH")),
         "radius_scale": float(getattr(props, "radius_scale", 1.15)),
         "peak_weight": float(getattr(props, "peak_weight", 0.40)),
         "falloff_power": float(getattr(props, "falloff_power", 1.0)),

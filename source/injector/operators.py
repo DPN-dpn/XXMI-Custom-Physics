@@ -78,14 +78,20 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
         bone_info = get_rig_bone_info(rig) if rig else {}
 
         bone_heads_world = []
+        bone_tails_world = []
         for bi in range(num_bones):
             bn = active_bones[bi] if bi < len(active_bones) else None
-            h = bone_info.get(bn, {}).get("head") if bn else None
+            info_b = bone_info.get(bn, {}) if bn else {}
+            h = info_b.get("head")
+            t = info_b.get("tail")
             if h is None and bi == 0 and "L" in bone_info:
                 h = bone_info["L"].get("head")
+                t = bone_info["L"].get("tail")
             elif h is None and bi == 1 and "R" in bone_info:
                 h = bone_info["R"].get("head")
+                t = bone_info["R"].get("tail")
             bone_heads_world.append(Vector(h) if h is not None else None)
+            bone_tails_world.append(Vector(t) if t is not None else None)
 
         all_bone_vgs = {f"XXMI_{bn}" for bn in active_bones}
         target_vgs = all_bone_vgs | {"XXMI_Breast_L", "XXMI_Breast_R", "XXMI_Role_Rigid"}
@@ -287,9 +293,9 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                 obj_mw = best_cache["obj"].matrix_world
                 buf_to_world_mat = obj_mw @ best_mat.inverted()
                 world_to_buf_mat = best_mat @ obj_mw.inverted()
-                buf_in_world = np.empty_like(buf_np)
-                for vi in range(n_buf):
-                    buf_in_world[vi] = (buf_to_world_mat @ Vector(buf_np[vi]))[:]
+                bw_mat_np = np.array(buf_to_world_mat, dtype=np.float64)
+                buf_h = np.column_stack([buf_np, np.ones(n_buf, dtype=np.float64)])
+                buf_in_world = (buf_h @ bw_mat_np.T)[:, :3]
 
                 w_out_list = [np.zeros(n_buf, dtype=np.float32) for _ in range(num_bones)]
                 rig_out = np.zeros(n_buf, dtype=np.float32)
@@ -460,39 +466,76 @@ class XXMI_OT_apply_custom_physics(bpy.types.Operator):
                     with open(map_buf_path, 'wb') as f:
                         f.write(map_bytes)
 
-                    # 슬롯별(본 0 ~ 본 N-1) 독립 신체 앵커 정점 탐색
-                    non_phys_mask = (sum(w_out_list) < 0.01)
+                    # 슬롯별(본 0 ~ 본 N-1) 독립 신체 앵커 정점 탐색 (가중치 0.0인 순수 비물리 정점만 허용하여 자기 피드백 차단)
+                    non_phys_mask = (sum(w_out_list) < 0.0001) & (rig_out < 0.5)
+                    if not np.any(non_phys_mask):
+                        non_phys_mask = (sum(w_out_list) < 0.01)
+
+                    char_z_min = min(float(unified_world_pts[:, 2].min()), float(buf_in_world[:, 2].min()))
+                    char_z_max = max(float(unified_world_pts[:, 2].max()), float(buf_in_world[:, 2].max()))
+                    char_height = max(0.20, char_z_max - char_z_min)
+
                     root_indices = []
 
                     for bi in range(num_bones):
                         root_idx = 0
+                        aux_idx = 0
                         wb = w_out_list[bi]
                         b_head_w = bone_heads_world[bi] if bi < len(bone_heads_world) else None
+                        b_tail_w = bone_tails_world[bi] if bi < len(bone_tails_world) else None
 
                         if b_head_w is not None:
-                            c = np.array((world_to_buf_mat @ b_head_w)[:], dtype=np.float64)
+                            c_w = np.array([b_head_w.x, b_head_w.y, b_head_w.z], dtype=np.float64)
                         elif (wb > 0.05).any():
-                            c = buf_np[wb > 0.05].mean(axis=0)
+                            c_w = buf_in_world[wb > 0.05].mean(axis=0)
                         elif wb.max() > 1e-4:
-                            c = buf_np[wb.argmax()]
+                            c_w = buf_in_world[wb.argmax()]
                         else:
-                            c = buf_np.mean(axis=0)
+                            c_w = buf_in_world.mean(axis=0)
 
-                        dists = np.linalg.norm(buf_np - c, axis=1)
-                        dists[~non_phys_mask] = np.inf
-                        if np.isfinite(dists).any():
-                            root_idx = int(dists.argmin())
-                        root_indices.append(root_idx)
+                        btype_str = getattr(props.bone_items[bi], "bone_type", "MORPH") if bi < len(props.bone_items) else "MORPH"
+                        is_back_bone = (b_head_w is not None and b_tail_w is not None and (b_tail_w.y - b_head_w.y) > 0.005)
+                        z_rel = (float(c_w[2]) - char_z_min) / char_height
+                        is_pelvis_hip_bone = (btype_str == 'HIP_MORPH') or (is_back_bone and z_rel < 0.75) or (0.35 <= z_rel <= 0.66)
+                        btype_id = 1 if is_pelvis_hip_bone else 0
+                        sign_x = 1.0 if float(c_w[0]) >= 0.0 else -1.0
+
+                        if is_pelvis_hip_bone:
+                            # 골반(Pelvis) 중심은 LiveMesh(vb0) 로컬 좌표계의 원점이므로 이동량이 0에 수렴함.
+                            # 따라서 동일 측면 상단 허벅지(root_idx, 보행/점프/대시 연동)와 상체 옆구리(aux_idx, 대기/회전 연동) 듀얼 앵커를 추적함.
+                            lat_x = sign_x * max(0.10, abs(float(c_w[0]))) if abs(float(c_w[0])) > 0.01 else 0.0
+                            target_root_w = np.array([lat_x, float(c_w[1]) * 0.4, float(c_w[2]) - 0.15], dtype=np.float64)
+                            target_aux_w = np.array([lat_x, float(c_w[1]) * 0.4, float(c_w[2]) + 0.28], dtype=np.float64)
+                        else:
+                            # 상체/가슴 등 일반 모핑 본: 요(Yaw)/롤(Roll) 회전 모멘트 확보를 위해 외측 흉곽 정점 추적
+                            lat_x = sign_x * max(0.08, abs(float(c_w[0]))) if abs(float(c_w[0])) > 0.015 else float(c_w[0])
+                            target_root_w = np.array([lat_x, float(c_w[1]), float(c_w[2])], dtype=np.float64)
+                            target_aux_w = np.array([lat_x, float(c_w[1]), float(c_w[2]) - 0.08], dtype=np.float64)
+
+                        dists_root = np.linalg.norm(buf_in_world - target_root_w, axis=1)
+                        dists_root[~non_phys_mask] = np.inf
+                        if np.isfinite(dists_root).any():
+                            root_idx = int(dists_root.argmin())
+
+                        dists_aux = np.linalg.norm(buf_in_world - target_aux_w, axis=1)
+                        dists_aux[~non_phys_mask] = np.inf
+                        if np.isfinite(dists_aux).any():
+                            aux_idx = int(dists_aux.argmin())
+                        else:
+                            aux_idx = root_idx
+
+                        root_indices.append((root_idx, aux_idx, btype_id))
 
                     # 런타임 물리 상태 버퍼 초기화 (.buf, num_bones * 3 * 16 바이트)
                     _export_physics_state_buf(custom_physics_dir, idx, num_bones)
 
                     # 게임별 분기 쉐이더 내보내기 (ZZZ vs HSR)
+                    bone_types_list = [r[2] for r in root_indices]
                     if effective_game == 'HSR':
                         export_vertex_physics_hlsl_hsr(custom_physics_dir, idx, n_buf, props, global_peak_weight, root_indices)
                     else:
                         export_physics_motion_hlsl_zzz(custom_physics_dir, idx, root_indices, props)
-                        export_vertex_physics_hlsl_zzz(custom_physics_dir, idx, n_buf, props, global_peak_weight)
+                        export_vertex_physics_hlsl_zzz(custom_physics_dir, idx, n_buf, props, global_peak_weight, bone_types=bone_types_list)
 
                     total_injected_buffers += 1
 

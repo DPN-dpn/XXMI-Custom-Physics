@@ -2,12 +2,13 @@ import bpy
 
 
 BONE_TYPE_ITEMS = [
-    ('MORPH', "모핑 본 (단일 앵커)", "단일 앵커 중심으로 부드럽게 변형되는 모핑 물리 본 (가슴, 복부 등)", 'SHAPEKEY_DATA', 0),
+    ('MORPH', "바스트 모핑 본 (가슴)", "흉부/가슴 부위에 최적화된 전후·상하 탄성 및 호흡 모핑 물리 본", 'HEART', 0),
+    ('HIP_MORPH', "힙 모핑 본 (엉덩이)", "둔부/엉덩이 부위에 최적화된 상하 리프트·둔부 회전호 및 보행 관성 모핑 물리 본", 'FORCE_HARMONIC', 1),
     # 추후 다관절 체인 / 방사형 물리 본 지원 시 활성화 예정:
-    # ('TAIL', "꼬리 본 (다관절 체인)", "순차적으로 연결된 다관절 FK 체인 물리 본 (꼬리 등)", 'BONE_DATA', 1),
-    # ('HAIR', "헤어 본 (다관절 체인)", "중력과 관성을 따르는 헤어/포니테일 체인 물리 본", 'STRANDS', 2),
-    # ('SKIRT', "스커트 본 (방사형 체인)", "원형/방사형으로 배치되는 의상/스커트 물리 본", 'MESH_GRID', 3),
-    # ('WING', "날개 본 (관절 플랩)", "좌우 관절 회전 및 펄럭임 날개 물리 본", 'OUTLINER_OB_ARMATURE', 4),
+    # ('TAIL', "꼬리 본 (다관절 체인)", "순차적으로 연결된 다관절 FK 체인 물리 본 (꼬리 등)", 'BONE_DATA', 2),
+    # ('HAIR', "헤어 본 (다관절 체인)", "중력과 관성을 따르는 헤어/포니테일 체인 물리 본", 'STRANDS', 3),
+    # ('SKIRT', "스커트 본 (방사형 체인)", "원형/방사형으로 배치되는 의상/스커트 물리 본", 'MESH_GRID', 4),
+    # ('WING', "날개 본 (관절 플랩)", "좌우 관절 회전 및 펄럭임 날개 물리 본", 'OUTLINER_OB_ARMATURE', 5),
 ]
 
 
@@ -15,6 +16,17 @@ def on_bone_item_name_update(self, context):
     try:
         from .bone.data import handle_bone_item_rename
         handle_bone_item_rename(self, context)
+    except Exception:
+        pass
+
+
+def on_bone_item_type_update(self, context):
+    try:
+        from .bone.data import apply_bone_type_defaults
+        from .bone.rig import sync_slot_bone_to_rig
+        apply_bone_type_defaults(self, self.bone_type)
+        if context is not None:
+            sync_slot_bone_to_rig(context, self, is_initial_create=False)
     except Exception:
         pass
 
@@ -52,7 +64,8 @@ class XXMI_PG_bone_item(bpy.types.PropertyGroup):
     bone_type: bpy.props.EnumProperty(
         name="본 종류",
         items=BONE_TYPE_ITEMS,
-        default='MORPH'
+        default='MORPH',
+        update=on_bone_item_type_update
     )
     # JSON 인코딩 문자열: {"오브젝트이름": [정점인덱스, ...], ...}
     data_json: bpy.props.StringProperty(

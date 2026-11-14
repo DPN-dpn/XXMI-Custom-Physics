@@ -20,6 +20,7 @@ from .rig import (
 from .data import (
     get_bone_data,
     set_bone_data,
+    apply_bone_type_defaults,
     get_all_rigid_verts_by_obj,
     subtract_rigid_from_bone_slot_data,
 )
@@ -49,7 +50,8 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         item.bone_type = selected_type
 
         type_names = {
-            'MORPH': "모핑 본",
+            'MORPH': "바스트 본",
+            'HIP_MORPH': "힙 본",
             'TAIL': "꼬리 본",
             'HAIR': "헤어 본",
             'SKIRT': "스커트 본",
@@ -60,15 +62,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
         item.prev_name = item.name
 
         item.radius_scale = getattr(props, "radius_scale", 1.15)
-        item.peak_weight = getattr(props, "peak_weight", 0.40)
-        item.falloff_power = getattr(props, "falloff_power", 1.0)
-        item.smooth_iterations = getattr(props, "smooth_iterations", 2)
-        item.lock_registered_verts = getattr(props, "lock_registered_verts", True)
-        item.strength = getattr(props, "strength", 1.0)
-        item.speed = getattr(props, "speed", 1.1)
-        item.damping = getattr(props, "damping", 0.85)
-        item.inertia = getattr(props, "inertia", 1.2)
-        item.idle_motion = getattr(props, "idle_motion", 0.4)
+        apply_bone_type_defaults(item, selected_type)
 
         props.bone_item_index = n_items - 1
 
@@ -101,7 +95,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
 
         if data:
             set_bone_data(item, data)
-            sync_slot_bone_to_rig(context, item)
+            sync_slot_bone_to_rig(context, item, is_initial_create=True)
             self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}' 생성 및 정점 {item.vert_count}개 할당 / 본 생성 완료!")
         else:
             self.report({'INFO'}, f"새 물리 본 슬롯 '{item.name}'이 추가되었습니다.")
@@ -112,7 +106,7 @@ class XXMI_OT_bone_item_add(bpy.types.Operator):
 class XXMI_OT_bone_item_add_split_lr(bpy.types.Operator):
     bl_idname = "object.xxmi_bone_item_add_split_lr"
     bl_label = "선택 영역 절반 분할하여 본 2개 추가"
-    bl_description = "가슴 전체 등 좌/우가 합쳐진 선택 영역을 중앙(X축) 기준으로 절반으로 나누어 독립된 물리 본 슬롯 2개를 한 번에 생성하고 배치합니다"
+    bl_description = "가슴, 엉덩이 등 좌/우가 합쳐진 선택 영역을 중앙(X축) 기준으로 절반으로 나누어 독립된 물리 본 슬롯 2개를 한 번에 생성하고 배치합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -181,7 +175,8 @@ class XXMI_OT_bone_item_add_split_lr(bpy.types.Operator):
 
         selected_type = getattr(props, "bone_type", 'MORPH')
         type_names = {
-            'MORPH': "모핑 본",
+            'MORPH': "바스트 본",
+            'HIP_MORPH': "힙 본",
             'TAIL': "꼬리 본",
             'HAIR': "헤어 본",
             'SKIRT': "스커트 본",
@@ -196,15 +191,7 @@ class XXMI_OT_bone_item_add_split_lr(bpy.types.Operator):
             item.name = f"{type_prefix} {idx_num}"
             item.prev_name = item.name
             item.radius_scale = getattr(props, "radius_scale", 1.15)
-            item.peak_weight = getattr(props, "peak_weight", 0.40)
-            item.falloff_power = getattr(props, "falloff_power", 1.0)
-            item.smooth_iterations = getattr(props, "smooth_iterations", 2)
-            item.lock_registered_verts = getattr(props, "lock_registered_verts", True)
-            item.strength = getattr(props, "strength", 1.0)
-            item.speed = getattr(props, "speed", 1.1)
-            item.damping = getattr(props, "damping", 0.85)
-            item.inertia = getattr(props, "inertia", 1.2)
-            item.idle_motion = getattr(props, "idle_motion", 0.4)
+            apply_bone_type_defaults(item, selected_type)
 
             vg_target_name = f"XXMI_{item.name}"
             for oname, vis in slot_data.items():
@@ -214,7 +201,7 @@ class XXMI_OT_bone_item_add_split_lr(bpy.types.Operator):
                     vg.add(vis, 0.05, 'REPLACE')
 
             set_bone_data(item, slot_data)
-            sync_slot_bone_to_rig(context, item)
+            sync_slot_bone_to_rig(context, item, is_initial_create=True)
             return item
 
         item_l = _create_independent_slot(data_l)
@@ -468,8 +455,9 @@ class XXMI_OT_bone_item_assign(bpy.types.Operator):
                 context.view_layer.objects.active = obj
                 bpy.ops.object.mode_set(mode='EDIT')
 
+        was_empty_slot = not bool(old_data)
         set_bone_data(item, new_data)
-        sync_slot_bone_to_rig(context, item)
+        sync_slot_bone_to_rig(context, item, is_initial_create=was_empty_slot)
         self.report({'INFO'}, f"본 '{item.name}'의 정점을 현재 선택된 {item.vert_count}개 정점으로 재할당 및 본 위치 갱신 완료!")
         return {'FINISHED'}
 

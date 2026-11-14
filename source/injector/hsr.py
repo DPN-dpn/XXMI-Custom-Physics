@@ -40,18 +40,28 @@ def export_vertex_physics_hlsl_hsr(export_dir, idx, vertex_count, props, peak_we
         norm = (1.0 / peak_w) if peak_w > 0.05 else 1.0
         scale = norm * strength
 
+        btype_str = params.get("bone_type", "MORPH")
+        btype_id = 1 if btype_str == 'HIP_MORPH' else 0
         omega = 12.0 * speed
         stiff_k = omega * omega
         damp_c = 2.0 * omega * (damping * 0.55)
-        root_v = int(root_indices[b_idx]) if root_indices[b_idx] is not None else 0
+        rt_entry = root_indices[b_idx] if root_indices[b_idx] is not None else 0
+        if isinstance(rt_entry, (tuple, list)) and len(rt_entry) >= 2:
+            root_v = max(0, int(rt_entry[0]))
+            aux_v = max(0, int(rt_entry[1]))
+            if len(rt_entry) >= 3 and rt_entry[2] is not None:
+                btype_id = int(rt_entry[2])
+        else:
+            root_v = max(0, int(rt_entry)) if rt_entry else 0
+            aux_v = root_v
 
         max_strength = max(max_strength, strength)
-        bone_configs.append((stiff_k, damp_c, inertia, idle, speed, scale, root_v))
+        bone_configs.append((stiff_k, damp_c, inertia, idle, speed, scale, root_v, aux_v, btype_id))
 
     bones_array_code = ""
-    for i, (k, c, inr, idl, spd, sc, rv) in enumerate(bone_configs):
+    for i, (k, c, inr, idl, spd, sc, rv, av, bt) in enumerate(bone_configs):
         comma = "," if i < len(bone_configs) - 1 else ""
-        bones_array_code += f"        {{ {k:.4f}, {c:.4f}, {inr:.4f}, {idl:.4f}, {spd:.4f}, {sc:.4f}, {rv} }}{comma}\n"
+        bones_array_code += f"        {{ {k:.4f}, {c:.4f}, {inr:.4f}, {idl:.4f}, {spd:.4f}, {sc:.4f}, {rv}, {av}, {bt} }}{comma}\n"
 
     max_disp = 0.035 * max_strength
 
@@ -77,6 +87,8 @@ struct BoneConfig {{
     float speed;
     float scale;
     uint root_idx;
+    uint aux_idx;
+    uint bone_type;
 }};
 
 Texture1D<float4> IniParams : register(t120);
@@ -89,9 +101,73 @@ RWStructuredBuffer<float4> PhysState : register(u6);
 static const uint VERTEX_COUNT = {vertex_count};
 static const uint NUM_BONES = {num_bones};
 static const float MAX_DISP = {max_disp:.4f};
+static const uint TYPE_BUST = 0;
+static const uint TYPE_HIP  = 1;
 
 static const BoneConfig BONES[NUM_BONES] = {{
 {bones_array_code}}};
+
+void SimulateBust(BoneConfig cfg, float3 raw_vel, float time, float sub_dt, uint b, inout float3 prev_disp, inout float3 spring_vel) {{
+    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
+    float3 ext_force = -anim_vel * (14.0 * cfg.inertia_scale);
+
+    if (cfg.idle_scale > 0.001) {{
+        float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
+        ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
+    }}
+
+    [unroll]
+    for (int step = 0; step < 4; step++) {{
+        float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
+        spring_vel = clamp(spring_vel + accel * sub_dt, -3.0, 3.0);
+        prev_disp  = clamp(prev_disp + spring_vel * sub_dt, -0.040, 0.040);
+    }}
+}}
+
+void SimulateHip(BoneConfig cfg, float3 raw_vel, float time, float sub_dt, uint b, inout float3 prev_disp, inout float3 spring_vel) {{
+    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.60);
+    float side_sign = (b % 2 == 0) ? 1.0 : -1.0;
+
+    float3 hip_drive = float3(
+        -anim_vel.x * 0.75 + side_sign * anim_vel.y * 0.20,
+        -anim_vel.y * 0.08,
+        -anim_vel.z * 0.85 + anim_vel.y * 0.55
+    );
+    float3 ext_force = hip_drive * (9.0 * cfg.inertia_scale);
+
+    if (cfg.idle_scale > 0.001) {{
+        float sway_t = time * (2.0 * cfg.speed) + float(b) * 1.570796;
+        ext_force += float3(sin(sway_t) * 0.35, 0.0, cos(sway_t) * 0.60) * cfg.idle_scale;
+    }}
+
+    float3 stiff_vec = float3(cfg.stiff_k * 1.35, cfg.stiff_k * 2.4, cfg.stiff_k * 1.35);
+    float3 damp_vec  = float3(cfg.damp_c * 1.25,  cfg.damp_c * 1.8,  cfg.damp_c * 1.25);
+
+    [unroll]
+    for (int step = 0; step < 4; step++) {{
+        float nonlin = 1.0 + dot(prev_disp, prev_disp) * 2200.0;
+        float3 accel = ext_force - (stiff_vec * nonlin) * prev_disp - damp_vec * spring_vel;
+        spring_vel = clamp(spring_vel + accel * sub_dt, float3(-1.5, -0.6, -1.8), float3(1.5, 0.6, 1.8));
+        prev_disp  = clamp(prev_disp + spring_vel * sub_dt, float3(-0.012, -0.002, -0.016), float3(0.012, 0.005, 0.016));
+    }}
+}}
+
+float3 ApplyBoneDisplacement(uint b, float3 raw_disp) {{
+    if (BONES[b].bone_type == TYPE_HIP) {{
+        float raw_len = length(raw_disp);
+        if (raw_len > 1e-5) {{
+            float max_hip_disp = 0.015;
+            float sat_len = max_hip_disp * (raw_len / (raw_len + max_hip_disp * 0.85));
+            raw_disp *= (sat_len / raw_len);
+        }}
+        return float3(
+            raw_disp.x,
+            max(0.0, raw_disp.y * 0.25) + abs(raw_disp.z) * 0.16 - raw_disp.z * 0.08,
+            raw_disp.z
+        );
+    }}
+    return raw_disp;
+}}
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -115,7 +191,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
             float  init_flag  = s2.w;
 
             BoneConfig cfg = BONES[b];
-            float3 curr_root = LiveMesh[cfg.root_idx].position;
+            float3 curr_root = 0.55 * LiveMesh[cfg.root_idx].position + 0.45 * LiveMesh[cfg.aux_idx].position;
             float root_len = length(curr_root);
             if (!(root_len > 1e-4 && root_len < 1000.0)) {{
                 curr_root = prev_root;
@@ -139,21 +215,12 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
                     }}
 
                     float3 raw_vel = delta / dt;
-                    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.35);
-                    float3 ext_force = -anim_vel * (14.0 * cfg.inertia_scale);
-
-                    if (cfg.idle_scale > 0.001) {{
-                        float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
-                        ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
-                    }}
-
-                    // 4-Substep Symplectic Euler
                     float sub_dt = dt * 0.25;
-                    [unroll]
-                    for (int step = 0; step < 4; step++) {{
-                        float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
-                        spring_vel = clamp(spring_vel + accel * sub_dt, -3.0, 3.0);
-                        prev_disp  = clamp(prev_disp + spring_vel * sub_dt, -0.040, 0.040);
+
+                    if (cfg.bone_type == TYPE_HIP) {{
+                        SimulateHip(cfg, raw_vel, time, sub_dt, b, prev_disp, spring_vel);
+                    }} else {{
+                        SimulateBust(cfg, raw_vel, time, sub_dt, b, prev_disp, spring_vel);
                     }}
 
                     prev_root = curr_root;
@@ -179,7 +246,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     for (uint b = 0; b < NUM_BONES; b++) {{
         float w = wdata.weights[b];
         if (w > 0.0001) {{
-            float3 disp_b = PhysState[b * 3 + 0].xyz * (w * BONES[b].scale);
+            float3 disp_b = ApplyBoneDisplacement(b, PhysState[b * 3 + 0].xyz) * (w * BONES[b].scale);
             total_disp += disp_b;
             sum_w += w;
             max_w = max(max_w, w);

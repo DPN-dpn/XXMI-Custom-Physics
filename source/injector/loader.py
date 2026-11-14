@@ -49,8 +49,17 @@ def _load_physics_from_mod(mod_folder, context, props):
                 from ..bone.data import set_bone_data
                 for bd in bone_items_data:
                     it = props.bone_items.add()
-                    it.name = str(bd.get("name", "모핑 본"))
-                    it.bone_type = str(bd.get("bone_type", "MORPH"))
+                    bname_val = str(bd.get("name", "바스트 본"))
+                    it.name = bname_val
+                    it.prev_name = bname_val
+                    raw_btype = str(bd.get("bone_type", "MORPH"))
+                    if raw_btype == "MORPH" and bname_val in bones_data:
+                        b_meta = bones_data[bname_val]
+                        bh = b_meta.get("head")
+                        bt = b_meta.get("tail")
+                        if bh and bt and len(bh) >= 2 and len(bt) >= 2 and (float(bt[1]) - float(bh[1])) > 0.005:
+                            raw_btype = "HIP_MORPH"
+                    it.bone_type = raw_btype
                     it.chain_segments = int(bd.get("chain_segments", 4))
                     it.gravity_factor = float(bd.get("gravity_factor", 1.0))
                     it.stiffness = float(bd.get("stiffness", 0.5))

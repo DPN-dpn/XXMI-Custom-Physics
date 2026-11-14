@@ -20,6 +20,8 @@ def export_physics_motion_hlsl_zzz(export_dir, idx, root_vert_indices, props):
     bone_configs = []
     for b_i, bn in enumerate(active_bones):
         params = get_bone_params(props, bn)
+        btype_str = params.get("bone_type", "MORPH")
+        btype_id = 1 if btype_str == 'HIP_MORPH' else 0
         sp = max(0.2, float(params["speed"]))
         damp = max(0.1, float(params["damping"]))
         ine = max(0.0, float(params["inertia"]))
@@ -27,18 +29,26 @@ def export_physics_motion_hlsl_zzz(export_dir, idx, root_vert_indices, props):
         omg = 12.0 * sp
         stiff_k = omg * omg
         damp_c = 2.0 * omg * (damp * 0.55)
-        rt = root_vert_indices[b_i] if (root_vert_indices and b_i < len(root_vert_indices) and root_vert_indices[b_i] is not None and root_vert_indices[b_i] > 0) else 0
-        bone_configs.append((rt, stiff_k, damp_c, ine, idl, sp))
+        rt_entry = root_vert_indices[b_i] if (root_vert_indices and b_i < len(root_vert_indices) and root_vert_indices[b_i] is not None) else 0
+        if isinstance(rt_entry, (tuple, list)) and len(rt_entry) >= 2:
+            rt = max(0, int(rt_entry[0]))
+            aux = max(0, int(rt_entry[1]))
+            if len(rt_entry) >= 3 and rt_entry[2] is not None:
+                btype_id = int(rt_entry[2])
+        else:
+            rt = max(0, int(rt_entry)) if rt_entry else 0
+            aux = rt
+        bone_configs.append((rt, aux, btype_id, stiff_k, damp_c, ine, idl, sp))
 
     bone_config_entries = []
-    for rt, sk, dc, ine, idl, sp in bone_configs:
+    for rt, aux, btype_id, sk, dc, ine, idl, sp in bone_configs:
         bone_config_entries.append(
-            f"    {{ {rt}, {sk:.4f}, {dc:.4f}, {ine:.4f}, {idl:.4f}, {sp:.4f} }}"
+            f"    {{ {rt}, {aux}, {btype_id}, {sk:.4f}, {dc:.4f}, {ine:.4f}, {idl:.4f}, {sp:.4f} }}"
         )
     bone_configs_str = ",\n".join(bone_config_entries)
 
     hlsl_code = f"""// ============================================================================
-// XXMI Custom Physics - Torso Inertia Tracker (Feedback-Free ODE Physics, N-Bones)
+// XXMI Custom Physics - Torso & Hip Inertia Tracker (Modular ODE Physics, N-Bones)
 // ============================================================================
 struct Vertex {{
     float3 position;
@@ -52,9 +62,13 @@ Texture1D<float4> IniParams : register(t120);
 RWStructuredBuffer<float4> PhysState : register(u6);
 
 static const uint NUM_BONES = {num_bones};
+static const uint TYPE_BUST = 0;
+static const uint TYPE_HIP  = 1;
 
 struct BoneConfig {{
     uint root_idx;
+    uint aux_idx;
+    uint bone_type;
     float stiff_k;
     float damp_c;
     float inertia_scale;
@@ -65,6 +79,53 @@ struct BoneConfig {{
 static const BoneConfig BONES[NUM_BONES] = {{
 {bone_configs_str}
 }};
+
+// 1. 바스트 모핑 본(가슴) 전용 물리 적분: 전후·상하 탄성 및 흉부 호흡
+void SimulateBust(BoneConfig cfg, float3 raw_vel, float time, float sub_dt, uint b, inout float3 prev_disp, inout float3 spring_vel) {{
+    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
+    float3 ext_force = -anim_vel * (12.0 * cfg.inertia_scale);
+
+    if (cfg.idle_scale > 0.001) {{
+        float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
+        ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
+    }}
+
+    [unroll]
+    for (int step = 0; step < 4; step++) {{
+        float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
+        spring_vel = clamp(spring_vel + accel * sub_dt, -2.5, 2.5);
+        prev_disp = clamp(prev_disp + spring_vel * sub_dt, -0.035, 0.035);
+    }}
+}}
+
+// 2. 힙 모핑 본(엉덩이) 전용 물리 적분: 절제된 진폭 + 비선형 콜라겐 경화(과도한 압축·인장 방지) + 보행 스윙->상하 리프트 변환
+void SimulateHip(BoneConfig cfg, float3 raw_vel, float time, float sub_dt, uint b, inout float3 prev_disp, inout float3 spring_vel) {{
+    float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.65);
+    float side_sign = (b % 2 == 0) ? 1.0 : -1.0;
+
+    float3 hip_drive = float3(
+        -anim_vel.x * 0.75 + side_sign * anim_vel.y * 0.20,
+        -anim_vel.y * 0.08,
+        -anim_vel.z * 0.85 + anim_vel.y * 0.55
+    );
+    float3 ext_force = hip_drive * (8.5 * cfg.inertia_scale);
+
+    if (cfg.idle_scale > 0.001) {{
+        float sway_t = time * (2.0 * cfg.speed) + float(b) * 1.570796;
+        ext_force += float3(sin(sway_t) * 0.35, 0.0, cos(sway_t) * 0.60) * cfg.idle_scale;
+    }}
+
+    float3 stiff_vec = float3(cfg.stiff_k * 1.35, cfg.stiff_k * 2.4, cfg.stiff_k * 1.35);
+    float3 damp_vec  = float3(cfg.damp_c * 1.25,  cfg.damp_c * 1.8,  cfg.damp_c * 1.25);
+
+    [unroll]
+    for (int step = 0; step < 4; step++) {{
+        float nonlin = 1.0 + dot(prev_disp, prev_disp) * 2200.0;
+        float3 accel = ext_force - (stiff_vec * nonlin) * prev_disp - damp_vec * spring_vel;
+        spring_vel = clamp(spring_vel + accel * sub_dt, float3(-1.5, -0.6, -1.8), float3(1.5, 0.6, 1.8));
+        prev_disp  = clamp(prev_disp + spring_vel * sub_dt, float3(-0.012, -0.002, -0.016), float3(0.012, 0.005, 0.016));
+    }}
+}}
 
 [numthreads(1, 1, 1)]
 void main() {{
@@ -83,7 +144,9 @@ void main() {{
         float  init_flag  = s2.w;
 
         BoneConfig cfg = BONES[b];
-        float3 curr_root = LiveMesh[cfg.root_idx].position;
+        float3 p_root = LiveMesh[cfg.root_idx].position;
+        float3 p_aux  = LiveMesh[cfg.aux_idx].position;
+        float3 curr_root = 0.55 * p_root + 0.45 * p_aux;
         if (isnan(curr_root.x) || isinf(curr_root.x) || length(curr_root) < 1e-4) {{
             curr_root = prev_root;
         }}
@@ -106,20 +169,12 @@ void main() {{
                 }}
 
                 float3 raw_vel = delta / dt;
-                float3 anim_vel = raw_vel / (1.0 + length(raw_vel) * 0.5);
-                float3 ext_force = -anim_vel * (12.0 * cfg.inertia_scale);
-
-                if (cfg.idle_scale > 0.001) {{
-                    float breath_t = time * (2.8 * cfg.speed) + float(b) * 0.785398;
-                    ext_force += float3(0.0, sin(breath_t) * 1.5, cos(breath_t) * 1.0) * cfg.idle_scale;
-                }}
-
                 float sub_dt = dt * 0.25;
-                [unroll]
-                for (int step = 0; step < 4; step++) {{
-                    float3 accel = ext_force - cfg.stiff_k * prev_disp - cfg.damp_c * spring_vel;
-                    spring_vel = clamp(spring_vel + accel * sub_dt, -2.5, 2.5);
-                    prev_disp = clamp(prev_disp + spring_vel * sub_dt, -0.035, 0.035);
+
+                if (cfg.bone_type == TYPE_HIP) {{
+                    SimulateHip(cfg, raw_vel, time, sub_dt, b, prev_disp, spring_vel);
+                }} else {{
+                    SimulateBust(cfg, raw_vel, time, sub_dt, b, prev_disp, spring_vel);
                 }}
 
                 prev_root = curr_root;
@@ -140,16 +195,22 @@ void main() {{
 
 
 
-def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_weight=1.0):
+def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_weight=1.0, bone_types=None):
     active_bones = [it.name for it in getattr(props, "bone_items", []) if it.name.strip()]
     if not active_bones:
         active_bones = ["Physics_Bone_0"]
     num_bones = len(active_bones)
 
     bone_scales = []
+    bone_type_ids = []
     max_str = 0.0
-    for bn in active_bones:
+    for b_i, bn in enumerate(active_bones):
         params = get_bone_params(props, bn)
+        btype_str = params.get("bone_type", "MORPH")
+        btype_id = 1 if btype_str == 'HIP_MORPH' else 0
+        if bone_types and b_i < len(bone_types) and bone_types[b_i] is not None:
+            btype_id = int(bone_types[b_i])
+        bone_type_ids.append(btype_id)
         st = max(0.0, float(params["strength"]))
         pw = float(params["peak_weight"])
         norm = (1.0 / pw) if pw > 0.05 else 1.0
@@ -157,6 +218,7 @@ def export_vertex_physics_hlsl_zzz(export_dir, idx, vertex_count, props, peak_we
         max_str = max(max_str, st)
     global_max_disp = 0.035 * max(0.1, max_str)
     scales_str = ", ".join(f"{s:.4f}" for s in bone_scales)
+    types_str = ", ".join(str(t) for t in bone_type_ids)
 
     hlsl_code = f"""// ============================================================================
 // XXMI Custom Physics - Vertex Skinning Compute Shader (Displacement Pass, N-Bones)
@@ -180,7 +242,26 @@ RWStructuredBuffer<Vertex> Output : register(u5);
 static const uint VERTEX_COUNT = {vertex_count};
 static const uint NUM_BONES = {num_bones};
 static const float BONE_SCALE[NUM_BONES] = {{ {scales_str} }};
+static const uint BONE_TYPE[NUM_BONES] = {{ {types_str} }};
 static const float GLOBAL_MAX_DISP = {global_max_disp:.4f};
+
+float3 ApplyBoneDisplacement(uint b, float3 raw_disp) {{
+    if (BONE_TYPE[b] == 1) {{
+        // 힙 모핑 본: 비선형 탄성 포화(과도한 인장·압축 방지) 및 비압축 체적 보존 둔부 회전호(Incompressible Glute Arc)
+        float raw_len = length(raw_disp);
+        if (raw_len > 1e-5) {{
+            float max_hip_disp = 0.015;
+            float sat_len = max_hip_disp * (raw_len / (raw_len + max_hip_disp * 0.85));
+            raw_disp *= (sat_len / raw_len);
+        }}
+        return float3(
+            raw_disp.x,
+            max(0.0, raw_disp.y * 0.25) + abs(raw_disp.z) * 0.16 - raw_disp.z * 0.08,
+            raw_disp.z
+        );
+    }}
+    return raw_disp;
+}}
 
 [numthreads(64, 1, 1)]
 void main(uint3 threadID : SV_DispatchThreadID) {{
@@ -197,7 +278,7 @@ void main(uint3 threadID : SV_DispatchThreadID) {{
     for (uint b = 0; b < NUM_BONES; b++) {{
         float w = wd.weights[b];
         if (w > 0.0001) {{
-            float3 b_disp = PhysState[b * 3 + 0].xyz * (w * BONE_SCALE[b]);
+            float3 b_disp = ApplyBoneDisplacement(b, PhysState[b * 3 + 0].xyz) * (w * BONE_SCALE[b]);
             total_disp += b_disp;
             sum_w += w;
             max_w = max(max_w, w);

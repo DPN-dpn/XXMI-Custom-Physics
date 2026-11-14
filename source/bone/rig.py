@@ -129,27 +129,40 @@ def get_rig_bone_info(rig):
     return bone_info
 
 
-def sync_slot_bone_to_rig(context, item):
+def sync_slot_bone_to_rig(context, item, is_initial_create=False):
     """
     지정된 물리 본 슬롯 item의 정점 데이터를 기반으로
     XXMI_Physics_Rig 내의 해당 본을 생성하거나 위치/크기를 자동 갱신합니다.
-    본 종류(MORPH, TAIL, HAIR, SKIRT, WING)에 따라 적합한 본 구조를 배치합니다.
+    본 종류(MORPH, TAIL, HAIR, SKIRT, WING) 및 선택 영역의 외향 법선(앞쪽 가슴 -Y / 뒤쪽 엉덩이 +Y)에 따라
+    적합한 본 구조와 방향을 자동 배치합니다.
     """
     data = get_bone_data(item)
     if not data:
         return None
 
-    # 해당 슬롯의 모든 정점 월드 좌표 수집
+    # 해당 슬롯의 모든 정점 월드 좌표 및 외향 표면 법선(World Normal) 수집
     pts = []
     target_objs = []
+    norm_y_sum = 0.0
+    norm_count = 0
+    obj_mid_y_list = []
+
     for oname, vis in data.items():
         obj = bpy.data.objects.get(oname)
         if obj and obj.type == 'MESH' and vis:
             target_objs.append(obj)
             w_arr = world_vertex_positions(obj)
+            if len(w_arr) > 0:
+                obj_mid_y_list.append(0.5 * (float(w_arr[:, 1].min()) + float(w_arr[:, 1].max())))
+            rot_mat = obj.matrix_world.to_3x3()
+            m_verts = obj.data.vertices
             for vi in vis:
                 if vi < len(w_arr):
                     pts.append(w_arr[vi])
+                    wn = rot_mat @ m_verts[vi].normal
+                    if wn.length > 1e-6:
+                        norm_y_sum += float(wn.normalized().y)
+                        norm_count += 1
 
     if len(pts) < 4:
         return None
@@ -168,11 +181,38 @@ def sync_slot_bone_to_rig(context, item):
     r_scale = max(0.2, float(getattr(item, "radius_scale", 1.15)))
     bone_radius = base_radius * r_scale
 
+    btype = getattr(item, "bone_type", 'MORPH')
+
+    # 본 종류(바스트 모핑 -Y vs 힙 모핑 +Y)에 따른 외향 방향 결정
+    if btype == 'HIP_MORPH':
+        is_back_facing = True
+    elif btype == 'MORPH':
+        is_back_facing = False
+    else:
+        avg_norm_y = (norm_y_sum / norm_count) if norm_count > 0 else 0.0
+        mesh_mid_y = (sum(obj_mid_y_list) / len(obj_mid_y_list)) if obj_mid_y_list else 0.0
+        if abs(avg_norm_y) > 0.08:
+            is_back_facing = (avg_norm_y > 0.0)
+        else:
+            is_back_facing = (center.y > mesh_mid_y + 0.01)
+
     dx_out = 0.05 * center.x if abs(center.x) > 0.02 else 0.0
-    head = Vector((center.x, bmax.y, center.z))
-    tail = Vector((center.x + dx_out, bmin.y, center.z))
-    if (tail - head).length < 0.04:
-        tail = Vector((center.x + dx_out, head.y - 0.04, center.z))
+    if is_back_facing:
+        # 힙 모핑 본(엉덩이 등, +Y 외향): 골반 안쪽(bmin.y)에서 엉덩이 끝(bmax.y)으로 배치
+        head = Vector((center.x, bmin.y, center.z))
+        tail = Vector((center.x + dx_out, bmax.y, center.z))
+        if (tail - head).length < 0.04:
+            tail = Vector((center.x + dx_out, head.y + 0.04, center.z))
+    else:
+        # 바스트 모핑 본(가슴 등, -Y 외향): 흉벽 안쪽(bmax.y)에서 가슴 끝(bmin.y)으로 배치
+        head = Vector((center.x, bmax.y, center.z))
+        tail = Vector((center.x + dx_out, bmin.y, center.z))
+        if (tail - head).length < 0.04:
+            tail = Vector((center.x + dx_out, head.y - 0.04, center.z))
+
+    if is_initial_create:
+        from .data import apply_bone_type_defaults
+        apply_bone_type_defaults(item, btype)
 
     was_mode = context.mode
     active_obj = context.view_layer.objects.active
@@ -184,7 +224,6 @@ def sync_slot_bone_to_rig(context, item):
     bpy.ops.object.mode_set(mode='EDIT')
 
     ebones = rig.data.edit_bones
-    btype = getattr(item, "bone_type", 'MORPH')
 
     if btype in {'TAIL', 'HAIR'}:
         # 다관절 체인 (순차 연결 FK 본) 생성

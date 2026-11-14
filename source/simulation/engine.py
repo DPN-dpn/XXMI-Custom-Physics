@@ -19,10 +19,109 @@ _PREVIEW_CACHE = {
 }
 
 
+def _simulate_bust_step(b_st, anim_vel, yaw_rate, roll_rate, side_sign, t, sub_dt, stiff, damp, inertia, idle, speed):
+    """바스트 모핑 본(가슴) 전용 4-Substep ODE 물리 적분 (전후·상하 탄성 + 흉부 호흡)"""
+    bone_vel = Vector((
+        anim_vel.x,
+        anim_vel.y - side_sign * yaw_rate * 0.45,
+        anim_vel.z + side_sign * roll_rate * 0.35,
+    ))
+
+    ext_force = Vector((
+        -bone_vel.x * 12.0 * inertia,
+        -bone_vel.y * 12.0 * inertia,
+        -bone_vel.z * 12.0 * inertia,
+    ))
+
+    if idle > 0.001:
+        breath_phase = t * (2.8 * speed) + (0.0 if side_sign > 0 else 0.785398)
+        ext_force.y += math.sin(breath_phase) * 1.5 * idle
+        ext_force.z += math.cos(breath_phase) * 1.0 * idle
+
+    disp = b_st["disp"]
+    vel = b_st["vel"]
+
+    for _ in range(4):
+        accel = ext_force - disp * stiff - vel * damp
+
+        vel.x = max(-2.5, min(2.5, vel.x + accel.x * sub_dt))
+        vel.y = max(-2.5, min(2.5, vel.y + accel.y * sub_dt))
+        vel.z = max(-2.5, min(2.5, vel.z + accel.z * sub_dt))
+
+        disp.x = max(-0.035, min(0.035, disp.x + vel.x * sub_dt))
+        disp.y = max(-0.035, min(0.035, disp.y + vel.y * sub_dt))
+        disp.z = max(-0.035, min(0.035, disp.z + vel.z * sub_dt))
+
+    b_st["disp"] = disp
+    b_st["vel"] = vel
+    return disp
+
+
+def _simulate_hip_step(b_st, anim_vel, yaw_rate, roll_rate, side_sign, t, sub_dt, stiff, damp, inertia, idle, speed):
+    """
+    힙 모핑 본(엉덩이) 전용 4-Substep ODE 물리 적분:
+    - 바스트보다 절제된 진폭과 비선형 조직 경화(Cubic Tissue Stiffening)로 과도한 출렁임 및 지방 압축/인장 왜곡 차단
+    - 보행/스윙 속도를 절제된 상하·좌우 탄성으로 변환하고, 비압축 체적 보존 곡면 회전호(Incompressible Glute Arc) 적용
+    """
+    stride_y = anim_vel.y - side_sign * yaw_rate * 0.45
+    vert_z = anim_vel.z + side_sign * roll_rate * 0.35
+
+    ext_force = Vector((
+        (-anim_vel.x * 0.75 + side_sign * stride_y * 0.20) * 8.5 * inertia,
+        (-stride_y * 0.08) * 8.5 * inertia,
+        (-vert_z * 0.85 + stride_y * 0.55) * 8.5 * inertia,
+    ))
+
+    if idle > 0.001:
+        sway_phase = t * (2.0 * speed) + (0.0 if side_sign > 0 else 1.570796)
+        ext_force.x += math.sin(sway_phase) * 0.35 * idle
+        ext_force.z += math.cos(sway_phase) * 0.60 * idle
+
+    disp = b_st["disp"]
+    vel = b_st["vel"]
+
+    stiff_base = stiff * 1.35
+    damp_base = damp * 1.25
+    stiff_y = stiff * 2.4
+    damp_y = damp * 1.8
+
+    for _ in range(4):
+        # 인체 지방/피부 비선형 콜라겐 경화(Cubic Stiffening): 일정 변위 이상 늘어나거나 압축되지 않도록 복원력 급증
+        nonlin = 1.0 + disp.length_squared * 2200.0
+        accel_x = ext_force.x - disp.x * (stiff_base * nonlin) - vel.x * damp_base
+        accel_y = ext_force.y - disp.y * (stiff_y * nonlin) - vel.y * damp_y
+        accel_z = ext_force.z - disp.z * (stiff_base * nonlin) - vel.z * damp_base
+
+        vel.x = max(-1.5, min(1.5, vel.x + accel_x * sub_dt))
+        vel.y = max(-0.6, min(0.6, vel.y + accel_y * sub_dt))
+        vel.z = max(-1.8, min(1.8, vel.z + accel_z * sub_dt))
+
+        disp.x = max(-0.012, min(0.012, disp.x + vel.x * sub_dt))
+        disp.y = max(-0.002, min(0.005, disp.y + vel.y * sub_dt))
+        disp.z = max(-0.016, min(0.016, disp.z + vel.z * sub_dt))
+
+    # 소프트 탄성 한계 포화(Soft Tissue Saturation) 및 비압축 체적 보존 곡면 호(Incompressible Glute Arc)
+    raw_len = disp.length
+    sat_disp = disp.copy()
+    if raw_len > 1e-5:
+        max_hip_disp = 0.015
+        sat_len = max_hip_disp * (raw_len / (raw_len + max_hip_disp * 0.85))
+        sat_disp = disp * (sat_len / raw_len)
+
+    arc_disp = Vector((
+        sat_disp.x,
+        max(0.0, sat_disp.y * 0.25) + abs(sat_disp.z) * 0.16 - sat_disp.z * 0.08,
+        sat_disp.z,
+    ))
+    b_st["disp"] = disp
+    b_st["vel"] = vel
+    return arc_disp
+
+
 def _step_preview_ode(t, props, active_bones):
     """
     인게임 CustomPhysicsMotion.hlsl과 100% 동일한 4-Substep Symplectic Euler ODE 적분을 수행하여
-    모든 활성 모핑 본의 물리 변위 dict({bname: Vector})를 반환합니다.
+    본 종류(바스트 모핑 vs 힙 모핑)에 따른 물리 변위 dict({bname: Vector})를 반환합니다.
     """
     state = _PREVIEW_CACHE["ode_state"]
     prev_t = state.get("prev_t")
@@ -72,6 +171,7 @@ def _step_preview_ode(t, props, active_bones):
         })
 
         params = get_bone_params(props, bn)
+        btype = params.get("bone_type", "MORPH")
         speed = max(0.2, float(params["speed"]))
         damping = max(0.1, float(params["damping"]))
         inertia = max(0.0, float(params["inertia"]))
@@ -81,45 +181,18 @@ def _step_preview_ode(t, props, active_bones):
         stiff = omega * omega
         damp = 2.0 * omega * (damping * 0.55)
 
-        # 좌/우 본의 독립 3D 관성력: 몸통 비틀림(Yaw/Roll)에 의한 독립적 차동 가속도 반영
         b_low = bn.lower()
         is_right = ("r" in b_low or "오" in b_low or idx % 2 == 1)
         side_sign = -1.0 if is_right else 1.0
 
-        bone_vel = Vector((
-            anim_vel.x,
-            anim_vel.y - side_sign * yaw_rate * 0.45,
-            anim_vel.z + side_sign * roll_rate * 0.35,
-        ))
-
-        ext_force = Vector((
-            -bone_vel.x * 12.0 * inertia,
-            -bone_vel.y * 12.0 * inertia,
-            -bone_vel.z * 12.0 * inertia,
-        ))
-
-        if idle > 0.001:
-            breath_phase = t * (2.8 * speed) + (0.10 if is_right else 0.0)
-            ext_force.z += math.sin(breath_phase) * 1.5 * idle
-            ext_force.y += math.cos(breath_phase) * 1.0 * idle
-
-        disp = b_st["disp"]
-        vel = b_st["vel"]
-
-        for _ in range(4):
-            accel = ext_force - disp * stiff - vel * damp
-
-            vel.x = max(-2.5, min(2.5, vel.x + accel.x * sub_dt))
-            vel.y = max(-2.5, min(2.5, vel.y + accel.y * sub_dt))
-            vel.z = max(-2.5, min(2.5, vel.z + accel.z * sub_dt))
-
-            disp.x = max(-0.035, min(0.035, disp.x + vel.x * sub_dt))
-            disp.y = max(-0.035, min(0.035, disp.y + vel.y * sub_dt))
-            disp.z = max(-0.035, min(0.035, disp.z + vel.z * sub_dt))
-
-        b_st["disp"] = disp
-        b_st["vel"] = vel
-        disps_out[bn] = disp
+        if btype == 'HIP_MORPH':
+            disps_out[bn] = _simulate_hip_step(
+                b_st, anim_vel, yaw_rate, roll_rate, side_sign, t, sub_dt, stiff, damp, inertia, idle, speed
+            )
+        else:
+            disps_out[bn] = _simulate_bust_step(
+                b_st, anim_vel, yaw_rate, roll_rate, side_sign, t, sub_dt, stiff, damp, inertia, idle, speed
+            )
 
     return disps_out
 

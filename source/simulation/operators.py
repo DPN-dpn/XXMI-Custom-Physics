@@ -217,36 +217,23 @@ class XXMI_OT_copy_physics_params_to_all(bpy.types.Operator):
 class XXMI_OT_reset_physics_params(bpy.types.Operator):
     bl_idname = "object.xxmi_reset_physics_params"
     bl_label = "기본값으로 초기화"
-    bl_description = "가중치 및 물리 파라미터를 권장 기본값으로 되돌립니다"
+    bl_description = "현재 선택된 본 종류(바스트 모핑 / 힙 모핑)에 맞는 권장 기본값으로 가중치 및 물리 파라미터를 초기화합니다"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
+        from ..bone.data import apply_bone_type_defaults
         props = context.scene.xxmi_custom_physics_props
-        props.peak_weight = 0.40
-        props.falloff_power = 1.0
-        props.smooth_iterations = 2
-        props.lock_registered_verts = True
-
-        props.strength = 1.0
-        props.speed = 1.1
-        props.damping = 0.85
-        props.inertia = 1.2
-        props.idle_motion = 0.4
 
         if 0 <= props.bone_item_index < len(props.bone_items):
             curr = props.bone_items[props.bone_item_index]
-            curr.peak_weight = 0.40
-            curr.falloff_power = 1.0
-            curr.smooth_iterations = 2
-            curr.lock_registered_verts = True
-
-            curr.strength = 1.0
-            curr.speed = 1.1
-            curr.damping = 0.85
-            curr.inertia = 1.2
-            curr.idle_motion = 0.4
-            self.report({'INFO'}, f"본 '{curr.name}'의 가중치 및 물리 파라미터가 기본값으로 초기화되었습니다.")
+            btype = getattr(curr, "bone_type", 'MORPH')
+            apply_bone_type_defaults(curr, btype)
+            apply_bone_type_defaults(props, btype)
+            type_label = "힙 모핑" if btype == 'HIP_MORPH' else "바스트 모핑"
+            self.report({'INFO'}, f"본 '{curr.name}'의 가중치 및 물리 파라미터가 [{type_label}] 기본값으로 초기화되었습니다.")
         else:
+            btype = getattr(props, "bone_type", 'MORPH')
+            apply_bone_type_defaults(props, btype)
             self.report({'INFO'}, "가중치 및 물리 파라미터가 기본값으로 초기화되었습니다.")
         return {'FINISHED'}
 
